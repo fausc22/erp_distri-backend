@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REMITO - DISTRIBUIDORA VERTI-MAR</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #ffffff;
+        }
+        .container {
+            width: 800px;
+            margin: auto;
+            padding: 20px;
+            border: 1px solid #000;
+            box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 30px;
+        }
+
+
+        .header2 {
+            text-align: center;
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .header3 {
+            text-align: center;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+
+        .info {
+            font-size: 14px;
+            line-height: 1.6;
+            border-bottom: 1px solid #000;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        .info p {
+            margin: 5px 0;
+        }
+
+        .info2 {
+            text-align: right;
+            font-size: 14px;
+            line-height: 1.6;
+            border-bottom: 1px solid #000;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        .info2 p {
+            margin: 5px 0;
+        }
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .table th, .table td {
+            border: 1px solid #000;
+            padding: 10px;
+            text-align: left;
+        }
+        .table th {
+            background-color: #eee;
+        }
+        .footer {
+            margin-top: 20px;
+            text-align: center;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">DISTRIBUIDORA VERTI-MAR SRL</div>
+        <div class="header2">REMITO</div>
+        <div class="header3">DOCUMENTO NO VALIDO COMO FACTURA</div>
+
+
+        <div class="info2">
+            <h2><strong>Fecha:</strong> {{fecha}}</h2>
+            <p><strong>DISTRIBUIDORA VERTI-MAR SRL</strong></p>
+            <p><strong>Direccion: </strong>Calle 31 N 1555</strong></p>
+            <p><strong>Telefono: </strong>+54-2302-651250</p>
+            <p><strong>Condicion frente al IVA: </strong>RESPONSABLE INSCRIPTO</p>
+        </div>
+
+        <div class="info">
+            <h2><strong>DESTINATARIO</strong></h2>
+            <p><strong>Señor/es:</strong> {{cliente_nombre}}</p>
+            <p><strong>CUIT:</strong> {{cliente_cuit}}</p>
+            <p><strong>Categoría IVA:</strong> {{cliente_cativa}}</p>
+            
+            
+            
+            
+            
+        </div>
+
+        <div class="info">
+            
+            
+            
+            <p><strong>Direccion:</strong> {{cliente_direccion}}</p>
+            <p><strong>Localidad:</strong> {{cliente_ciudad}}</p>
+            <p><strong>Provincia:</strong> {{cliente_provincia}}</p>
+            <p><strong>Telefono:</strong> {{cliente_telefono}}</p>
+            
+            
+        </div>
+
+        
+            
+
+        
+        
+        <h2 style="text-align: center;">Remitimos a Ud(s) lo siguiente</h2>
+        <table class="table">
+            <tr>
+                <th style="width: 60%;">Producto</th>
+                <th style="width: 25%;">Unidad</th>
+                <th style="width: 15%;">Cantidad</th>
+            </tr>
+            {{items}}
+        </table>
+        
+        
+
+        <div class="footer">
+            <p>Recibí conforme las mercaderías en las cantidades indicadas</p>
+            <p>__________________________</p>
+            <p>Firma del Cliente</p>
+        </div>
+    </div>
+</body>
+</html>
