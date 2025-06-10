@@ -12,6 +12,6 @@ router.post('/nuevo-gasto', comprasController.nuevoGasto);
 router.get('/obtener-compras', comprasController.obtenerCompras);
 router.get('/obtener-productos-compra/:compraId', comprasController.obtenerProductosCompra);
 
-
+router.post('/registrarCompra', comprasController.registrarCompraConStock);
 
 module.exports = router;

@@ -5,7 +5,7 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 const puppeteer = require("puppeteer");
 const multer = require('multer');
-const stockMiddleware = require('../middlewares/stockMiddleware');
+
 
 
 
@@ -51,6 +51,58 @@ const buscarProducto = (req, res) => {
 
 // ========== FUNCIONES DE PEDIDOS ==========
 
+/**
+ * Función genérica para actualizar stock de productos
+ * @param {number} productoId - ID del producto
+ * @param {number} cantidadCambio - Cantidad a sumar/restar (positivo suma, negativo resta)
+ * @param {string} motivo - Motivo del cambio para logs
+ * @returns {Promise} - Promesa que resuelve cuando se actualiza el stock
+ */
+const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido') => {
+    return new Promise((resolve, reject) => {
+        // Primero verificar que el producto existe y obtener stock actual
+        const queryVerificar = `SELECT id, stock_actual FROM productos WHERE id = ?`;
+        
+        db.query(queryVerificar, [productoId], (err, results) => {
+            if (err) {
+                console.error(`Error al verificar producto ${productoId}:`, err);
+                return reject(err);
+            }
+            
+            if (results.length === 0) {
+                console.error(`Producto ${productoId} no encontrado`);
+                return reject(new Error(`Producto ${productoId} no encontrado`));
+            }
+            
+            const stockActual = results[0].stock_actual;
+            const nuevoStock = stockActual + cantidadCambio;
+            
+            // Validar que el stock no quede negativo (solo para disminuciones)
+            if (cantidadCambio < 0 && nuevoStock < 0) {
+                console.error(`Stock insuficiente para producto ${productoId}. Stock actual: ${stockActual}, intentando restar: ${Math.abs(cantidadCambio)}`);
+                return reject(new Error(`Stock insuficiente. Stock disponible: ${stockActual}`));
+            }
+            
+            // Actualizar el stock
+            const queryActualizar = `UPDATE productos SET stock_actual = ? WHERE id = ?`;
+            
+            db.query(queryActualizar, [nuevoStock, productoId], (err, result) => {
+                if (err) {
+                    console.error(`Error al actualizar stock del producto ${productoId}:`, err);
+                    return reject(err);
+                }
+                
+                console.log(`✅ Stock actualizado - Producto: ${productoId}, Cambio: ${cantidadCambio}, Stock anterior: ${stockActual}, Stock nuevo: ${nuevoStock}, Motivo: ${motivo}`);
+                resolve(result);
+            });
+        });
+    });
+};
+
+
+
+
+
 // Función para registrar un pedido en la tabla principal
 const registrarPedido = (pedidoData, callback) => {
     const { 
@@ -91,7 +143,7 @@ const insertarProductosPedido = async (pedidoId, productos) => {
     `;
 
     try {
-        await Promise.all(productos.map(async producto => { // ¡Nota el 'async' aquí!
+        await Promise.all(productos.map(async producto => {
             const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal } = producto;
             const productoValues = [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal];
 
@@ -106,18 +158,15 @@ const insertarProductosPedido = async (pedidoId, productos) => {
                 });
             });
 
-            
-            await stockMiddleware.actualizarStock(id, -cantidad, 'pedido'); 
-                
-
+            // 2. Actualizar stock (restar cantidad porque es un pedido)
+            await actualizarStockProducto(id, -cantidad, 'nuevo_pedido');
         }));
         return null; // Si todo salió bien
     } catch (error) {
         return error;
     }
-
-     
 };
+
 
 // Endpoint para registrar nuevo pedido
 const nuevoPedido = async (req, res) => {
@@ -239,7 +288,7 @@ const obtenerDetallePedido = (req, res) => {
 
 
 // Actualizar estado de un pedido
-const actualizarEstadoPedido = (req, res) => {
+const actualizarEstadoPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { estado } = req.body;
     
@@ -252,47 +301,178 @@ const actualizarEstadoPedido = (req, res) => {
         });
     }
     
-    const query = `
-        UPDATE pedidos
-        SET estado = ?
-        WHERE id = ?
-    `;
+    try {
+        // 1. Obtener el estado actual del pedido
+        const queryEstadoActual = `SELECT estado FROM pedidos WHERE id = ?`;
+        
+        const estadoActual = await new Promise((resolve, reject) => {
+            db.query(queryEstadoActual, [pedidoId], (err, results) => {
+                if (err) {
+                    console.error('Error al obtener estado actual:', err);
+                    return reject(err);
+                }
+                if (results.length === 0) {
+                    return reject(new Error('Pedido no encontrado'));
+                }
+                resolve(results[0].estado);
+            });
+        });
 
-    db.query(query, [estado, pedidoId], (err, result) => {
-        if (err) {
-            console.error('Error al actualizar el estado del pedido:', err);
-            return res.status(500).json({ success: false, message: 'Error al actualizar el estado del pedido' });
+        // 2. Actualizar el estado del pedido
+        const queryActualizar = `UPDATE pedidos SET estado = ? WHERE id = ?`;
+
+        const result = await new Promise((resolve, reject) => {
+            db.query(queryActualizar, [estado, pedidoId], (err, result) => {
+                if (err) {
+                    console.error('Error al actualizar el estado del pedido:', err);
+                    return reject(err);
+                }
+                resolve(result);
+            });
+        });
+
+        // 3. Manejar cambios de stock según el cambio de estado
+        if (estadoActual !== 'Anulado' && estado === 'Anulado') {
+            // Si se anula un pedido que no estaba anulado, restaurar stock
+            const queryObtenerProductos = `
+                SELECT producto_id, cantidad 
+                FROM pedidos_cont 
+                WHERE pedido_id = ?
+            `;
+            
+            const productosDelPedido = await new Promise((resolve, reject) => {
+                db.query(queryObtenerProductos, [pedidoId], (err, results) => {
+                    if (err) {
+                        console.error('Error al obtener productos del pedido:', err);
+                        return reject(err);
+                    }
+                    resolve(results);
+                });
+            });
+
+            // Restaurar stock
+            if (productosDelPedido.length > 0) {
+                await Promise.all(productosDelPedido.map(async producto => {
+                    await actualizarStockProducto(producto.producto_id, producto.cantidad, 'anular_pedido');
+                }));
+            }
+        } else if (estadoActual === 'Anulado' && estado !== 'Anulado') {
+            // Si se reactiva un pedido anulado, volver a restar stock
+            const queryObtenerProductos = `
+                SELECT producto_id, cantidad 
+                FROM pedidos_cont 
+                WHERE pedido_id = ?
+            `;
+            
+            const productosDelPedido = await new Promise((resolve, reject) => {
+                db.query(queryObtenerProductos, [pedidoId], (err, results) => {
+                    if (err) {
+                        console.error('Error al obtener productos del pedido:', err);
+                        return reject(err);
+                    }
+                    resolve(results);
+                });
+            });
+
+            // Restar stock nuevamente
+            if (productosDelPedido.length > 0) {
+                await Promise.all(productosDelPedido.map(async producto => {
+                    await actualizarStockProducto(producto.producto_id, -producto.cantidad, 'reactivar_pedido');
+                }));
+            }
+        }
+
+        res.json({ 
+            success: true, 
+            message: 'Estado del pedido actualizado correctamente y stock ajustado' 
+        });
+
+    } catch (error) {
+        console.error('Error en actualizarEstadoPedido:', error);
+        
+        if (error.message.includes('Stock insuficiente')) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `No se puede reactivar el pedido: ${error.message}` 
+            });
         }
         
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        if (error.message.includes('no encontrado')) {
+            return res.status(404).json({ 
+                success: false, 
+                message: error.message 
+            });
         }
         
-        res.json({ success: true, message: 'Estado del pedido actualizado correctamente' });
-    });
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error al actualizar el estado del pedido' 
+        });
+    }
 };
 
 
 // Eliminar un pedido (elimina también los productos por CASCADE)
-const eliminarPedido = (req, res) => {
+const eliminarPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     
-    const query = `
-        DELETE FROM pedidos WHERE id = ?
-    `;
+    try {
+        // 1. Obtener todos los productos del pedido antes de eliminarlo
+        const queryObtenerProductos = `
+            SELECT producto_id, cantidad 
+            FROM pedidos_cont 
+            WHERE pedido_id = ?
+        `;
+        
+        const productosDelPedido = await new Promise((resolve, reject) => {
+            db.query(queryObtenerProductos, [pedidoId], (err, results) => {
+                if (err) {
+                    console.error('Error al obtener productos del pedido:', err);
+                    return reject(err);
+                }
+                resolve(results);
+            });
+        });
 
-    db.query(query, [pedidoId], (err, result) => {
-        if (err) {
-            console.error('Error al eliminar el pedido:', err);
-            return res.status(500).json({ success: false, message: 'Error al eliminar el pedido' });
-        }
-        
+        // 2. Eliminar el pedido (los productos se eliminan por CASCADE)
+        const queryEliminarPedido = `DELETE FROM pedidos WHERE id = ?`;
+
+        const result = await new Promise((resolve, reject) => {
+            db.query(queryEliminarPedido, [pedidoId], (err, result) => {
+                if (err) {
+                    console.error('Error al eliminar el pedido:', err);
+                    return reject(err);
+                }
+                resolve(result);
+            });
+        });
+
         if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Pedido no encontrado' 
+            });
         }
-        
-        res.json({ success: true, message: 'Pedido eliminado correctamente' });
-    });
+
+        // 3. Restaurar stock de todos los productos
+        if (productosDelPedido.length > 0) {
+            await Promise.all(productosDelPedido.map(async producto => {
+                await actualizarStockProducto(producto.producto_id, producto.cantidad, 'eliminar_pedido_completo');
+            }));
+        }
+
+        res.json({ 
+            success: true, 
+            message: 'Pedido eliminado correctamente y stock restaurado para todos los productos' 
+        });
+
+    } catch (error) {
+        console.error('Error en eliminarPedido:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error al eliminar el pedido' 
+        });
+    }
 };
 
 
@@ -365,67 +545,207 @@ const actualizarObservacionesPedido = (req, res) => {
 
 
 // Agregar producto a un pedido existente
-const agregarProductoPedidoExistente = (req, res) => {
+const agregarProductoPedidoExistente = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal } = req.body;
+
+    // Validaciones básicas
+    if (!producto_id || !cantidad || cantidad <= 0) {
+        return res.status(400).json({ 
+            success: false, 
+            message: "Producto ID y cantidad son requeridos, y la cantidad debe ser mayor a 0" 
+        });
+    }
 
     const query = `
         INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal], (err, results) => {
-        if (err) {
-            console.error('Error al insertar el producto:', err);
-            return res.status(500).json({ success: false, message: "Error al insertar el producto" });
+    try {
+        // 1. Insertar el producto en pedidos_cont
+        const insertResult = await new Promise((resolve, reject) => {
+            db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal], (err, results) => {
+                if (err) {
+                    console.error('Error al insertar el producto:', err);
+                    return reject(err);
+                }
+                resolve(results);
+            });
+        });
+
+        // 2. Actualizar stock (restar la cantidad)
+        await actualizarStockProducto(producto_id, -cantidad, 'agregar_producto_pedido');
+
+        res.json({ 
+            success: true, 
+            message: "Producto agregado correctamente y stock actualizado", 
+            data: insertResult 
+        });
+
+    } catch (error) {
+        console.error('Error en agregarProductoPedidoExistente:', error);
+        
+        // Si el error es de stock insuficiente, devolver mensaje específico
+        if (error.message.includes('Stock insuficiente')) {
+            return res.status(400).json({ 
+                success: false, 
+                message: error.message 
+            });
         }
-        res.json({ success: true, message: "Producto agregado correctamente", data: results });
-    });
+        
+        res.status(500).json({ 
+            success: false, 
+            message: "Error al agregar el producto al pedido" 
+        });
+    }
 };
 
 // Actualizar producto de un pedido
-const actualizarProductoPedido = (req, res) => {
+const actualizarProductoPedido = async (req, res) => {
     const { cantidad, precio, iva, subtotal } = req.body;
     const productId = req.params.productId;
 
-    const query = `
-        UPDATE pedidos_cont SET cantidad = ?, precio = ?, IVA = ?, subtotal = ? WHERE id = ? 
-    `;
+    // Validar que la cantidad sea válida
+    if (!cantidad || cantidad <= 0) {
+        return res.status(400).json({ 
+            success: false, 
+            message: "La cantidad debe ser mayor a 0" 
+        });
+    }
 
-    db.query(query, [cantidad, precio, iva, subtotal, productId], (err, result) => {
-        if (err) {
-            console.error('Error al actualizar el producto:', err);
-            return res.status(500).json({ success: false, message: 'Error al actualizar el producto' });
+    try {
+        // 1. Obtener la cantidad actual del producto en el pedido
+        const queryObtenerCantidad = `SELECT producto_id, cantidad FROM pedidos_cont WHERE id = ?`;
+        
+        const datosActuales = await new Promise((resolve, reject) => {
+            db.query(queryObtenerCantidad, [productId], (err, results) => {
+                if (err) {
+                    console.error('Error al obtener cantidad actual:', err);
+                    return reject(err);
+                }
+                if (results.length === 0) {
+                    return reject(new Error('Producto en pedido no encontrado'));
+                }
+                resolve(results[0]);
+            });
+        });
+
+        const cantidadAnterior = datosActuales.cantidad;
+        const productoId = datosActuales.producto_id;
+        const diferenciaCantidad = cantidad - cantidadAnterior;
+
+        // 2. Actualizar el producto en pedidos_cont
+        const queryActualizar = `
+            UPDATE pedidos_cont SET cantidad = ?, precio = ?, IVA = ?, subtotal = ? WHERE id = ?
+        `;
+
+        await new Promise((resolve, reject) => {
+            db.query(queryActualizar, [cantidad, precio, iva, subtotal, productId], (err, result) => {
+                if (err) {
+                    console.error('Error al actualizar el producto:', err);
+                    return reject(err);
+                }
+                if (result.affectedRows === 0) {
+                    return reject(new Error('Producto no encontrado'));
+                }
+                resolve(result);
+            });
+        });
+
+        // 3. Ajustar stock si hay diferencia en cantidad
+        if (diferenciaCantidad !== 0) {
+            // Si aumentó la cantidad, restar más stock (diferencia negativa)
+            // Si disminuyó la cantidad, devolver stock (diferencia positiva)
+            await actualizarStockProducto(productoId, -diferenciaCantidad, 'actualizar_cantidad_pedido');
+        }
+
+        res.json({ 
+            success: true, 
+            message: 'Producto actualizado correctamente y stock ajustado' 
+        });
+
+    } catch (error) {
+        console.error('Error en actualizarProductoPedido:', error);
+        
+        if (error.message.includes('Stock insuficiente')) {
+            return res.status(400).json({ 
+                success: false, 
+                message: error.message 
+            });
         }
         
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+        if (error.message.includes('no encontrado')) {
+            return res.status(404).json({ 
+                success: false, 
+                message: error.message 
+            });
         }
         
-        res.json({ success: true, message: 'Producto actualizado correctamente' });
-    });
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error al actualizar el producto' 
+        });
+    }
 };
 
 // Eliminar producto de un pedido
-const eliminarProductoPedido = (req, res) => {
+const eliminarProductoPedido = async (req, res) => {
     const productId = req.params.productId;
 
-    const query = `
-        DELETE FROM pedidos_cont WHERE id = ? 
-    `;
+    try {
+        // 1. Obtener datos del producto antes de eliminarlo
+        const queryObtenerDatos = `SELECT producto_id, cantidad FROM pedidos_cont WHERE id = ?`;
+        
+        const datosProducto = await new Promise((resolve, reject) => {
+            db.query(queryObtenerDatos, [productId], (err, results) => {
+                if (err) {
+                    console.error('Error al obtener datos del producto:', err);
+                    return reject(err);
+                }
+                if (results.length === 0) {
+                    return reject(new Error('Producto en pedido no encontrado'));
+                }
+                resolve(results[0]);
+            });
+        });
 
-    db.query(query, [productId], (err, result) => {
-        if (err) {
-            console.error('Error al eliminar el producto:', err);
-            return res.status(500).json({ success: false, message: 'Error al eliminar el producto' });
+        // 2. Eliminar el producto del pedido
+        const queryEliminar = `DELETE FROM pedidos_cont WHERE id = ?`;
+
+        await new Promise((resolve, reject) => {
+            db.query(queryEliminar, [productId], (err, result) => {
+                if (err) {
+                    console.error('Error al eliminar el producto:', err);
+                    return reject(err);
+                }
+                resolve(result);
+            });
+        });
+
+        // 3. Restaurar stock (sumar la cantidad que se había restado)
+        await actualizarStockProducto(datosProducto.producto_id, datosProducto.cantidad, 'eliminar_producto_pedido');
+
+        res.json({ 
+            success: true, 
+            message: 'Producto eliminado correctamente y stock restaurado' 
+        });
+
+    } catch (error) {
+        console.error('Error en eliminarProductoPedido:', error);
+        
+        if (error.message.includes('no encontrado')) {
+            return res.status(404).json({ 
+                success: false, 
+                message: error.message 
+            });
         }
         
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Producto no encontrado' });
-        }
-        
-        res.json({ success: true, message: 'Producto eliminado correctamente' });
-    });
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error al eliminar el producto' 
+        });
+    }
 };
 
 // Actualizar totales del pedido
