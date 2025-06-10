@@ -13,6 +13,9 @@ const app = express();
 
 
 
+
+
+//controladores routes
 const personasRoutes = require('./routes/personasRouter');
 const authRoutes = require('./routes/authRoutes');
 const ventasRoutes = require('./routes/ventasRoutes'); 
@@ -21,7 +24,8 @@ const empleadosRoutes = require('./routes/empleadosRoutes');
 const productosRoutes = require('./routes/productosRoutes'); 
 const finanzasRoutes = require('./routes/finanzasRoutes'); 
 const comprasRoutes = require('./routes/comprasRoutes'); 
- 
+ const auditoriaRoutes = require('./routes/auditoriaRoutes');
+
 //pongo los fronts BIEN
 const allowedOrigins = ['http://localhost:3000', 'https://distri-vertimar.vercel.app'];
 
@@ -40,7 +44,10 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
+
 // Configurar middleware para parsear JSON
+//middlewares
+const { middlewareAuditoria } = require('./middlewares/auditoriaMiddleware');
 app.use(express.json());
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
@@ -55,6 +62,7 @@ app.use('/pedidos', pedidosRoutes);
 app.use('/finanzas', finanzasRoutes); 
 app.use('/ventas', ventasRoutes); 
 app.use('/compras', comprasRoutes);
+app.use('/auditoria', auditoriaRoutes);
 
 
 // Iniciar el servidor
