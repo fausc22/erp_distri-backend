@@ -1,4 +1,4 @@
-// controllers/empleadosController.js
+
 const bcrypt = require('bcryptjs');
 const db = require('./dbPromise');
 

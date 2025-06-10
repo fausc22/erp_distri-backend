@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nota de Pedido</title>
+    <!--
+        Tailwind CSS CDN for quick styling.
+        It provides utility classes to build designs directly in your markup.
+    -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /*
+            Custom font 'Inter' for a clean and modern look,
+            falling back to common sans-serif fonts if Inter is not available.
+        */
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* Additional styles for specific elements not easily covered by Tailwind */
+        .page-container {
+            max-width: 210mm; /* A4 width */
+            min-height: 297mm; /* A4 height */
+            margin: 20px auto; /* Center the document with some margin */
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); /* Subtle shadow for a document feel */
+            background-color: white;
+            padding: 20px; /* Internal padding for content */
+        }
+
+        .header-section {
+            border-bottom: 1px solid #e5e7eb; /* Light gray border at the bottom */
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+
+        .details-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); /* Responsive grid for details */
+            gap: 10px;
+        }
+
+        /*
+            We use a table structure for product rows when dynamically generated.
+            The Tailwind classes below are for the table elements.
+        */
+        .product-table table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .product-table th, .product-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+
+        .product-table th {
+            font-weight: bold;
+            background-color: #f3f4f6;
+            border-top: 2px solid #e5e7eb;
+            border-bottom: 2px solid #e5e7eb;
+            color: #4a5568; /* Tailwind gray-700 equivalent */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 sm:p-6 md:p-8">
+    <div class="page-container rounded-lg">
+        <!-- Encabezado de la Distribuidora -->
+        <div class="header-section text-center">
+            <h1 class="text-4xl sm:text-5xl font-bold text-gray-800 mb-2 rounded-md p-2">
+                DISTRIBUIDORA VERTI-MAR SRL
+            </h1>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-sm text-gray-600 mt-4">
+                <p><strong>Dirección:</strong> 31 1555</p>
+                <p><strong>E-mail:</strong> vertimar@hotmail.com</p>
+                <p><strong>CUIT:</strong> 30714525030</p>
+                <p><strong>Ing. Brutos:</strong> 251491/4</p>
+                <p><strong>Inicio actividades:</strong> 01/02/2016</p>
+                <p><strong>IVA:</strong> Responsable Inscripto</p>
+            </div>
+        </div>
+
+        <!-- Sección de Nota de Pedido -->
+        <div class="main-content mb-8">
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6">
+                <h2 class="text-6xl font-extrabold text-blue-600 mb-4 sm:mb-0">NP</h2>
+                <div class="text-right text-lg">
+                    <p class="text-xl font-semibold text-gray-700">Nota de Pedido</p>
+                    <p><strong>Fecha:</strong> <span id="fecha">{{fecha}}</span></p>
+                    <p><strong>N:</strong> <span id="id">{{id}}</span></p>
+                </div>
+            </div>
+
+            <!-- Datos del Cliente y Vendedor -->
+            <div class="details-grid text-gray-700 text-lg mb-6">
+                <p><strong>Persona:</strong> <span id="cliente_nombre">{{cliente_nombre}}</span></p>
+                <p><strong>Dirección:</strong> <span id="cliente_direccion">{{cliente_direccion}}</span></p>
+                <p><strong>Teléfonos:</strong> <span id="cliente_telefono">{{cliente_telefono}}</span></p>
+                <p><strong>Vendedor:</strong> <span id="empleado_nombre">{{empleado_nombre}}</span></p>
+            </div>
+
+            <!-- Tabla de Productos: Este es el área que Node.js llenará dinámicamente -->
+            <div class="product-table rounded-lg overflow-hidden border border-gray-200">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="w-1/12">Código</th>
+                            <th class="w-4/12">Producto</th>
+                            <th class="w-3/12">Descripción</th>
+                            <th class="w-2/12">Unidad</th>
+                            <th class="w-2/12 text-right">Cantidad</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{items}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Pie de página o sección de notas adicionales si es necesario -->
+        <div class="footer-section text-center text-gray-500 text-sm mt-8">
+            <p>Gracias por su preferencia.</p>
+        </div>
+    </div>
+
+    
+</body>
+</html>

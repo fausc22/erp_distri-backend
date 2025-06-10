@@ -15,10 +15,12 @@ const app = express();
 
 const personasRoutes = require('./routes/personasRouter');
 const authRoutes = require('./routes/authRoutes');
-
-
+const ventasRoutes = require('./routes/ventasRoutes'); 
+const pedidosRoutes = require('./routes/pedidosRoutes');
 const empleadosRoutes = require('./routes/empleadosRoutes');
-
+const productosRoutes = require('./routes/productosRoutes'); 
+const finanzasRoutes = require('./routes/finanzasRoutes'); 
+const comprasRoutes = require('./routes/comprasRoutes'); 
  
 //pongo los fronts BIEN
 const allowedOrigins = ['http://localhost:3000', 'https://distri-vertimar.vercel.app'];
@@ -47,10 +49,12 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use('/personas', personasRoutes);
 app.use('/auth', authRoutes);
-
-
+app.use('/productos', productosRoutes); 
 app.use('/empleados', empleadosRoutes);
-
+app.use('/pedidos', pedidosRoutes);
+app.use('/finanzas', finanzasRoutes); 
+app.use('/ventas', ventasRoutes); 
+app.use('/compras', comprasRoutes);
 
 
 // Iniciar el servidor
