@@ -1,6 +1,6 @@
-
 const bcrypt = require('bcryptjs');
 const db = require('./dbPromise');
+const { auditarOperacion, obtenerDatosAnteriores, limpiarDatosSensibles } = require('../middlewares/auditoriaMiddleware');
 
 // Crear nuevo empleado
 exports.crearEmpleado = async (req, res) => {
@@ -77,6 +77,28 @@ exports.crearEmpleado = async (req, res) => {
             rol
         ]);
 
+        // Preparar datos para auditoría (sin la contraseña)
+        const datosNuevos = limpiarDatosSensibles({
+            id: result.insertId,
+            nombre: nombre.trim(),
+            apellido: apellido.trim(),
+            dni: dni?.trim() || null,
+            telefono: telefono?.trim() || null,
+            email: email?.trim() || null,
+            usuario: usuario.trim(),
+            password: hashedPassword,
+            rol
+        });
+
+        // Auditar creación del empleado
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'empleados',
+            registroId: result.insertId,
+            datosNuevos,
+            detallesAdicionales: `Empleado creado: ${nombre} ${apellido} - Rol: ${rol}`
+        });
+
         res.status(201).json({ 
             message: 'Empleado creado exitosamente',
             id: result.insertId
@@ -84,6 +106,15 @@ exports.crearEmpleado = async (req, res) => {
 
     } catch (error) {
         console.error('Error al crear empleado:', error);
+        
+        // Auditar error en creación
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'empleados',
+            detallesAdicionales: `Error al crear empleado: ${error.message}`,
+            datosNuevos: limpiarDatosSensibles(req.body)
+        });
+        
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };
@@ -157,12 +188,9 @@ exports.actualizarEmpleado = async (req, res) => {
             });
         }
 
-        // Verificar que el empleado existe
-        const [empleadoExistente] = await db.execute(
-            'SELECT id FROM empleados WHERE id = ?', 
-            [id]
-        );
-        if (empleadoExistente.length === 0) {
+        // Obtener datos anteriores para auditoría
+        const datosAnteriores = await obtenerDatosAnteriores('empleados', id);
+        if (!datosAnteriores) {
             return res.status(404).json({ message: 'Empleado no encontrado' });
         }
 
@@ -188,6 +216,15 @@ exports.actualizarEmpleado = async (req, res) => {
 
         let query;
         let params;
+        let datosNuevos = {
+            nombre: nombre.trim(),
+            apellido: apellido.trim(),
+            dni: dni?.trim() || null,
+            telefono: telefono?.trim() || null,
+            email: email?.trim() || null,
+            usuario: usuario.trim(),
+            rol
+        };
 
         // Si se proporciona nueva contraseña, actualizarla también
         if (password && password.trim().length > 0) {
@@ -198,6 +235,7 @@ exports.actualizarEmpleado = async (req, res) => {
             }
 
             const hashedPassword = await bcrypt.hash(password, 10);
+            datosNuevos.password = hashedPassword;
             
             query = `
                 UPDATE empleados 
@@ -236,10 +274,30 @@ exports.actualizarEmpleado = async (req, res) => {
 
         await db.execute(query, params);
 
+        // Auditar actualización del empleado
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'empleados',
+            registroId: id,
+            datosAnteriores: limpiarDatosSensibles(datosAnteriores),
+            datosNuevos: limpiarDatosSensibles(datosNuevos),
+            detallesAdicionales: `Empleado actualizado: ${nombre} ${apellido}${password ? ' - Contraseña cambiada' : ''}`
+        });
+
         res.json({ message: 'Empleado actualizado exitosamente' });
 
     } catch (error) {
         console.error('Error al actualizar empleado:', error);
+        
+        // Auditar error en actualización
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'empleados',
+            registroId: req.body.id,
+            detallesAdicionales: `Error al actualizar empleado: ${error.message}`,
+            datosNuevos: limpiarDatosSensibles(req.body)
+        });
+        
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };
@@ -294,6 +352,12 @@ exports.desactivarEmpleado = async (req, res) => {
             return res.status(400).json({ message: 'No puedes desactivar tu propia cuenta' });
         }
 
+        // Obtener datos anteriores para auditoría
+        const datosAnteriores = await obtenerDatosAnteriores('empleados', id);
+        if (!datosAnteriores) {
+            return res.status(404).json({ message: 'Empleado no encontrado' });
+        }
+
         const [result] = await db.execute(
             'UPDATE empleados SET activo = 0 WHERE id = ?',
             [id]
@@ -303,10 +367,29 @@ exports.desactivarEmpleado = async (req, res) => {
             return res.status(404).json({ message: 'Empleado no encontrado' });
         }
 
+        // Auditar desactivación del empleado
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'empleados',
+            registroId: id,
+            datosAnteriores: limpiarDatosSensibles(datosAnteriores),
+            datosNuevos: limpiarDatosSensibles({ ...datosAnteriores, activo: 0 }),
+            detallesAdicionales: `Empleado desactivado: ${datosAnteriores.nombre} ${datosAnteriores.apellido}`
+        });
+
         res.json({ message: 'Empleado desactivado exitosamente' });
 
     } catch (error) {
         console.error('Error al desactivar empleado:', error);
+        
+        // Auditar error en desactivación
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'empleados',
+            registroId: req.params.id,
+            detallesAdicionales: `Error al desactivar empleado: ${error.message}`
+        });
+        
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };

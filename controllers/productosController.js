@@ -4,9 +4,9 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
+const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 
-
-const nuevoProducto = (req, res) => {
+const nuevoProducto = async (req, res) => {
     const { nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual } = req.body;
 
     if (!nombre || !unidad_medida || !costo || !precio || !categoria_id || !iva || stock_actual === undefined) {
@@ -18,11 +18,33 @@ const nuevoProducto = (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual], (err, results) => {
+    db.query(query, [nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual], async (err, results) => {
         if (err) {
             console.error('Error al insertar el producto:', err);
+            
+            // Auditar error en creación
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'productos',
+                detallesAdicionales: `Error al crear producto: ${err.message}`,
+                datosNuevos: req.body
+            });
+            
             return res.status(500).json({ success: false, message: "Error al insertar el producto" });
         }
+        
+        // Auditar creación exitosa del producto
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'productos',
+            registroId: results.insertId,
+            datosNuevos: { 
+                id: results.insertId,
+                ...req.body
+            },
+            detallesAdicionales: `Producto creado: ${nombre} - Stock inicial: ${stock_actual}`
+        });
+        
         res.json({ success: true, message: "Producto agregado correctamente", data: results });
     });
 };
@@ -44,7 +66,7 @@ const buscarProducto = (req, res) => {
     });
 };
 
-const actualizarProducto = (req, res) => {
+const actualizarProducto = async (req, res) => {
     const productoId = req.params.id;
     const { nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual } = req.body;
 
@@ -52,40 +74,88 @@ const actualizarProducto = (req, res) => {
         return res.status(400).json({ success: false, message: "Todos los campos son obligatorios" });
     }
 
-    // Verificar si el producto existe antes de actualizar
-    const checkQuery = `SELECT id FROM productos WHERE id = ?`;
-    db.query(checkQuery, [productoId], (err, results) => {
-        if (err) {
-            console.error('Error al verificar el producto:', err);
-            return res.status(500).json({ success: false, message: "Error al verificar el producto" });
-        }
+    // Obtener datos anteriores para auditoría
+    const obtenerDatosAnterioresPromise = () => {
+        return new Promise((resolve, reject) => {
+            db.query('SELECT * FROM productos WHERE id = ?', [productoId], (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
+            });
+        });
+    };
 
-        if (results.length === 0) {
+    try {
+        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        
+        if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: "Producto no encontrado" });
         }
 
-        // Si el producto existe, proceder con la actualización
-        const updateQuery = `
-            UPDATE productos 
-            SET nombre = ?, unidad_medida = ?, costo = ?, precio = ?, categoria_id = ?, iva = ?, stock_actual = ? 
-            WHERE id = ?
-        `;
-
-        db.query(updateQuery, [nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual, productoId], (error, updateResults) => {
-            if (error) {
-                console.error('Error al actualizar el producto:', error);
-                return res.status(500).json({ success: false, message: "Error al actualizar el producto" });
+        // Verificar si el producto existe antes de actualizar
+        const checkQuery = `SELECT id FROM productos WHERE id = ?`;
+        db.query(checkQuery, [productoId], (err, results) => {
+            if (err) {
+                console.error('Error al verificar el producto:', err);
+                return res.status(500).json({ success: false, message: "Error al verificar el producto" });
             }
 
-            if (updateResults.affectedRows === 0) {
-                return res.status(400).json({ success: false, message: "No se realizaron cambios" });
+            if (results.length === 0) {
+                return res.status(404).json({ success: false, message: "Producto no encontrado" });
             }
 
-            res.json({ success: true, message: "Producto actualizado correctamente" });
+            // Si el producto existe, proceder con la actualización
+            const updateQuery = `
+                UPDATE productos 
+                SET nombre = ?, unidad_medida = ?, costo = ?, precio = ?, categoria_id = ?, iva = ?, stock_actual = ? 
+                WHERE id = ?
+            `;
+
+            db.query(updateQuery, [nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual, productoId], async (error, updateResults) => {
+                if (error) {
+                    console.error('Error al actualizar el producto:', error);
+                    
+                    // Auditar error en actualización
+                    await auditarOperacion(req, {
+                        accion: 'UPDATE',
+                        tabla: 'productos',
+                        registroId: productoId,
+                        detallesAdicionales: `Error al actualizar producto: ${error.message}`,
+                        datosAnteriores,
+                        datosNuevos: req.body
+                    });
+                    
+                    return res.status(500).json({ success: false, message: "Error al actualizar el producto" });
+                }
+
+                if (updateResults.affectedRows === 0) {
+                    return res.status(400).json({ success: false, message: "No se realizaron cambios" });
+                }
+
+                // Calcular cambio en stock para detalles adicionales
+                const cambioStock = stock_actual - datosAnteriores.stock_actual;
+                const detalleStock = cambioStock !== 0 ? ` - Cambio en stock: ${cambioStock > 0 ? '+' : ''}${cambioStock}` : '';
+
+                // Auditar actualización exitosa
+                await auditarOperacion(req, {
+                    accion: 'UPDATE',
+                    tabla: 'productos',
+                    registroId: productoId,
+                    datosAnteriores,
+                    datosNuevos: { 
+                        id: productoId,
+                        ...req.body
+                    },
+                    detallesAdicionales: `Producto actualizado: ${nombre}${detalleStock}`
+                });
+
+                res.json({ success: true, message: "Producto actualizado correctamente" });
+            });
         });
-    });
+    } catch (error) {
+        console.error('Error al obtener datos anteriores:', error);
+        res.status(500).json({ success: false, message: "Error interno del servidor" });
+    }
 };
-
 
 const registrarRemito = (pedidoData, callback) => {
     const { venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones} = pedidoData;
@@ -104,10 +174,9 @@ const registrarRemito = (pedidoData, callback) => {
             console.error('Error al insertar el remito:', err);
             return callback(err);
         }
-        callback(null, result.insertId); // Devuelve el ID del pedido recién insertado
+        callback(null, result.insertId); // Devuelve el ID del remito recién insertado
     });
 };
-
 
 const insertarProductos = async (remitoId, productos) => {
     const insertProductoQuery = `
@@ -123,7 +192,7 @@ const insertarProductos = async (remitoId, productos) => {
             return new Promise((resolve, reject) => {
                 db.query(insertProductoQuery, productoValues, (err, result) => {
                     if (err) {
-                        console.error('Error al insertar el producto del pedido:', err);
+                        console.error('Error al insertar el producto del remito:', err);
                         return reject(err);
                     }
                     resolve(result);
@@ -136,27 +205,52 @@ const insertarProductos = async (remitoId, productos) => {
     }
 };
 
-
-const nuevoRemito = (req, res) => {
+const nuevoRemito = async (req, res) => {
     const { venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones, productos } = req.body;
     
-
     registrarRemito({
         venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones
     }, async (err, remitoId) => {
         if (err) {
-            return res.status(500).json({ success: false, message: 'Error al insertar el pedido' });
+            // Auditar error en creación del remito
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'remitos',
+                detallesAdicionales: `Error al crear remito: ${err.message}`,
+                datosNuevos: req.body
+            });
+            
+            return res.status(500).json({ success: false, message: 'Error al insertar el remito' });
         }
 
         const errorProductos = await insertarProductos(remitoId, productos);
         if (errorProductos) {
-            return res.status(500).json({ success: false, message: 'Error al insertar los productos del pedido' });
+            // Auditar error en inserción de productos
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'detalle_remitos',
+                detallesAdicionales: `Error al insertar productos del remito: ${errorProductos.message}`,
+                datosNuevos: { remitoId, productos }
+            });
+            
+            return res.status(500).json({ success: false, message: 'Error al insertar los productos del remito' });
         }
 
-        res.json({ success: true, message: 'Pedido y productos insertados correctamente'});
+        // Auditar creación exitosa del remito
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'remitos',
+            registroId: remitoId,
+            datosNuevos: { 
+                id: remitoId,
+                ...req.body
+            },
+            detallesAdicionales: `Remito creado para cliente: ${cliente_nombre} - ${productos.length} productos`
+        });
+
+        res.json({ success: true, message: 'Remito y productos insertados correctamente'});
     });
 };
-
 
 const obtenerRemitos = (req, res) => {
     const { fecha, ciudad, provincia } = req.query;
@@ -189,18 +283,18 @@ const obtenerRemitos = (req, res) => {
     // Ejecutar la consulta
     db.query(query, (err, results) => {
       if (err) {
-        console.error('Error al obtener:', err);
+        console.error('Error al obtener remitos:', err);
         res.status(500).send('Error al obtener remitos');
       } else {
         res.json(results);
       }
     });
-  };
+};
 
 const filtrarProductosRemito = (req, res) => {
     const remitoId = req.params.id;
 
-    // Consulta SQL para obtener productos del pedido
+    // Consulta SQL para obtener productos del remito
     const query = `
         SELECT id, remito_id, producto_id, producto_nombre, producto_um, cantidad FROM detalle_remitos
         WHERE remito_id = ?
@@ -208,13 +302,12 @@ const filtrarProductosRemito = (req, res) => {
     
     db.query(query, [remitoId], (err, results) => {
         if (err) {
-            console.error('Error al obtener productos del pedido:', err);
-            return res.status(500).json({ error: 'Error al obtener productos del pedido' });
+            console.error('Error al obtener productos del remito:', err);
+            return res.status(500).json({ error: 'Error al obtener productos del remito' });
         }
         res.json(results);
     });
 };
-
 
 const generarPdfRemito = async (req, res) => {
     const { remito, productos } = req.body;
@@ -230,14 +323,10 @@ const generarPdfRemito = async (req, res) => {
         return res.status(500).json({ error: "Plantilla HTML no encontrada" });
     }
 
-
-
     try {
         // Leer y reemplazar la plantilla HTML
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
-        
-        
         htmlTemplate = htmlTemplate
             .replace("{{fecha}}", remito.fecha)
             .replace("{{cliente_nombre}}", remito.cliente_nombre || "No informado")
@@ -248,45 +337,52 @@ const generarPdfRemito = async (req, res) => {
             .replace("{{cliente_telefono}}", remito.cliente_telefono || "No informado")
             .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado")
 
-
         const itemsHTML = productos
             .map(
                 (producto) => `
                 <tr>
-                    
-                    
                     <td>${producto.producto_nombre}</td>
                     <td>${producto.producto_um}</td>
                     <td>${producto.cantidad}</td>
-                    
-
                 </tr>`
             )
             .join("");
 
         htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-        
-        
-
-        
 
         // Iniciar Puppeteer y generar PDF
         const browser = await puppeteer.launch({ headless: "new" });
         const page = await browser.newPage();
 
-        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" }); // ⬅️ Espera hasta que la página cargue completamente
+        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
         const pdfBuffer = await page.pdf({ format: "A4" });
 
         await browser.close();
 
+        // Auditar generación de PDF
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'remitos',
+            registroId: remito.id,
+            detallesAdicionales: `PDF de remito generado para cliente: ${remito.cliente_nombre}`
+        });
+
         // Configurar la respuesta
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="REMITO_${remito.cliente_nombre}.pdf"`);
-
         
-        res.end(pdfBuffer); // ⬅️ Usa res.end() en lugar de res.send() para archivos binarios
+        res.end(pdfBuffer);
     } catch (error) {
         console.error("Error generando PDF:", error);
+        
+        // Auditar error en generación de PDF
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'remitos',
+            registroId: remito.id,
+            detallesAdicionales: `Error generando PDF de remito: ${error.message}`
+        });
+        
         res.status(500).json({ error: "Error al generar el PDF" });
     }
 };
@@ -306,8 +402,6 @@ const obtenerCategorias = (req, res) => {
         res.json({ success: true, data: results });
     });
 };
-
-
 
 module.exports = {
     nuevoProducto,

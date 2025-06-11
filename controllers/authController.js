@@ -2,11 +2,20 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const db = require('./dbPromise');
+const { auditarAuth, limpiarDatosSensibles } = require('../middlewares/auditoriaMiddleware');
 
 exports.login = async (req, res) => {
     const { username, password, remember } = req.body;
 
     if (!username || !password) {
+        // Auditar intento de login fallido por datos incompletos
+        await auditarAuth(req, {
+            accion: 'LOGIN_FAILED',
+            usuarioNombre: username || 'DESCONOCIDO',
+            estado: 'FALLIDO',
+            detallesAdicionales: 'Datos incompletos - usuario y/o contraseña faltante'
+        });
+        
         return res.status(400).json({ message: 'Usuario y contraseña son obligatorios' });
     }
 
@@ -18,6 +27,14 @@ exports.login = async (req, res) => {
         );
 
         if (empleados.length === 0) {
+            // Auditar intento de login fallido por usuario no encontrado
+            await auditarAuth(req, {
+                accion: 'LOGIN_FAILED',
+                usuarioNombre: username,
+                estado: 'FALLIDO',
+                detallesAdicionales: 'Usuario no encontrado o inactivo'
+            });
+            
             return res.status(401).json({ message: 'Usuario no encontrado o inactivo' });
         }
 
@@ -26,6 +43,15 @@ exports.login = async (req, res) => {
         // Verificar contraseña
         const validPassword = await bcrypt.compare(password, empleado.password);
         if (!validPassword) {
+            // Auditar intento de login fallido por contraseña incorrecta
+            await auditarAuth(req, {
+                accion: 'LOGIN_FAILED',
+                usuarioId: empleado.id,
+                usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
+                estado: 'FALLIDO',
+                detallesAdicionales: 'Contraseña incorrecta'
+            });
+            
             return res.status(401).json({ message: 'Contraseña incorrecta' });
         }
 
@@ -51,6 +77,15 @@ exports.login = async (req, res) => {
             });
         }
 
+        // Auditar login exitoso
+        await auditarAuth(req, {
+            accion: 'LOGIN',
+            usuarioId: empleado.id,
+            usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
+            estado: 'EXITOSO',
+            detallesAdicionales: `Login exitoso - Rol: ${empleado.rol}, Remember: ${remember ? 'Sí' : 'No'}`
+        });
+
         // Respuesta con información del empleado (sin datos sensibles)
         res.json({ 
             token: accessToken, 
@@ -67,6 +102,15 @@ exports.login = async (req, res) => {
 
     } catch (error) {
         console.error('Error en login:', error);
+        
+        // Auditar error interno en login
+        await auditarAuth(req, {
+            accion: 'LOGIN_FAILED',
+            usuarioNombre: username,
+            estado: 'FALLIDO',
+            detallesAdicionales: `Error interno del servidor: ${error.message}`
+        });
+        
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };
@@ -89,6 +133,14 @@ exports.refreshToken = async (req, res) => {
         );
         
         if (empleados.length === 0) {
+            // Auditar fallo en refresh token
+            await auditarAuth(req, {
+                accion: 'LOGIN_FAILED',
+                usuarioId: decoded.id,
+                estado: 'FALLIDO',
+                detallesAdicionales: 'Refresh token - Empleado no encontrado o inactivo'
+            });
+            
             return res.status(404).json({ message: 'Empleado no encontrado o inactivo' });
         }
 
@@ -104,6 +156,15 @@ exports.refreshToken = async (req, res) => {
         };
 
         const newAccessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '15m' });
+        
+        // Auditar refresh exitoso
+        await auditarAuth(req, {
+            accion: 'LOGIN',
+            usuarioId: empleado.id,
+            usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
+            estado: 'EXITOSO',
+            detallesAdicionales: 'Token renovado exitosamente'
+        });
         
         res.json({ 
             accessToken: newAccessToken,
@@ -124,9 +185,25 @@ exports.refreshToken = async (req, res) => {
     }
 };
 
-exports.logout = (req, res) => {
-    res.clearCookie('refreshToken');
-    res.json({ message: 'Logout exitoso' });
+exports.logout = async (req, res) => {
+    try {
+        // Auditar logout
+        if (req.user) {
+            await auditarAuth(req, {
+                accion: 'LOGOUT',
+                usuarioId: req.user.id,
+                usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
+                estado: 'EXITOSO',
+                detallesAdicionales: 'Logout exitoso'
+            });
+        }
+        
+        res.clearCookie('refreshToken');
+        res.json({ message: 'Logout exitoso' });
+    } catch (error) {
+        console.error('Error en logout:', error);
+        res.status(500).json({ message: 'Error interno del servidor' });
+    }
 };
 
 exports.getProfile = async (req, res) => {
@@ -175,6 +252,15 @@ exports.changePassword = async (req, res) => {
 
         const validPassword = await bcrypt.compare(currentPassword, empleados[0].password);
         if (!validPassword) {
+            // Auditar intento fallido de cambio de contraseña
+            await auditarAuth(req, {
+                accion: 'PASSWORD_CHANGE',
+                usuarioId: req.user.id,
+                usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
+                estado: 'FALLIDO',
+                detallesAdicionales: 'Contraseña actual incorrecta'
+            });
+            
             return res.status(401).json({ message: 'Contraseña actual incorrecta' });
         }
 
@@ -187,10 +273,31 @@ exports.changePassword = async (req, res) => {
             [hashedNewPassword, empleadoId]
         );
 
+        // Auditar cambio exitoso de contraseña
+        await auditarAuth(req, {
+            accion: 'PASSWORD_CHANGE',
+            usuarioId: req.user.id,
+            usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
+            estado: 'EXITOSO',
+            detallesAdicionales: 'Contraseña actualizada exitosamente'
+        });
+
         res.json({ message: 'Contraseña actualizada exitosamente' });
 
     } catch (error) {
         console.error('Error al cambiar contraseña:', error);
+        
+        // Auditar error en cambio de contraseña
+        if (req.user) {
+            await auditarAuth(req, {
+                accion: 'PASSWORD_CHANGE',
+                usuarioId: req.user.id,
+                usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
+                estado: 'FALLIDO',
+                detallesAdicionales: `Error interno: ${error.message}`
+            });
+        }
+        
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };

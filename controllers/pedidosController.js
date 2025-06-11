@@ -5,9 +5,8 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 const puppeteer = require("puppeteer");
 const multer = require('multer');
-
-
-
+const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
+const { formatearFecha } = require('../middlewares/fechaMiddleware');
 
 const buscarCliente = (req, res) => {
     const rawSearch = req.query.q || req.query.search || '';
@@ -49,14 +48,8 @@ const buscarProducto = (req, res) => {
     });
 };
 
-// ========== FUNCIONES DE PEDIDOS ==========
-
 /**
  * Función genérica para actualizar stock de productos
- * @param {number} productoId - ID del producto
- * @param {number} cantidadCambio - Cantidad a sumar/restar (positivo suma, negativo resta)
- * @param {string} motivo - Motivo del cambio para logs
- * @returns {Promise} - Promesa que resuelve cuando se actualiza el stock
  */
 const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido') => {
     return new Promise((resolve, reject) => {
@@ -99,10 +92,6 @@ const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido') 
     });
 };
 
-
-
-
-
 // Función para registrar un pedido en la tabla principal
 const registrarPedido = (pedidoData, callback) => {
     const { 
@@ -131,7 +120,7 @@ const registrarPedido = (pedidoData, callback) => {
             console.error('Error al insertar el pedido:', err);
             return callback(err);
         }
-        callback(null, result.insertId); // Devuelve el ID del pedido recién insertado
+        callback(null, result.insertId);
     });
 };
 
@@ -161,12 +150,11 @@ const insertarProductosPedido = async (pedidoId, productos) => {
             // 2. Actualizar stock (restar cantidad porque es un pedido)
             await actualizarStockProducto(id, -cantidad, 'nuevo_pedido');
         }));
-        return null; // Si todo salió bien
+        return null;
     } catch (error) {
         return error;
     }
 };
-
 
 // Endpoint para registrar nuevo pedido
 const nuevoPedido = async (req, res) => {
@@ -190,23 +178,58 @@ const nuevoPedido = async (req, res) => {
         empleado_id, empleado_nombre, observaciones: observaciones || 'sin observaciones'
     }, async (err, pedidoId) => {
         if (err) {
+            // Auditar error en creación del pedido
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'pedidos',
+                detallesAdicionales: `Error al crear pedido: ${err.message}`,
+                datosNuevos: req.body
+            });
+            
             return res.status(500).json({ success: false, message: 'Error al insertar el pedido' });
         }
 
         const errorProductos = await insertarProductosPedido(pedidoId, productos);
         if (errorProductos) {
+            // Auditar error en inserción de productos
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'pedidos_cont',
+                detallesAdicionales: `Error al insertar productos del pedido ${pedidoId}: ${errorProductos.message}`,
+                datosNuevos: { pedidoId, productos }
+            });
+            
             return res.status(500).json({ success: false, message: 'Error al insertar los productos del pedido' });
         }
 
+        // Auditar creación exitosa del pedido
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosNuevos: { 
+                id: pedidoId,
+                ...req.body
+            },
+            detallesAdicionales: `Pedido creado para cliente: ${cliente_nombre} - Total: $${total} - ${productos.length} productos`
+        });
+
         res.json({ success: true, message: 'Pedido y productos insertados correctamente', pedidoId });
     });
-
-                
 };
 
 // Obtener todos los pedidos (con filtro opcional por empleado)
 const obtenerPedidos = (req, res) => {
-    const empleadoId = req.query.empleado_id; // Parámetro opcional para filtrar por empleado
+    const empleadoIdRaw = req.query.empleado_id;
+    
+    // VALIDACIÓN Y CONVERSIÓN CORRECTA
+    let empleadoId = null;
+    if (empleadoIdRaw && empleadoIdRaw !== 'null' && empleadoIdRaw !== 'undefined') {
+        const num = parseInt(empleadoIdRaw, 10);
+        if (!isNaN(num) && num > 0) {
+            empleadoId = num;
+        }
+    }
     
     let query = `
         SELECT 
@@ -220,13 +243,14 @@ const obtenerPedidos = (req, res) => {
     
     let queryParams = [];
     
-    // Si se especifica empleado_id, filtrar por ese empleado (para vendedores)
-    if (empleadoId) {
+    if (empleadoId !== null) {
         query += ` WHERE empleado_id = ?`;
         queryParams.push(empleadoId);
     }
     
     query += ` ORDER BY fecha DESC`;
+    
+    console.log(`📋 Consulta pedidos: ${empleadoId ? `empleado ${empleadoId}` : 'todos'} - filtro=${empleadoIdRaw} → ${empleadoId}`);
     
     db.query(query, queryParams, (err, results) => {
         if (err) {
@@ -234,7 +258,7 @@ const obtenerPedidos = (req, res) => {
             return res.status(500).json({ success: false, message: 'Error al obtener pedidos' });
         }
         
-        console.log(`📋 Consulta pedidos: ${empleadoId ? `empleado ${empleadoId}` : 'todos'} - ${results.length} resultados`);
+        console.log(`📋 Resultados: ${results.length} pedidos encontrados`);
         res.json({ success: true, data: results });
     });
 };
@@ -243,12 +267,7 @@ const obtenerPedidos = (req, res) => {
 const obtenerDetallePedido = (req, res) => {
     const pedidoId = req.params.pedidoId;
     
-    // Consulta para obtener los datos del pedido
-    const queryPedido = `
-        SELECT * FROM pedidos WHERE id = ?
-    `;
-    
-    // Consulta para obtener los productos del pedido
+    const queryPedido = `SELECT * FROM pedidos WHERE id = ?`;
     const queryProductos = `
         SELECT id, pedido_id, producto_id, producto_nombre, producto_um, 
                cantidad, precio, iva, subtotal 
@@ -286,13 +305,11 @@ const obtenerDetallePedido = (req, res) => {
     });
 };
 
-
 // Actualizar estado de un pedido
 const actualizarEstadoPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { estado } = req.body;
     
-    // Validar que el estado sea uno de los permitidos
     const estadosValidos = ['Exportado', 'Facturado', 'Anulado'];
     if (!estadosValidos.includes(estado)) {
         return res.status(400).json({ 
@@ -302,25 +319,25 @@ const actualizarEstadoPedido = async (req, res) => {
     }
     
     try {
-        // 1. Obtener el estado actual del pedido
-        const queryEstadoActual = `SELECT estado FROM pedidos WHERE id = ?`;
-        
-        const estadoActual = await new Promise((resolve, reject) => {
-            db.query(queryEstadoActual, [pedidoId], (err, results) => {
-                if (err) {
-                    console.error('Error al obtener estado actual:', err);
-                    return reject(err);
-                }
-                if (results.length === 0) {
-                    return reject(new Error('Pedido no encontrado'));
-                }
-                resolve(results[0].estado);
+        // Obtener datos anteriores para auditoría
+        const obtenerDatosAnterioresPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
             });
-        });
+        };
 
-        // 2. Actualizar el estado del pedido
+        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        const estadoActual = datosAnteriores.estado;
+
+        // Actualizar el estado del pedido
         const queryActualizar = `UPDATE pedidos SET estado = ? WHERE id = ?`;
-
         const result = await new Promise((resolve, reject) => {
             db.query(queryActualizar, [estado, pedidoId], (err, result) => {
                 if (err) {
@@ -331,7 +348,7 @@ const actualizarEstadoPedido = async (req, res) => {
             });
         });
 
-        // 3. Manejar cambios de stock según el cambio de estado
+        // Manejar cambios de stock según el cambio de estado
         if (estadoActual !== 'Anulado' && estado === 'Anulado') {
             // Si se anula un pedido que no estaba anulado, restaurar stock
             const queryObtenerProductos = `
@@ -382,6 +399,16 @@ const actualizarEstadoPedido = async (req, res) => {
             }
         }
 
+        // Auditar cambio de estado
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosAnteriores,
+            datosNuevos: { ...datosAnteriores, estado },
+            detallesAdicionales: `Estado cambiado de "${estadoActual}" a "${estado}" - Cliente: ${datosAnteriores.cliente_nombre}`
+        });
+
         res.json({ 
             success: true, 
             message: 'Estado del pedido actualizado correctamente y stock ajustado' 
@@ -390,17 +417,18 @@ const actualizarEstadoPedido = async (req, res) => {
     } catch (error) {
         console.error('Error en actualizarEstadoPedido:', error);
         
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            detallesAdicionales: `Error al actualizar estado del pedido: ${error.message}`
+        });
+        
         if (error.message.includes('Stock insuficiente')) {
             return res.status(400).json({ 
                 success: false, 
                 message: `No se puede reactivar el pedido: ${error.message}` 
-            });
-        }
-        
-        if (error.message.includes('no encontrado')) {
-            return res.status(404).json({ 
-                success: false, 
-                message: error.message 
             });
         }
         
@@ -412,12 +440,26 @@ const actualizarEstadoPedido = async (req, res) => {
 };
 
 
-// Eliminar un pedido (elimina también los productos por CASCADE)
 const eliminarPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     
     try {
-        // 1. Obtener todos los productos del pedido antes de eliminarlo
+        // Obtener datos del pedido antes de eliminarlo para auditoría
+        const obtenerPedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosAnteriores = await obtenerPedidoPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        // Obtener todos los productos del pedido antes de eliminarlo
         const queryObtenerProductos = `
             SELECT producto_id, cantidad 
             FROM pedidos_cont 
@@ -434,7 +476,7 @@ const eliminarPedido = async (req, res) => {
             });
         });
 
-        // 2. Eliminar el pedido (los productos se eliminan por CASCADE)
+        // Eliminar el pedido (los productos se eliminan por CASCADE)
         const queryEliminarPedido = `DELETE FROM pedidos WHERE id = ?`;
 
         const result = await new Promise((resolve, reject) => {
@@ -454,12 +496,21 @@ const eliminarPedido = async (req, res) => {
             });
         }
 
-        // 3. Restaurar stock de todos los productos
+        // Restaurar stock de todos los productos
         if (productosDelPedido.length > 0) {
             await Promise.all(productosDelPedido.map(async producto => {
                 await actualizarStockProducto(producto.producto_id, producto.cantidad, 'eliminar_pedido_completo');
             }));
         }
+
+        // Auditar eliminación del pedido
+        await auditarOperacion(req, {
+            accion: 'DELETE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosAnteriores,
+            detallesAdicionales: `Pedido eliminado completo - Cliente: ${datosAnteriores.cliente_nombre} - Total: $${datosAnteriores.total} - ${productosDelPedido.length} productos`
+        });
 
         res.json({ 
             success: true, 
@@ -468,6 +519,15 @@ const eliminarPedido = async (req, res) => {
 
     } catch (error) {
         console.error('Error en eliminarPedido:', error);
+        
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'DELETE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            detallesAdicionales: `Error al eliminar pedido: ${error.message}`
+        });
+        
         res.status(500).json({ 
             success: false, 
             message: 'Error al eliminar el pedido' 
@@ -475,9 +535,7 @@ const eliminarPedido = async (req, res) => {
     }
 };
 
-
-
-// Obtener productos de un pedido específico (funcionalidad extra)
+// Obtener productos de un pedido específico
 const obtenerProductosPedido = (req, res) => {
     const pedidoId = req.params.pedidoId;
 
@@ -500,9 +558,7 @@ const obtenerProductosPedido = (req, res) => {
 // Filtrar pedido por ID 
 const filtrarPedido = (req, res) => {
     const pedidoId = req.params.pedidoId;
-    const query = `
-        SELECT * FROM pedidos WHERE id = ?
-    `;
+    const query = `SELECT * FROM pedidos WHERE id = ?`;
     
     db.query(query, [pedidoId], (err, results) => {
         if (err) {
@@ -518,38 +574,74 @@ const filtrarPedido = (req, res) => {
     });
 };
 
-
-
 // Actualizar observaciones del pedido
-const actualizarObservacionesPedido = (req, res) => {
+const actualizarObservacionesPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { observaciones } = req.body;
     
-    const query = `
-        UPDATE pedidos SET observaciones = ? WHERE id = ?
-    `;
+    try {
+        // Obtener datos anteriores para auditoría
+        const obtenerDatosAnterioresPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
 
-    db.query(query, [observaciones || 'sin observaciones', pedidoId], (err, result) => {
-        if (err) {
-            console.error('Error al actualizar observaciones:', err);
-            return res.status(500).json({ success: false, message: 'Error al actualizar observaciones' });
+        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
+
+        const query = `UPDATE pedidos SET observaciones = ? WHERE id = ?`;
+
+        const result = await new Promise((resolve, reject) => {
+            db.query(query, [observaciones || 'sin observaciones', pedidoId], (err, result) => {
+                if (err) {
+                    console.error('Error al actualizar observaciones:', err);
+                    return reject(err);
+                }
+                resolve(result);
+            });
+        });
         
         if (result.affectedRows === 0) {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
+
+        // Auditar actualización de observaciones
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosAnteriores,
+            datosNuevos: { ...datosAnteriores, observaciones: observaciones || 'sin observaciones' },
+            detallesAdicionales: `Observaciones actualizadas - Cliente: ${datosAnteriores.cliente_nombre}`
+        });
         
         res.json({ success: true, message: 'Observaciones actualizadas correctamente' });
-    });
+    } catch (error) {
+        console.error('Error en actualizarObservacionesPedido:', error);
+        
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            detallesAdicionales: `Error al actualizar observaciones: ${error.message}`
+        });
+        
+        res.status(500).json({ success: false, message: 'Error al actualizar observaciones' });
+    }
 };
-
 
 // Agregar producto a un pedido existente
 const agregarProductoPedidoExistente = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal } = req.body;
 
-    // Validaciones básicas
     if (!producto_id || !cantidad || cantidad <= 0) {
         return res.status(400).json({ 
             success: false, 
@@ -563,7 +655,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
     `;
 
     try {
-        // 1. Insertar el producto en pedidos_cont
+        // Insertar el producto en pedidos_cont
         const insertResult = await new Promise((resolve, reject) => {
             db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal], (err, results) => {
                 if (err) {
@@ -574,8 +666,21 @@ const agregarProductoPedidoExistente = async (req, res) => {
             });
         });
 
-        // 2. Actualizar stock (restar la cantidad)
+        // Actualizar stock (restar la cantidad)
         await actualizarStockProducto(producto_id, -cantidad, 'agregar_producto_pedido');
+
+        // Auditar agregado de producto
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'pedidos_cont',
+            registroId: insertResult.insertId,
+            datosNuevos: { 
+                id: insertResult.insertId,
+                pedido_id: pedidoId,
+                ...req.body
+            },
+            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad}`
+        });
 
         res.json({ 
             success: true, 
@@ -586,7 +691,14 @@ const agregarProductoPedidoExistente = async (req, res) => {
     } catch (error) {
         console.error('Error en agregarProductoPedidoExistente:', error);
         
-        // Si el error es de stock insuficiente, devolver mensaje específico
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'INSERT',
+            tabla: 'pedidos_cont',
+            detallesAdicionales: `Error al agregar producto al pedido ${pedidoId}: ${error.message}`,
+            datosNuevos: req.body
+        });
+        
         if (error.message.includes('Stock insuficiente')) {
             return res.status(400).json({ 
                 success: false, 
@@ -606,7 +718,6 @@ const actualizarProductoPedido = async (req, res) => {
     const { cantidad, precio, iva, subtotal } = req.body;
     const productId = req.params.productId;
 
-    // Validar que la cantidad sea válida
     if (!cantidad || cantidad <= 0) {
         return res.status(400).json({ 
             success: false, 
@@ -615,27 +726,26 @@ const actualizarProductoPedido = async (req, res) => {
     }
 
     try {
-        // 1. Obtener la cantidad actual del producto en el pedido
-        const queryObtenerCantidad = `SELECT producto_id, cantidad FROM pedidos_cont WHERE id = ?`;
-        
-        const datosActuales = await new Promise((resolve, reject) => {
-            db.query(queryObtenerCantidad, [productId], (err, results) => {
-                if (err) {
-                    console.error('Error al obtener cantidad actual:', err);
-                    return reject(err);
-                }
-                if (results.length === 0) {
-                    return reject(new Error('Producto en pedido no encontrado'));
-                }
-                resolve(results[0]);
+        // Obtener datos anteriores del producto en el pedido
+        const obtenerDatosAnterioresPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
             });
-        });
+        };
 
-        const cantidadAnterior = datosActuales.cantidad;
-        const productoId = datosActuales.producto_id;
+        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Producto en pedido no encontrado' });
+        }
+
+        const cantidadAnterior = datosAnteriores.cantidad;
+        const productoId = datosAnteriores.producto_id;
         const diferenciaCantidad = cantidad - cantidadAnterior;
 
-        // 2. Actualizar el producto en pedidos_cont
+        // Actualizar el producto en pedidos_cont
         const queryActualizar = `
             UPDATE pedidos_cont SET cantidad = ?, precio = ?, IVA = ?, subtotal = ? WHERE id = ?
         `;
@@ -653,12 +763,20 @@ const actualizarProductoPedido = async (req, res) => {
             });
         });
 
-        // 3. Ajustar stock si hay diferencia en cantidad
+        // Ajustar stock si hay diferencia en cantidad
         if (diferenciaCantidad !== 0) {
-            // Si aumentó la cantidad, restar más stock (diferencia negativa)
-            // Si disminuyó la cantidad, devolver stock (diferencia positiva)
             await actualizarStockProducto(productoId, -diferenciaCantidad, 'actualizar_cantidad_pedido');
         }
+
+        // Auditar actualización del producto
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos_cont',
+            registroId: productId,
+            datosAnteriores,
+            datosNuevos: { ...datosAnteriores, cantidad, precio, iva, subtotal },
+            detallesAdicionales: `Producto actualizado en pedido: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad}`
+        });
 
         res.json({ 
             success: true, 
@@ -668,15 +786,16 @@ const actualizarProductoPedido = async (req, res) => {
     } catch (error) {
         console.error('Error en actualizarProductoPedido:', error);
         
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos_cont',
+            registroId: productId,
+            detallesAdicionales: `Error al actualizar producto: ${error.message}`
+        });
+        
         if (error.message.includes('Stock insuficiente')) {
             return res.status(400).json({ 
-                success: false, 
-                message: error.message 
-            });
-        }
-        
-        if (error.message.includes('no encontrado')) {
-            return res.status(404).json({ 
                 success: false, 
                 message: error.message 
             });
@@ -694,23 +813,22 @@ const eliminarProductoPedido = async (req, res) => {
     const productId = req.params.productId;
 
     try {
-        // 1. Obtener datos del producto antes de eliminarlo
-        const queryObtenerDatos = `SELECT producto_id, cantidad FROM pedidos_cont WHERE id = ?`;
-        
-        const datosProducto = await new Promise((resolve, reject) => {
-            db.query(queryObtenerDatos, [productId], (err, results) => {
-                if (err) {
-                    console.error('Error al obtener datos del producto:', err);
-                    return reject(err);
-                }
-                if (results.length === 0) {
-                    return reject(new Error('Producto en pedido no encontrado'));
-                }
-                resolve(results[0]);
+        // Obtener datos del producto antes de eliminarlo
+        const obtenerDatosPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
             });
-        });
+        };
 
-        // 2. Eliminar el producto del pedido
+        const datosProducto = await obtenerDatosPromise();
+        if (!datosProducto) {
+            return res.status(404).json({ success: false, message: 'Producto en pedido no encontrado' });
+        }
+
+        // Eliminar el producto del pedido
         const queryEliminar = `DELETE FROM pedidos_cont WHERE id = ?`;
 
         await new Promise((resolve, reject) => {
@@ -723,8 +841,17 @@ const eliminarProductoPedido = async (req, res) => {
             });
         });
 
-        // 3. Restaurar stock (sumar la cantidad que se había restado)
+        // Restaurar stock (sumar la cantidad que se había restado)
         await actualizarStockProducto(datosProducto.producto_id, datosProducto.cantidad, 'eliminar_producto_pedido');
+
+        // Auditar eliminación del producto
+        await auditarOperacion(req, {
+            accion: 'DELETE',
+            tabla: 'pedidos_cont',
+            registroId: productId,
+            datosAnteriores: datosProducto,
+            detallesAdicionales: `Producto eliminado del pedido: ${datosProducto.producto_nombre} x${datosProducto.cantidad}`
+        });
 
         res.json({ 
             success: true, 
@@ -734,12 +861,13 @@ const eliminarProductoPedido = async (req, res) => {
     } catch (error) {
         console.error('Error en eliminarProductoPedido:', error);
         
-        if (error.message.includes('no encontrado')) {
-            return res.status(404).json({ 
-                success: false, 
-                message: error.message 
-            });
-        }
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'DELETE',
+            tabla: 'pedidos_cont',
+            registroId: productId,
+            detallesAdicionales: `Error al eliminar producto: ${error.message}`
+        });
         
         res.status(500).json({ 
             success: false, 
@@ -749,38 +877,76 @@ const eliminarProductoPedido = async (req, res) => {
 };
 
 // Actualizar totales del pedido
-const actualizarTotalesPedido = (req, res) => {
+const actualizarTotalesPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { subtotal, iva_total, total } = req.body;
     
-    const query = `
-        UPDATE pedidos SET subtotal = ?, iva_total = ?, total = ? WHERE id = ?
-    `;
+    try {
+        // Obtener datos anteriores para auditoría
+        const obtenerDatosAnterioresPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
 
-    db.query(query, [subtotal, iva_total, total, pedidoId], (err, result) => {
-        if (err) {
-            console.error('Error al actualizar totales:', err);
-            return res.status(500).json({ success: false, message: 'Error al actualizar totales' });
+        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
+
+        const query = `UPDATE pedidos SET subtotal = ?, iva_total = ?, total = ? WHERE id = ?`;
+
+        const result = await new Promise((resolve, reject) => {
+            db.query(query, [subtotal, iva_total, total, pedidoId], (err, result) => {
+                if (err) {
+                    console.error('Error al actualizar totales:', err);
+                    return reject(err);
+                }
+                resolve(result);
+            });
+        });
         
         if (result.affectedRows === 0) {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
+
+        // Auditar actualización de totales
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosAnteriores,
+            datosNuevos: { ...datosAnteriores, subtotal, iva_total, total },
+            detallesAdicionales: `Totales actualizados - Cliente: ${datosAnteriores.cliente_nombre} - Total: $${datosAnteriores.total} → $${total}`
+        });
         
         res.json({ success: true, message: 'Totales actualizados correctamente' });
-    });
+    } catch (error) {
+        console.error('Error en actualizarTotalesPedido:', error);
+        
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            detallesAdicionales: `Error al actualizar totales: ${error.message}`
+        });
+        
+        res.status(500).json({ success: false, message: 'Error al actualizar totales' });
+    }
 };
 
-
-
+// FUNCIÓN DEFINITIVA para PDF individual
 const generarPdfNotaPedido = async (req, res) => {
     const { pedido, productos } = req.body;
 
     if (!pedido || productos.length === 0) {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
-    
-    // Ruta de la plantilla HTML
+
     const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
 
     if (!fs.existsSync(templatePath)) {
@@ -788,19 +954,18 @@ const generarPdfNotaPedido = async (req, res) => {
     }
 
     try {
-        // Leer y reemplazar la plantilla HTML
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
-        htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", pedido.fecha)
+        const fechaFormateada = formatearFecha(pedido.fecha);
+                htmlTemplate = htmlTemplate
+                    .replace("{{fecha}}", fechaFormateada)
             .replace("{{id}}", pedido.id)
             .replace("{{cliente_nombre}}", pedido.cliente_nombre)
             .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
             .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
             .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado");
 
-
-         const itemsHTML = productos.map(p => `
+        const itemsHTML = productos.map(p => `
             <tr>
                 <td>${p.producto_id || ''}</td>
                 <td>${p.producto_nombre || ''}</td>
@@ -810,38 +975,318 @@ const generarPdfNotaPedido = async (req, res) => {
             </tr>
         `).join("\n");
 
-        // Reemplazar el placeholder de los productos
         htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
 
-
-        
-        
-
-
-        // Iniciar Puppeteer y generar PDF
-        const browser = await puppeteer.launch({ headless: "new" });
+        const browser = await puppeteer.launch({ 
+            headless: "new",
+            args: ['--no-sandbox', '--disable-setuid-sandbox'] // Mejora estabilidad
+        });
         const page = await browser.newPage();
 
-        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" }); // ⬅️ Espera hasta que la página cargue completamente
-        const pdfBuffer = await page.pdf({ format: "A4" });
+        // CONFIGURACIÓN OPTIMIZADA DE LA PÁGINA
+        await page.setViewport({ 
+            width: 794,   // A4 width en pixels
+            height: 1123  // A4 height en pixels
+        });
+
+        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
+
+        
+
+        // OBTENER ALTURA REAL DEL CONTENIDO
+        const bodyHeight = await page.evaluate(() => {
+            return Math.max(
+                document.body.scrollHeight,
+                document.body.offsetHeight,
+                document.documentElement.clientHeight,
+                document.documentElement.scrollHeight,
+                document.documentElement.offsetHeight
+            );
+        });
+
+        console.log(`📏 Altura del contenido: ${bodyHeight}px`);
+
+        // CONFIGURACIÓN DEFINITIVA DEL PDF
+        const pdfBuffer = await page.pdf({
+            width: '210mm',
+            height: `${Math.ceil(bodyHeight * 0.264583) + 20}mm`, // px to mm + margen de seguridad
+            margin: {
+                top: '8mm',
+                right: '8mm',
+                bottom: '8mm',
+                left: '8mm'
+            },
+            printBackground: true,
+            preferCSSPageSize: false,
+            displayHeaderFooter: false,
+            scale: 0.95  // Escalar ligeramente para mejor ajuste
+        });
 
         await browser.close();
 
-        // Configurar la respuesta
+        // Auditar generación de PDF
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'pedidos',
+            registroId: pedido.id,
+            detallesAdicionales: `PDF de nota de pedido generado para cliente: ${pedido.cliente_nombre} - Altura: ${bodyHeight}px`
+        });
+
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="NotaPedido_${pedido.cliente_nombre}.pdf"`);
 
-        
-        res.end(pdfBuffer); // ⬅️ Usa res.end() en lugar de res.send() para archivos binarios
+        res.end(pdfBuffer);
     } catch (error) {
         console.error("Error generando PDF:", error);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'pedidos',
+            registroId: pedido.id,
+            detallesAdicionales: `Error generando PDF de nota de pedido: ${error.message}`
+        });
+
         res.status(500).json({ error: "Error al generar el PDF" });
     }
 };
 
+// FUNCIÓN DEFINITIVA para PDFs múltiples
+const generarPdfNotasPedidoMultiples = async (req, res) => {
+    const { pedidosIds } = req.body;
+    
+    if (!pedidosIds || !Array.isArray(pedidosIds) || pedidosIds.length === 0) {
+        return res.status(400).json({ error: "Debe proporcionar al menos un ID de pedido válido" });
+    }
+
+    try {
+        const pdfBuffers = [];
+        const browser = await puppeteer.launch({ 
+            headless: "new",
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+
+        for (let i = 0; i < pedidosIds.length; i++) {
+            const pedidoId = pedidosIds[i];
+            
+            const getPedido = () => {
+                return new Promise((resolve, reject) => {
+                    db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    });
+                });
+            };
+            
+            const getProductosPedido = () => {
+                return new Promise((resolve, reject) => {
+                    db.query('SELECT * FROM pedidos_cont WHERE pedido_id = ?', [pedidoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    });
+                });
+            };
+            
+            try {
+                const pedidoRows = await getPedido();
+                
+                if (pedidoRows.length === 0) {
+                    console.warn(`Pedido con ID ${pedidoId} no encontrado, continuando`);
+                    continue;
+                }
+                
+                const pedido = pedidoRows[0];
+                const productos = await getProductosPedido();
+                
+                if (productos.length === 0) {
+                    console.warn(`No se encontraron productos para el pedido con ID ${pedidoId}, continuando`);
+                    continue;
+                }
+                
+                const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
+                
+                if (!fs.existsSync(templatePath)) {
+                    console.error(`Plantilla HTML no encontrada`);
+                    continue;
+                }
+                
+                let htmlTemplate = fs.readFileSync(templatePath, "utf8");
+                
+                const fechaFormateada = formatearFecha(pedido.fecha);
+                htmlTemplate = htmlTemplate
+                    .replace("{{fecha}}", fechaFormateada)
+                    .replace("{{id}}", pedido.id)
+                    .replace("{{cliente_nombre}}", pedido.cliente_nombre)
+                    .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
+                    .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
+                    .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado");
+
+                const itemsHTML = productos
+                    .map(p => `
+                        <tr>
+                            <td>${p.producto_id || ''}</td>
+                            <td>${p.producto_nombre || ''}</td>
+                            <td>${p.producto_descripcion || ""}</td>
+                            <td>${p.producto_um || ''}</td>
+                            <td class="text-right">${p.cantidad || 0}</td>
+                        </tr>
+                    `)
+                    .join("");
+
+                htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
+
+                const page = await browser.newPage();
+                
+                await page.setViewport({ width: 794, height: 1123 });
+                await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
+                
+
+                // Obtener altura para este pedido específico
+                const bodyHeight = await page.evaluate(() => {
+                    return Math.max(
+                        document.body.scrollHeight,
+                        document.body.offsetHeight,
+                        document.documentElement.scrollHeight
+                    );
+                });
+
+                const pdfBuffer = await page.pdf({
+                    width: '210mm',
+                    height: `${Math.ceil(bodyHeight * 0.264583) + 15}mm`, // Menos margen para múltiples
+                    margin: {
+                        top: '6mm',    // Márgenes menores para múltiples
+                        right: '6mm', 
+                        bottom: '6mm',
+                        left: '6mm'
+                    },
+                    printBackground: true,
+                    preferCSSPageSize: false,
+                    scale: 0.9
+                });
+                
+                await page.close();
+                
+                pdfBuffers.push(pdfBuffer);
+                
+                console.log(`✅ PDF generado para pedido ID ${pedidoId} - Altura: ${bodyHeight}px`);
+                
+            } catch (error) {
+                console.error(`❌ Error procesando pedido ID ${pedidoId}:`, error);
+            }
+        }
+        
+        await browser.close();
+
+        if (pdfBuffers.length === 0) {
+            return res.status(404).json({ 
+                error: "No se pudieron generar PDFs para las notas de pedido seleccionadas"
+            });
+        }
+
+        // Combinar PDFs
+        const { PDFDocument } = require('pdf-lib');
+        const mergedPdf = await PDFDocument.create();
+        
+        for (const pdfBuffer of pdfBuffers) {
+            const pdf = await PDFDocument.load(pdfBuffer);
+            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+            copiedPages.forEach((page) => mergedPdf.addPage(page));
+        }
+        
+        const mergedPdfBuffer = await mergedPdf.save();
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'pedidos',
+            detallesAdicionales: `PDFs múltiples generados: ${pdfBuffers.length} notas de pedido combinadas`
+        });
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="Notas_Pedidos_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
+        res.end(Buffer.from(mergedPdfBuffer));
+        
+        console.log(`🎉 ${pdfBuffers.length} notas de pedido generadas y combinadas exitosamente`);
+        
+    } catch (error) {
+        console.error("❌ Error generando PDFs múltiples:", error);
+        
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'pedidos',
+            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
+        });
+        
+        res.status(500).json({ 
+            error: "Error al generar los PDFs múltiples",
+            detalles: error.message 
+        });
+    }
+};
+
+const obtenerDatosFiltros = (req, res) => {
+    // Consulta optimizada para obtener ciudades y clientes únicos
+    const queryCiudades = `
+        SELECT DISTINCT cliente_ciudad
+        FROM pedidos 
+        WHERE cliente_ciudad IS NOT NULL 
+            AND cliente_ciudad != ''
+            AND TRIM(cliente_ciudad) != ''
+        ORDER BY cliente_ciudad ASC
+        LIMIT 100
+    `;
+
+    const queryClientes = `
+        SELECT DISTINCT cliente_nombre
+        FROM pedidos 
+        WHERE cliente_nombre IS NOT NULL 
+            AND cliente_nombre != ''
+            AND TRIM(cliente_nombre) != ''
+        ORDER BY cliente_nombre ASC
+        LIMIT 200
+    `;
+
+    // Ejecutar consulta para ciudades
+    db.query(queryCiudades, (err, resultadoCiudades) => {
+        if (err) {
+            console.error('Error al obtener ciudades para filtros:', err);
+            return res.status(500).json({ 
+                success: false, 
+                message: "Error al obtener ciudades para filtros" 
+            });
+        }
+
+        // Ejecutar consulta para clientes
+        db.query(queryClientes, (err, resultadoClientes) => {
+            if (err) {
+                console.error('Error al obtener clientes para filtros:', err);
+                return res.status(500).json({ 
+                    success: false, 
+                    message: "Error al obtener clientes para filtros" 
+                });
+            }
+
+            // Extraer solo los valores de las ciudades y clientes
+            const ciudades = resultadoCiudades.map(row => row.cliente_ciudad);
+            const clientes = resultadoClientes.map(row => row.cliente_nombre);
+
+            console.log(`📊 Datos para filtros obtenidos: ${ciudades.length} ciudades, ${clientes.length} clientes`);
+
+            res.json({
+                success: true,
+                data: {
+                    ciudades,
+                    clientes
+                },
+                meta: {
+                    totalCiudades: ciudades.length,
+                    totalClientes: clientes.length
+                }
+            });
+        });
+    });
+};
 
 module.exports = {
-    // Funciones de búsqueda
+     // Funciones de búsqueda
     buscarCliente,
     buscarProducto,
     
@@ -861,11 +1306,12 @@ module.exports = {
     actualizarTotalesPedido,
     actualizarObservacionesPedido,
     
-    // Alias para compatibilidad con diferentes rutas
+    // Alias para compatibilidad
     registrarPedido: nuevoPedido,
     filtrarCliente: buscarCliente,
-    filtrarProducto: buscarProducto
-
-    ,
-    generarPdfNotaPedido
+    filtrarProducto: buscarProducto,
+    
+    generarPdfNotaPedido,
+    generarPdfNotasPedidoMultiples,
+    obtenerDatosFiltros
 };

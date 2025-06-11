@@ -5,30 +5,20 @@ const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const multer = require('multer');
+const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
+const { formatearFecha } = require('../middlewares/fechaMiddleware');
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+//
 const obtenerVentas = (req, res) => {
-    
     const query = `
         SELECT 
             id, DATE_FORMAT(fecha, '%d-%m-%Y // %H:%i:%s') AS fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre, cae_id, cae_fecha
         FROM ventas ORDER BY fecha ASC`;
     db.query(query, (err, results) => {
         if (err) {
-            console.error('Error al obtener:', err);
-            res.status(500).send('Error al obtener');
+            console.error('Error al obtener ventas:', err);
+            res.status(500).send('Error al obtener ventas');
         } else {
             res.json(results);
         }
@@ -37,10 +27,7 @@ const obtenerVentas = (req, res) => {
 
 const filtrarVenta = (req, res) => {
     const ventaId = req.params.ventaId;
-    const query = `
-        SELECT 
-            *
-        FROM ventas WHERE id = ? `;
+    const query = `SELECT * FROM ventas WHERE id = ?`;
     db.query(query, [ventaId], (err, results) => {
         if (err) {
             console.error('Error ejecutando la consulta:', err);
@@ -54,22 +41,19 @@ const filtrarVenta = (req, res) => {
 const filtrarProductosVenta = (req, res) => {
     const ventaId = req.params.id;
 
-    // Consulta SQL para obtener productos del pedido
     const query = `
-        SELECT id, venta_id, producto_id, producto_nombre, producto_um, cantidad,  precio, iva, subtotal FROM ventas_cont
+        SELECT id, venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal FROM ventas_cont
         WHERE venta_id = ?
     `;
     
     db.query(query, [ventaId], (err, results) => {
         if (err) {
-            console.error('Error al obtener productos del pedido:', err);
-            return res.status(500).json({ error: 'Error al obtener productos del pedido' });
+            console.error('Error al obtener productos de la venta:', err);
+            return res.status(500).json({ error: 'Error al obtener productos de la venta' });
         }
         res.json(results);
     });
 };
-
-
 
 const generarPdfFactura = async (req, res) => {
     const { venta, productos } = req.body;
@@ -78,7 +62,6 @@ const generarPdfFactura = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    // Ruta de la plantilla HTML
     const templatePath = path.join(__dirname, "../resources/documents/factura.html");
 
     if (!fs.existsSync(templatePath)) {
@@ -86,7 +69,6 @@ const generarPdfFactura = async (req, res) => {
     }
 
     try {
-        // Leer y reemplazar la plantilla HTML
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
         htmlTemplate = htmlTemplate
@@ -106,7 +88,6 @@ const generarPdfFactura = async (req, res) => {
                     <td style="text-align: right;">$${producto.precio}</td>
                     <td style="text-align: right;">$${producto.iva}</td>
                     <td style="text-align: right;">$${producto.subtotal}</td>
-
                 </tr>`
             )
             .join("");
@@ -121,48 +102,56 @@ const generarPdfFactura = async (req, res) => {
         htmlTemplate = htmlTemplate.replace("{{iva}}", ivaPdf);
         htmlTemplate = htmlTemplate.replace("{{total}}", totalPdf);
 
-
-        // Iniciar Puppeteer y generar PDF
         const browser = await puppeteer.launch({ headless: "new" });
         const page = await browser.newPage();
 
-        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" }); // ⬅️ Espera hasta que la página cargue completamente
+        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
         const pdfBuffer = await page.pdf({ format: "A4" });
 
         await browser.close();
 
-        // Configurar la respuesta
+        // Auditar generación de PDF
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ventas',
+            registroId: venta.id,
+            detallesAdicionales: `PDF de factura generado para cliente: ${venta.cliente_nombre} - Total: $${venta.total}`
+        });
+
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Factura_${venta.cliente_nombre}.pdf"`);
-
         
-        res.end(pdfBuffer); // ⬅️ Usa res.end() en lugar de res.send() para archivos binarios
+        res.end(pdfBuffer);
     } catch (error) {
         console.error("Error generando PDF:", error);
+        
+        // Auditar error en generación de PDF
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ventas',
+            registroId: venta.id,
+            detallesAdicionales: `Error generando PDF de factura: ${error.message}`
+        });
+        
         res.status(500).json({ error: "Error al generar el PDF" });
     }
 };
 
+
 const generarPdfFacturasMultiples = async (req, res) => {
     const { ventasIds } = req.body;
-    const db = require('./db'); // Ajusta esto a tu ruta de conexión
     
     if (!ventasIds || !Array.isArray(ventasIds) || ventasIds.length === 0) {
         return res.status(400).json({ error: "Debe proporcionar al menos un ID de venta válido" });
     }
 
     try {
-        // Array para almacenar todos los buffers de PDFs
         const pdfBuffers = [];
-        
-        // Iniciar Puppeteer
         const browser = await puppeteer.launch({ headless: "new" });
 
-        // Procesar cada venta secuencialmente
         for (let i = 0; i < ventasIds.length; i++) {
             const ventaId = ventasIds[i];
             
-            // Obtener información de la venta utilizando promisify para el enfoque de callback
             const getVenta = () => {
                 return new Promise((resolve, reject) => {
                     db.query('SELECT * FROM ventas WHERE id = ?', [ventaId], (err, results) => {
@@ -197,15 +186,11 @@ const generarPdfFacturasMultiples = async (req, res) => {
                     continue;
                 }
                 
-                // Generar el PDF para esta venta (usando tu código existente)
                 const templatePath = path.join(__dirname, "../resources/documents/factura.html");
-                
-                // ... resto del código del template igual que en tu función generarPdfFactura
-                
                 let htmlTemplate = fs.readFileSync(templatePath, "utf8");
-
+                const fechaFormateada = formatearFecha(venta.fecha);
                 htmlTemplate = htmlTemplate
-                    .replace("{{fecha}}", venta.fecha)
+                    .replace("{{fecha}}", fechaFormateada)
                     .replace("{{cliente_nombre}}", venta.cliente_nombre)
                     .replace("{{cliente_cuit}}", venta.cliente_cuit || "No informado")
                     .replace("{{cliente_cativa}}", venta.cliente_condicion || "No informado");
@@ -235,17 +220,14 @@ const generarPdfFacturasMultiples = async (req, res) => {
                 htmlTemplate = htmlTemplate.replace("{{iva}}", venta.ivatotal || ivaPdf);
                 htmlTemplate = htmlTemplate.replace("{{total}}", venta.total || totalPdf);
 
-                // Generar PDF individual para esta venta
                 const page = await browser.newPage();
                 await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
                 const pdfBuffer = await page.pdf({ format: "A4" });
                 await page.close();
                 
-                // Almacenar el buffer del PDF
                 pdfBuffers.push(pdfBuffer);
             } catch (error) {
                 console.error(`Error procesando venta ID ${ventaId}:`, error);
-                // Continúa con las siguientes ventas
             }
         }
         
@@ -255,7 +237,7 @@ const generarPdfFacturasMultiples = async (req, res) => {
             return res.status(404).json({ error: "No se pudieron generar PDFs para las ventas seleccionadas" });
         }
 
-        // Combinar todos los PDFs usando pdf-lib
+        // Combinar todos los PDFs
         const { PDFDocument } = require('pdf-lib');
         const mergedPdf = await PDFDocument.create();
         
@@ -267,17 +249,30 @@ const generarPdfFacturasMultiples = async (req, res) => {
         
         const mergedPdfBuffer = await mergedPdf.save();
 
-        // Configurar la respuesta
+        // Auditar generación de PDFs múltiples
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ventas',
+            detallesAdicionales: `PDFs múltiples de facturas generados - ${ventasIds.length} ventas solicitadas, ${pdfBuffers.length} generadas`
+        });
+
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Facturas_Multiples.pdf"`);
         res.end(Buffer.from(mergedPdfBuffer));
         
     } catch (error) {
         console.error("Error generando PDFs múltiples:", error);
+        
+        // Auditar error en generación de PDFs múltiples
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ventas',
+            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
+        });
+        
         res.status(500).json({ error: "Error al generar los PDFs múltiples" });
     }
 };
-
 
 const generarPdfListaPrecio = async (req, res) => {
     const { cliente, productos } = req.body;
@@ -286,7 +281,6 @@ const generarPdfListaPrecio = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    // Ruta de la plantilla HTML
     const templatePath = path.join(__dirname, "../resources/documents/lista_precio.html");
 
     if (!fs.existsSync(templatePath)) {
@@ -294,7 +288,6 @@ const generarPdfListaPrecio = async (req, res) => {
     }
 
     try {
-        // Leer y reemplazar la plantilla HTML
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
         htmlTemplate = htmlTemplate
@@ -314,59 +307,44 @@ const generarPdfListaPrecio = async (req, res) => {
                     <td style="text-align: right;">$${producto.precio}</td>
                     <td style="text-align: right;">$${producto.iva}</td>
                     <td style="text-align: right;">$${producto.subtotal}</td>
-
                 </tr>`
             )
             .join("");
 
         htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
 
-        // Iniciar Puppeteer y generar PDF
         const browser = await puppeteer.launch({ headless: "new" });
         const page = await browser.newPage();
 
-        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" }); // ⬅️ Espera hasta que la página cargue completamente
+        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
         const pdfBuffer = await page.pdf({ format: "A4" });
 
         await browser.close();
 
-        // Configurar la respuesta
+        // Auditar generación de lista de precios
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'productos',
+            detallesAdicionales: `Lista de precios generada para cliente: ${cliente.nombre} - ${productos.length} productos`
+        });
+
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Lista_Precios_${cliente.nombre}.pdf"`);
         
-        res.end(pdfBuffer); // ⬅️ Usa res.end() en lugar de res.send() para archivos binarios
+        res.end(pdfBuffer);
     } catch (error) {
         console.error("Error generando PDF:", error);
+        
+        // Auditar error en generación de lista de precios
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'productos',
+            detallesAdicionales: `Error generando lista de precios: ${error.message}`
+        });
+        
         res.status(500).json({ error: "Error al generar el PDF" });
     }
 };
-
-
-
-const comprobantesPath = path.join(__dirname, "../storage/comprobantes");
-
-// Si no existe la carpeta, la crea
-if (!fs.existsSync(comprobantesPath)) {
-    fs.mkdirSync(comprobantesPath, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, comprobantesPath);
-    },
-    filename: (req, file, cb) => {
-        const ventaId = req.params.ventaId;
-        const extension = path.extname(file.originalname);
-        cb(null, `VENTA-${ventaId}${extension}`);
-    },
-});
-
-const upload = multer({ storage }).single("comprobante");
-
-
-
-
-
 
 
 // Obtener todas las cuentas de fondos
@@ -385,6 +363,7 @@ const obtenerCuentasFondos = (req, res) => {
         res.json({ success: true, data: results });
     });
 };
+
 
 // Facturar pedido (convierte pedido a venta)
 const facturarPedido = async (req, res) => {
@@ -447,8 +426,8 @@ const facturarPedido = async (req, res) => {
                 pedido.cliente_condicion,
                 pedido.cliente_cuit,
                 cuentaId,
-                'FACTURA', // tipo_doc
-                tipoFiscal, // tipo_f (A, B, C)
+                'FACTURA',
+                tipoFiscal,
                 subtotalSinIva,
                 ivaTotal,
                 totalConIva,
@@ -513,13 +492,29 @@ const facturarPedido = async (req, res) => {
             await queryPromise(actualizarPedidoQuery, [pedidoId]);
 
             // Confirmar transacción
-            db.commit((err) => {
+            db.commit(async (err) => {
                 if (err) {
                     console.error('Error confirmando transacción:', err);
                     return db.rollback(() => {
                         res.status(500).json({ success: false, message: 'Error confirmando transacción' });
                     });
                 }
+
+                // Auditar facturación exitosa
+                await auditarOperacion(req, {
+                    accion: 'INSERT',
+                    tabla: 'ventas',
+                    registroId: ventaId,
+                    datosNuevos: {
+                        id: ventaId,
+                        pedido_origen: pedidoId,
+                        cliente_nombre: pedido.cliente_nombre,
+                        total: totalConIva,
+                        tipo_fiscal: tipoFiscal,
+                        cuenta_id: cuentaId
+                    },
+                    detallesAdicionales: `Pedido #${pedidoId} facturado como venta #${ventaId} - Cliente: ${pedido.cliente_nombre} - Total: $${totalConIva}`
+                });
 
                 console.log('✅ Facturación completada exitosamente');
                 res.json({ 
@@ -535,6 +530,15 @@ const facturarPedido = async (req, res) => {
 
         } catch (error) {
             console.error('Error en facturación:', error);
+            
+            // Auditar error en facturación
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'ventas',
+                detallesAdicionales: `Error en facturación del pedido ${pedidoId}: ${error.message}`,
+                datosNuevos: req.body
+            });
+            
             db.rollback(() => {
                 res.status(500).json({ 
                     success: false, 
@@ -557,6 +561,7 @@ const queryPromise = (query, params) => {
         });
     });
 };
+
 
 // Obtener historial de movimientos de una cuenta
 const obtenerMovimientosCuenta = (req, res) => {
@@ -586,9 +591,6 @@ const obtenerMovimientosCuenta = (req, res) => {
         res.json({ success: true, data: results });
     });
 };
-
-
-
 
 
 module.exports = {

@@ -2,7 +2,7 @@ const db = require('./db');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-
+const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 
 // Definir la ruta de almacenamiento para los comprobantes
 const comprobantesPath = path.join(__dirname, "../storage/comprobantes");
@@ -27,7 +27,6 @@ const upload = multer({
     storage,
     limits: { fileSize: 10 * 1024 * 1024 }, // Límite de 10MB
     fileFilter: (req, file, cb) => {
-        // Verificar tipos de archivo permitidos
         const filetypes = /jpeg|jpg|png|pdf/;
         const mimetype = filetypes.test(file.mimetype);
         const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
@@ -39,8 +38,6 @@ const upload = multer({
         cb(new Error("El archivo debe ser una imagen (JPG, PNG) o un PDF"));
     }
 }).single("comprobante");
-
-
 
 // Función para obtener todas las compras
 const obtenerCompras = (req, res) => {
@@ -118,7 +115,76 @@ const obtenerGasto = (req, res) => {
     });
 };
 
-// Función para obtener los productos de una compra (CORREGIDA)
+
+const manejarMovimientoFondos = async (cuentaId, monto, origen, referenciaId, tipoOperacion = 'insertar') => {
+    return new Promise((resolve, reject) => {
+        if (!cuentaId || monto <= 0) {
+            return resolve(); // No hay cuenta o monto inválido, no hacer nada
+        }
+
+        if (tipoOperacion === 'insertar') {
+            // Insertar movimiento de egreso
+            const queryMovimiento = `
+                INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, referencia_id, monto)
+                VALUES (?, 'EGRESO', ?, ?, ?)
+            `;
+            
+            db.query(queryMovimiento, [cuentaId, origen, referenciaId, monto], (err, result) => {
+                if (err) {
+                    console.error('Error al insertar movimiento de fondos:', err);
+                    return reject(err);
+                }
+                
+                // Actualizar saldo de la cuenta (restar monto)
+                const queryActualizarSaldo = `
+                    UPDATE cuenta_fondos 
+                    SET saldo = saldo - ? 
+                    WHERE id = ?
+                `;
+                
+                db.query(queryActualizarSaldo, [monto, cuentaId], (err, result) => {
+                    if (err) {
+                        console.error('Error al actualizar saldo de cuenta:', err);
+                        return reject(err);
+                    }
+                    console.log(`✅ Movimiento registrado - Cuenta: ${cuentaId}, Monto: -$${monto}, Origen: ${origen}`);
+                    resolve(result);
+                });
+            });
+        } else if (tipoOperacion === 'eliminar') {
+            // Eliminar movimiento y restaurar saldo
+            const queryEliminarMovimiento = `
+                DELETE FROM movimiento_fondos 
+                WHERE origen = ? AND referencia_id = ?
+            `;
+            
+            db.query(queryEliminarMovimiento, [origen, referenciaId], (err, result) => {
+                if (err) {
+                    console.error('Error al eliminar movimiento de fondos:', err);
+                    return reject(err);
+                }
+                
+                // Restaurar saldo de la cuenta (sumar monto)
+                const queryRestaurarSaldo = `
+                    UPDATE cuenta_fondos 
+                    SET saldo = saldo + ? 
+                    WHERE id = ?
+                `;
+                
+                db.query(queryRestaurarSaldo, [monto, cuentaId], (err, result) => {
+                    if (err) {
+                        console.error('Error al restaurar saldo de cuenta:', err);
+                        return reject(err);
+                    }
+                    console.log(`✅ Movimiento eliminado - Cuenta: ${cuentaId}, Monto: +$${monto}, Origen: ${origen}`);
+                    resolve(result);
+                });
+            });
+        }
+    });
+};
+
+// Función para obtener los productos de una compra
 const obtenerProductosCompra = (req, res) => {
     const compraId = req.params.compraId;
     
@@ -137,41 +203,189 @@ const obtenerProductosCompra = (req, res) => {
                 message: "Error al obtener productos de la compra" 
             });
         }
-        // Siempre devolvemos un array como respuesta, incluso si está vacío
         res.json(results || []);
     });
 };
 
 
-
-const nuevoGasto = (req, res) => {
+const nuevoGasto = async (req, res) => {
     const { descripcion, monto, formaPago, observaciones, empleadoId } = req.body;
     
     const query = `
-        INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id)
-        VALUES (NOW(), ?, ?, ?, ?, ?)
+        INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id, cuenta_id)
+        VALUES (NOW(), ?, ?, ?, ?, ?, null)
     `;
     
-    db.query(query, [descripcion, monto, formaPago, observaciones, empleadoId], (err, results) => {
+    db.query(query, [descripcion, monto, formaPago, observaciones, empleadoId], async (err, results) => {
         if (err) {
             console.error('Error al crear el gasto:', err);
+            
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'gastos',
+                detallesAdicionales: `Error al crear gasto: ${err.message}`,
+                datosNuevos: req.body
+            });
+            
             return res.status(500).json({ 
                 success: false, 
                 message: "Error al crear el gasto" 
             });
         }
         
-        res.json({ 
-            success: true, 
-            message: "Gasto creado exitosamente", 
-            data: { id: results.insertId } 
-        });
+        const gastoId = results.insertId;
+        
+        try {
+            // Manejar movimiento de fondos si hay cuenta asignada
+            await manejarMovimientoFondos(cuentaId, parseFloat(monto), 'gastos', gastoId, 'insertar');
+            
+            // Auditar creación exitosa del gasto
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'gastos',
+                registroId: gastoId,
+                datosNuevos: { 
+                    id: gastoId,
+                    ...req.body
+                },
+                detallesAdicionales: `Gasto creado: ${descripcion} - Monto: $${monto} - Forma de pago: ${formaPago}${cuentaId ? ` - Cuenta: ${cuentaId}` : ''}`
+            });
+            
+            res.json({ 
+                success: true, 
+                message: "Gasto creado exitosamente", 
+                data: { id: gastoId } 
+            });
+            
+        } catch (fondosError) {
+            console.error('Error en movimiento de fondos:', fondosError);
+            
+            // Eliminar el gasto creado si falló el movimiento de fondos
+            db.query('DELETE FROM gastos WHERE id = ?', [gastoId], () => {
+                res.status(500).json({ 
+                    success: false, 
+                    message: "Error al procesar el movimiento de fondos" 
+                });
+            });
+        }
     });
+};
+
+const actualizarGasto = async (req, res) => {
+    const gastoId = req.params.gastoId;
+    const { descripcion, monto, formaPago, observaciones, empleadoId, cuentaId } = req.body;
+    
+    try {
+        // Obtener datos anteriores
+        const datosAnteriores = await new Promise((resolve, reject) => {
+            db.query('SELECT * FROM gastos WHERE id = ?', [gastoId], (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
+            });
+        });
+        
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Gasto no encontrado' });
+        }
+        
+        // Actualizar gasto
+        const queryActualizar = `
+            UPDATE gastos 
+            SET descripcion = ?, monto = ?, forma_pago = ?, observaciones = ?, empleado_id = ?, cuenta_id = ?
+            WHERE id = ?
+        `;
+        
+        await new Promise((resolve, reject) => {
+            db.query(queryActualizar, [descripcion, monto, formaPago, observaciones, empleadoId, cuentaId, gastoId], (err, result) => {
+                if (err) return reject(err);
+                resolve(result);
+            });
+        });
+        
+        // Manejar cambios en movimientos de fondos
+        const montoAnterior = parseFloat(datosAnteriores.monto);
+        const montoNuevo = parseFloat(monto);
+        const cuentaAnterior = datosAnteriores.cuenta_id;
+        
+        // Si cambió la cuenta o el monto
+        if (cuentaAnterior !== cuentaId || montoAnterior !== montoNuevo) {
+            // Eliminar movimiento anterior si existía
+            if (cuentaAnterior) {
+                await manejarMovimientoFondos(cuentaAnterior, montoAnterior, 'gastos', gastoId, 'eliminar');
+            }
+            
+            // Crear nuevo movimiento si hay cuenta
+            if (cuentaId) {
+                await manejarMovimientoFondos(cuentaId, montoNuevo, 'gastos', gastoId, 'insertar');
+            }
+        }
+        
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'gastos',
+            registroId: gastoId,
+            datosAnteriores,
+            datosNuevos: { ...datosAnteriores, descripcion, monto, formaPago, observaciones, empleadoId, cuentaId },
+            detallesAdicionales: `Gasto actualizado: ${descripcion} - Monto: $${monto}`
+        });
+        
+        res.json({ success: true, message: 'Gasto actualizado exitosamente' });
+        
+    } catch (error) {
+        console.error('Error al actualizar gasto:', error);
+        res.status(500).json({ success: false, message: 'Error al actualizar el gasto' });
+    }
+};
+
+// Eliminar gasto
+const eliminarGasto = async (req, res) => {
+    const gastoId = req.params.gastoId;
+    
+    try {
+        // Obtener datos antes de eliminar
+        const datosAnteriores = await new Promise((resolve, reject) => {
+            db.query('SELECT * FROM gastos WHERE id = ?', [gastoId], (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
+            });
+        });
+        
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: 'Gasto no encontrado' });
+        }
+        
+        // Eliminar movimiento de fondos si existía
+        if (datosAnteriores.cuenta_id) {
+            await manejarMovimientoFondos(datosAnteriores.cuenta_id, parseFloat(datosAnteriores.monto), 'gastos', gastoId, 'eliminar');
+        }
+        
+        // Eliminar gasto
+        await new Promise((resolve, reject) => {
+            db.query('DELETE FROM gastos WHERE id = ?', [gastoId], (err, result) => {
+                if (err) return reject(err);
+                resolve(result);
+            });
+        });
+        
+        await auditarOperacion(req, {
+            accion: 'DELETE',
+            tabla: 'gastos',
+            registroId: gastoId,
+            datosAnteriores,
+            detallesAdicionales: `Gasto eliminado: ${datosAnteriores.descripcion} - Monto: $${datosAnteriores.monto}`
+        });
+        
+        res.json({ success: true, message: 'Gasto eliminado exitosamente' });
+        
+    } catch (error) {
+        console.error('Error al eliminar gasto:', error);
+        res.status(500).json({ success: false, message: 'Error al eliminar el gasto' });
+    }
 };
 
 
 // Función para registrar una nueva compra
-const registrarCompra = (req, res) => {
+const registrarCompra = async (req, res) => {
     const { 
         proveedor_id, 
         proveedor_nombre, 
@@ -192,7 +406,7 @@ const registrarCompra = (req, res) => {
     }
     
     // Iniciar transacción
-    db.beginTransaction((err) => {
+    db.beginTransaction(async (err) => {
         if (err) {
             console.error('Error al iniciar transacción:', err);
             return res.status(500).json({
@@ -201,40 +415,37 @@ const registrarCompra = (req, res) => {
             });
         }
         
-        // Insertar la compra principal
-        const queryCompra = `
-            INSERT INTO compras (
-                fecha, 
-                proveedor_id, 
-                proveedor_nombre, 
-                proveedor_cuit, 
-                total, 
-                estado,
-                empleado_id,
-                empleado_nombre
-            ) VALUES (?, ?, ?, ?, ?, 'Registrada', ?, ?)
-        `;
-        
-        const fechaCompra = fecha || new Date().toISOString().slice(0, 19).replace('T', ' ');
-        
-        db.query(queryCompra, [
-            fechaCompra,
-            proveedor_id,
-            proveedor_nombre,
-            proveedor_cuit,
-            parseFloat(total),
-            empleado_id,
-            empleado_nombre
-        ], (err, resultCompra) => {
-            if (err) {
-                console.error('Error al insertar compra:', err);
-                return db.rollback(() => {
-                    res.status(500).json({
-                        success: false,
-                        message: "Error al registrar la compra"
-                    });
+        try {
+            // Insertar la compra principal
+            const queryCompra = `
+                INSERT INTO compras (
+                    fecha, 
+                    proveedor_id, 
+                    proveedor_nombre, 
+                    proveedor_cuit, 
+                    total, 
+                    estado,
+                    empleado_id,
+                    empleado_nombre
+                ) VALUES (?, ?, ?, ?, ?, 'Registrada', ?, ?)
+            `;
+            
+            const fechaCompra = fecha || new Date().toISOString().slice(0, 19).replace('T', ' ');
+            
+            const resultCompra = await new Promise((resolve, reject) => {
+                db.query(queryCompra, [
+                    fechaCompra,
+                    proveedor_id,
+                    proveedor_nombre,
+                    proveedor_cuit,
+                    parseFloat(total),
+                    empleado_id,
+                    empleado_nombre
+                ], (err, result) => {
+                    if (err) return reject(err);
+                    resolve(result);
                 });
-            }
+            });
             
             const compraId = resultCompra.insertId;
             
@@ -253,7 +464,6 @@ const registrarCompra = (req, res) => {
                 ) VALUES ?
             `;
             
-            // Mapear productos del frontend a formato de base de datos
             const productosData = productos.map(producto => [
                 compraId,
                 producto.id,
@@ -262,50 +472,79 @@ const registrarCompra = (req, res) => {
                 parseInt(producto.cantidad),
                 parseFloat(producto.precio_costo),
                 parseFloat(producto.precio_venta),
-                0, // IVA - calculamos como 0 por ahora, se puede ajustar según necesidad
+                0,
                 parseFloat(producto.subtotal)
             ]);
             
-            db.query(queryProductos, [productosData], (err, resultProductos) => {
+            await new Promise((resolve, reject) => {
+                db.query(queryProductos, [productosData], (err, result) => {
+                    if (err) return reject(err);
+                    resolve(result);
+                });
+            });
+            
+            // Confirmar transacción
+            db.commit(async (err) => {
                 if (err) {
-                    console.error('Error al insertar productos de la compra:', err);
+                    console.error('Error al confirmar transacción:', err);
                     return db.rollback(() => {
                         res.status(500).json({
                             success: false,
-                            message: "Error al registrar los productos de la compra"
+                            message: "Error al confirmar la compra"
                         });
                     });
                 }
                 
-                // Confirmar transacción
-                db.commit((err) => {
-                    if (err) {
-                        console.error('Error al confirmar transacción:', err);
-                        return db.rollback(() => {
-                            res.status(500).json({
-                                success: false,
-                                message: "Error al confirmar la compra"
-                            });
-                        });
+                // Auditar creación exitosa de la compra
+                await auditarOperacion(req, {
+                    accion: 'INSERT',
+                    tabla: 'compras',
+                    registroId: compraId,
+                    datosNuevos: { 
+                        id: compraId,
+                        proveedor_nombre,
+                        proveedor_cuit,
+                        total: parseFloat(total),
+                        productos_count: productos.length
+                    },
+                    detallesAdicionales: `Compra registrada - Proveedor: ${proveedor_nombre} - Total: $${total} - ${productos.length} productos`
+                });
+                
+                res.json({
+                    success: true,
+                    message: "Compra registrada exitosamente",
+                    data: {
+                        compra_id: compraId,
+                        total: parseFloat(total),
+                        productos_registrados: productos.length
                     }
-                    
-                    // Respuesta exitosa
-                    res.json({
-                        success: true,
-                        message: "Compra registrada exitosamente",
-                        data: {
-                            compra_id: compraId,
-                            total: parseFloat(total),
-                            productos_registrados: resultProductos.affectedRows
-                        }
-                    });
                 });
             });
-        });
+            
+        } catch (error) {
+            console.error('Error en el proceso de compra:', error);
+            
+            // Auditar error en creación de la compra
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'compras',
+                detallesAdicionales: `Error al registrar compra: ${error.message}`,
+                datosNuevos: req.body
+            });
+            
+            db.rollback(() => {
+                res.status(500).json({
+                    success: false,
+                    message: "Error al registrar la compra"
+                });
+            });
+        }
     });
 };
 
-// Función auxiliar para actualizar stock de productos (opcional)
+
+
+// Función auxiliar para actualizar stock de productos
 const actualizarStockProductos = (productos, callback) => {
     let productosActualizados = 0;
     const totalProductos = productos.length;
@@ -335,8 +574,9 @@ const actualizarStockProductos = (productos, callback) => {
     });
 };
 
+
 // Función para registrar compra con actualización de stock
-const registrarCompraConStock = (req, res) => {
+const registrarCompraConStock = async (req, res) => {
     const { 
         proveedor_id, 
         proveedor_nombre, 
@@ -346,7 +586,8 @@ const registrarCompraConStock = (req, res) => {
         productos,
         empleado_id = null,
         empleado_nombre = null,
-        actualizarStock = true 
+        actualizarStock = true,
+        cuentaId = null  
     } = req.body;
     
     // Validaciones básicas
@@ -358,7 +599,7 @@ const registrarCompraConStock = (req, res) => {
     }
     
     // Iniciar transacción
-    db.beginTransaction((err) => {
+    db.beginTransaction(async (err) => {
         if (err) {
             console.error('Error al iniciar transacción:', err);
             return res.status(500).json({
@@ -367,40 +608,39 @@ const registrarCompraConStock = (req, res) => {
             });
         }
         
-        // Insertar la compra principal
-        const queryCompra = `
-            INSERT INTO compras (
-                fecha, 
-                proveedor_id, 
-                proveedor_nombre, 
-                proveedor_cuit, 
-                total, 
-                estado,
-                empleado_id,
-                empleado_nombre
-            ) VALUES (?, ?, ?, ?, ?, 'Registrada', ?, ?)
-        `;
-        
-        const fechaCompra = fecha || new Date().toISOString().slice(0, 19).replace('T', ' ');
-        
-        db.query(queryCompra, [
-            fechaCompra,
-            proveedor_id,
-            proveedor_nombre,
-            proveedor_cuit,
-            parseFloat(total),
-            empleado_id,
-            empleado_nombre
-        ], (err, resultCompra) => {
-            if (err) {
-                console.error('Error al insertar compra:', err);
-                return db.rollback(() => {
-                    res.status(500).json({
-                        success: false,
-                        message: "Error al registrar la compra"
-                    });
+        try {
+            // Insertar la compra principal
+            const queryCompra = `
+                INSERT INTO compras (
+                    fecha, 
+                    proveedor_id, 
+                    proveedor_nombre, 
+                    proveedor_cuit, 
+                    total, 
+                    estado,
+                    empleado_id,
+                    empleado_nombre,
+                    cuenta_id
+                ) VALUES (?, ?, ?, ?, ?, 'Registrada', ?, ?, ?)
+            `;
+            
+            const fechaCompra = fecha || new Date().toISOString().slice(0, 19).replace('T', ' ');
+            
+            const resultCompra = await new Promise((resolve, reject) => {
+                db.query(queryCompra, [
+                    fechaCompra,
+                    proveedor_id,
+                    proveedor_nombre,
+                    proveedor_cuit,
+                    parseFloat(total),
+                    empleado_id,
+                    empleado_nombre,
+                    cuentaId
+                ], (err, result) => {
+                    if (err) return reject(err);
+                    resolve(result);
                 });
-            }
+            });
             
             const compraId = resultCompra.insertId;
             
@@ -431,84 +671,87 @@ const registrarCompraConStock = (req, res) => {
                 parseFloat(producto.subtotal)
             ]);
             
-            db.query(queryProductos, [productosData], (err, resultProductos) => {
+            await new Promise((resolve, reject) => {
+                db.query(queryProductos, [productosData], (err, result) => {
+                    if (err) return reject(err);
+                    resolve(result);
+                });
+            });
+            
+            // Actualizar stock si se solicita
+            if (actualizarStock) {
+                await new Promise((resolve, reject) => {
+                    actualizarStockProductos(productos, (err) => {
+                        if (err) return reject(err);
+                        resolve();
+                    });
+                });
+            }
+            
+            // Manejar movimiento de fondos si hay cuenta asignada
+            if (cuentaId) {
+                await manejarMovimientoFondos(cuentaId, parseFloat(total), 'compras', compraId, 'insertar');
+            }
+            
+            // Confirmar transacción
+            db.commit(async (err) => {
                 if (err) {
-                    console.error('Error al insertar productos de la compra:', err);
+                    console.error('Error al confirmar transacción:', err);
                     return db.rollback(() => {
                         res.status(500).json({
                             success: false,
-                            message: "Error al registrar los productos de la compra"
+                            message: "Error al confirmar la compra"
                         });
                     });
                 }
                 
-                // Actualizar stock si se solicita
-                if (actualizarStock) {
-                    actualizarStockProductos(productos, (err) => {
-                        if (err) {
-                            console.error('Error al actualizar stock:', err);
-                            return db.rollback(() => {
-                                res.status(500).json({
-                                    success: false,
-                                    message: "Error al actualizar el stock de los productos"
-                                });
-                            });
-                        }
-                        
-                        // Confirmar transacción
-                        db.commit((err) => {
-                            if (err) {
-                                console.error('Error al confirmar transacción:', err);
-                                return db.rollback(() => {
-                                    res.status(500).json({
-                                        success: false,
-                                        message: "Error al confirmar la compra"
-                                    });
-                                });
-                            }
-                            
-                            res.json({
-                                success: true,
-                                message: "Compra registrada exitosamente con actualización de stock",
-                                data: {
-                                    compra_id: compraId,
-                                    total: parseFloat(total),
-                                    productos_registrados: resultProductos.affectedRows
-                                }
-                            });
-                        });
-                    });
-                } else {
-                    // Confirmar sin actualizar stock
-                    db.commit((err) => {
-                        if (err) {
-                            console.error('Error al confirmar transacción:', err);
-                            return db.rollback(() => {
-                                res.status(500).json({
-                                    success: false,
-                                    message: "Error al confirmar la compra"
-                                });
-                            });
-                        }
-                        
-                        res.json({
-                            success: true,
-                            message: "Compra registrada exitosamente",
-                            data: {
-                                compra_id: compraId,
-                                total: parseFloat(total),
-                                productos_registrados: resultProductos.affectedRows
-                            }
-                        });
-                    });
-                }
+                // Auditar creación exitosa de la compra con stock
+                await auditarOperacion(req, {
+                    accion: 'INSERT',
+                    tabla: 'compras',
+                    registroId: compraId,
+                    datosNuevos: { 
+                        id: compraId,
+                        proveedor_nombre,
+                        proveedor_cuit,
+                        total: parseFloat(total),
+                        productos_count: productos.length,
+                        stock_actualizado: actualizarStock,
+                        cuenta_id: cuentaId
+                    },
+                    detallesAdicionales: `Compra registrada con ${actualizarStock ? 'actualización' : 'sin actualización'} de stock - Proveedor: ${proveedor_nombre} - Total: $${total} - ${productos.length} productos${cuentaId ? ` - Cuenta: ${cuentaId}` : ''}`
+                });
+                
+                res.json({
+                    success: true,
+                    message: `Compra registrada exitosamente${actualizarStock ? ' con actualización de stock' : ''}${cuentaId ? ' y movimiento de fondos' : ''}`,
+                    data: {
+                        compra_id: compraId,
+                        total: parseFloat(total),
+                        productos_registrados: productos.length
+                    }
+                });
             });
-        });
+            
+        } catch (error) {
+            console.error('Error en el proceso de compra:', error);
+            
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'compras',
+                detallesAdicionales: `Error al registrar compra con stock: ${error.message}`,
+                datosNuevos: req.body
+            });
+            
+            db.rollback(() => {
+                res.status(500).json({
+                    success: false,
+                    message: "Error al registrar la compra"
+                });
+            });
+        }
     });
 };
-
-
-
 
 module.exports = {
     obtenerGastos,
@@ -516,5 +759,7 @@ module.exports = {
     obtenerCompras,
     obtenerProductosCompra,
     nuevoGasto,
+    actualizarGasto,
+    eliminarGasto,
     registrarCompraConStock
 };

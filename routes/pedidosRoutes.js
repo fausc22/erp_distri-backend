@@ -1,54 +1,112 @@
 const express = require('express');
 const router = express.Router();
 const pedidosController = require('../controllers/pedidosController');
+const { requireEmployee } = require('../middlewares/authMiddleware');
+const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 
-// ========== RUTAS DE BÚSQUEDA ==========
-// GET /api/pedidos/filtrar-cliente?q=nombre
-router.get('/filtrar-cliente', pedidosController.buscarCliente);
+// Rutas de búsqueda
+router.get('/filtrar-cliente', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'clientes', incluirQuery: true }),
+    pedidosController.buscarCliente
+);
 
-// GET /api/pedidos/filtrar-producto?q=nombre  
-router.get('/filtrar-producto', pedidosController.buscarProducto);
+router.get('/filtrar-producto', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
+    pedidosController.buscarProducto
+);
 
-// ========== RUTAS DE PEDIDOS ==========
-// POST /api/pedidos/registrar-pedido
-router.post('/registrar-pedido', pedidosController.nuevoPedido);
+// Rutas de pedidos
+router.post('/registrar-pedido', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'INSERT', tabla: 'pedidos', incluirBody: true }),
+    pedidosController.nuevoPedido
+);
 
-// GET /api/pedidos/obtener-pedidos
-router.get('/obtener-pedidos', pedidosController.obtenerPedidos);
+router.get('/obtener-pedidos', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'pedidos', incluirQuery: true }),
+    pedidosController.obtenerPedidos
+);
 
-// GET /api/pedidos/detalle-pedido/:pedidoId
-router.get('/detalle-pedido/:pedidoId', pedidosController.obtenerDetallePedido);
+router.get('/detalle-pedido/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'pedidos' }),
+    pedidosController.obtenerDetallePedido
+);
 
-// PUT /api/pedidos/actualizar-estado/:pedidoId
-router.put('/actualizar-estado/:pedidoId', pedidosController.actualizarEstadoPedido);
+router.put('/actualizar-estado/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'pedidos', incluirBody: true }),
+    pedidosController.actualizarEstadoPedido
+);
 
-// DELETE /api/pedidos/eliminar-pedido/:pedidoId
-router.delete('/eliminar-pedido/:pedidoId', pedidosController.eliminarPedido);
+router.delete('/eliminar-pedido/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'DELETE', tabla: 'pedidos' }),
+    pedidosController.eliminarPedido
+);
 
-// ========== RUTAS ADICIONALES ==========
-// GET /api/pedidos/productos/:pedidoId - Obtener solo productos de un pedido
-router.get('/productos/:pedidoId', pedidosController.obtenerProductosPedido);
+router.get('/productos/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'pedidos_cont' }),
+    pedidosController.obtenerProductosPedido
+);
 
-// GET /api/pedidos/filtrar/:pedidoId - Obtener un pedido específico
-router.get('/filtrar/:pedidoId', pedidosController.filtrarPedido);
+router.get('/filtrar/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'pedidos' }),
+    pedidosController.filtrarPedido
+);
 
-// ========== RUTAS PARA EDITAR PEDIDOS ==========
-// POST /api/pedidos/agregar-producto/:pedidoId - Agregar producto a pedido existente
-router.post('/agregar-producto/:pedidoId', pedidosController.agregarProductoPedidoExistente);
+// Rutas para editar pedidos
+router.post('/agregar-producto/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'INSERT', tabla: 'pedidos_cont', incluirBody: true }),
+    pedidosController.agregarProductoPedidoExistente
+);
 
-// PUT /api/pedidos/actualizar-producto/:productId - Actualizar producto de pedido
-router.put('/actualizar-producto/:productId', pedidosController.actualizarProductoPedido);
+router.put('/actualizar-producto/:productId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'pedidos_cont', incluirBody: true }),
+    pedidosController.actualizarProductoPedido
+);
 
-// DELETE /api/pedidos/eliminar-producto/:productId - Eliminar producto de pedido
-router.delete('/eliminar-producto/:productId', pedidosController.eliminarProductoPedido);
+router.delete('/eliminar-producto/:productId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'DELETE', tabla: 'pedidos_cont' }),
+    pedidosController.eliminarProductoPedido
+);
 
-// PUT /api/pedidos/actualizar-totales/:pedidoId - Actualizar totales del pedido
-router.put('/actualizar-totales/:pedidoId', pedidosController.actualizarTotalesPedido);
+router.put('/actualizar-totales/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'pedidos', incluirBody: true }),
+    pedidosController.actualizarTotalesPedido
+);
 
-// PUT /api/pedidos/actualizar-observaciones/:pedidoId - Actualizar observaciones
-router.put('/actualizar-observaciones/:pedidoId', pedidosController.actualizarObservacionesPedido);
+router.put('/actualizar-observaciones/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'pedidos', incluirBody: true }),
+    pedidosController.actualizarObservacionesPedido
+);
 
-router.post('/generarpdf-notapedido', pedidosController.generarPdfNotaPedido);
+router.post('/generarpdf-notapedido', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'pedidos' }),
+    pedidosController.generarPdfNotaPedido
+);
 
+router.post('/generarpdf-notaspedidos-multiples', 
+    requireEmployee, 
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'pedidos' }), 
+    pedidosController.generarPdfNotasPedidoMultiples
+);
+
+router.get('/datos-filtros', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'pedidos', incluirQuery: true }),
+    pedidosController.obtenerDatosFiltros
+);
 
 module.exports = router;
