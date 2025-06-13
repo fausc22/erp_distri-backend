@@ -233,41 +233,7 @@ const nuevoGasto = async (req, res) => {
             });
         }
         
-        const gastoId = results.insertId;
         
-        try {
-            // Manejar movimiento de fondos si hay cuenta asignada
-            await manejarMovimientoFondos(cuentaId, parseFloat(monto), 'gastos', gastoId, 'insertar');
-            
-            // Auditar creación exitosa del gasto
-            await auditarOperacion(req, {
-                accion: 'INSERT',
-                tabla: 'gastos',
-                registroId: gastoId,
-                datosNuevos: { 
-                    id: gastoId,
-                    ...req.body
-                },
-                detallesAdicionales: `Gasto creado: ${descripcion} - Monto: $${monto} - Forma de pago: ${formaPago}${cuentaId ? ` - Cuenta: ${cuentaId}` : ''}`
-            });
-            
-            res.json({ 
-                success: true, 
-                message: "Gasto creado exitosamente", 
-                data: { id: gastoId } 
-            });
-            
-        } catch (fondosError) {
-            console.error('Error en movimiento de fondos:', fondosError);
-            
-            // Eliminar el gasto creado si falló el movimiento de fondos
-            db.query('DELETE FROM gastos WHERE id = ?', [gastoId], () => {
-                res.status(500).json({ 
-                    success: false, 
-                    message: "Error al procesar el movimiento de fondos" 
-                });
-            });
-        }
     });
 };
 

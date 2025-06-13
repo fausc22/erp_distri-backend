@@ -252,6 +252,24 @@ const nuevoRemito = async (req, res) => {
     });
 };
 
+
+
+const obtenerCategorias = (req, res) => {
+    const query = `
+        SELECT id, nombre 
+        FROM categorias 
+        ORDER BY nombre ASC
+    `;
+
+    db.query(query, (err, results) => {
+        if (err) {
+            console.error('Error al obtener las categorías:', err);
+            return res.status(500).json({ success: false, message: "Error al obtener las categorías" });
+        }
+        res.json({ success: true, data: results });
+    });
+};
+
 const obtenerRemitos = (req, res) => {
     const { fecha, ciudad, provincia } = req.query;
   
@@ -260,32 +278,39 @@ const obtenerRemitos = (req, res) => {
       SELECT 
           id, venta_id, DATE_FORMAT(fecha, '%d-%m-%Y // %H:%i:%s') AS fecha,
           cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, 
-          cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones
+          cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones,
+          empleado_id, empleado_nombre
       FROM remitos 
-      WHERE 1=1`; // '1=1' permite añadir condiciones dinámicas
+      WHERE 1=1`;
   
-    // Agregar filtros si están presentes
+    const params = [];
+  
+    // Agregar filtros si están presentes usando parámetros seguros
     if (fecha) {
-      query += ` AND DATE(fecha) = '${fecha}'`; // Ajusta el formato si es necesario
+      query += ` AND DATE(fecha) = ?`;
+      params.push(fecha);
     }
   
     if (ciudad) {
-      query += ` AND cliente_ciudad = '${ciudad}'`;
+      query += ` AND cliente_ciudad = ?`;
+      params.push(ciudad);
     }
   
     if (provincia) {
-      query += ` AND cliente_provincia = '${provincia}'`;
+      query += ` AND cliente_provincia = ?`;
+      params.push(provincia);
     }
   
     // Ordenar los resultados
-    query += ` ORDER BY fecha ASC`;
+    query += ` ORDER BY fecha DESC`;
   
     // Ejecutar la consulta
-    db.query(query, (err, results) => {
+    db.query(query, params, (err, results) => {
       if (err) {
         console.error('Error al obtener remitos:', err);
         res.status(500).send('Error al obtener remitos');
       } else {
+        console.log(`✅ Remitos obtenidos: ${results.length}`);
         res.json(results);
       }
     });
@@ -296,7 +321,8 @@ const filtrarProductosRemito = (req, res) => {
 
     // Consulta SQL para obtener productos del remito
     const query = `
-        SELECT id, remito_id, producto_id, producto_nombre, producto_um, cantidad FROM detalle_remitos
+        SELECT id, remito_id, producto_id, producto_nombre, producto_um, cantidad 
+        FROM detalle_remitos
         WHERE remito_id = ?
     `;
     
@@ -305,6 +331,7 @@ const filtrarProductosRemito = (req, res) => {
             console.error('Error al obtener productos del remito:', err);
             return res.status(500).json({ error: 'Error al obtener productos del remito' });
         }
+        console.log(`📦 Productos del remito ${remitoId}: ${results.length}`);
         res.json(results);
     });
 };
@@ -341,6 +368,7 @@ const generarPdfRemito = async (req, res) => {
             .map(
                 (producto) => `
                 <tr>
+                    <td>${producto.producto_id}</td>
                     <td>${producto.producto_nombre}</td>
                     <td>${producto.producto_um}</td>
                     <td>${producto.cantidad}</td>
@@ -387,20 +415,149 @@ const generarPdfRemito = async (req, res) => {
     }
 };
 
-const obtenerCategorias = (req, res) => {
-    const query = `
-        SELECT id, nombre 
-        FROM categorias 
-        ORDER BY nombre ASC
-    `;
+// 🆕 NUEVA FUNCIÓN: Generar PDFs múltiples de remitos
+const generarPdfRemitosMultiples = async (req, res) => {
+    const { remitosIds } = req.body;
+    
+    if (!remitosIds || !Array.isArray(remitosIds) || remitosIds.length === 0) {
+        return res.status(400).json({ error: "Debe proporcionar al menos un ID de remito válido" });
+    }
 
-    db.query(query, (err, results) => {
-        if (err) {
-            console.error('Error al obtener las categorías:', err);
-            return res.status(500).json({ success: false, message: "Error al obtener las categorías" });
+    try {
+        const pdfBuffers = [];
+        const browser = await puppeteer.launch({ headless: "new" });
+
+        for (let i = 0; i < remitosIds.length; i++) {
+            // Asegurar que remitoId sea solo el ID numérico
+            let remitoId;
+            
+            if (typeof remitosIds[i] === 'object' && remitosIds[i] !== null) {
+                remitoId = remitosIds[i].id || remitosIds[i];
+            } else {
+                remitoId = remitosIds[i];
+            }
+            
+            // Validar que sea un número válido
+            if (!remitoId || isNaN(parseInt(remitoId))) {
+                console.warn(`ID de remito inválido: ${remitoId}, continuando con los siguientes`);
+                continue;
+            }
+            
+            remitoId = parseInt(remitoId);
+            
+            const getRemito = () => {
+                return new Promise((resolve, reject) => {
+                    db.query('SELECT * FROM remitos WHERE id = ?', [remitoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    });
+                });
+            };
+            
+            const getProductos = () => {
+                return new Promise((resolve, reject) => {
+                    db.query('SELECT * FROM detalle_remitos WHERE remito_id = ?', [remitoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    });
+                });
+            };
+            
+            try {
+                const remitoRows = await getRemito();
+                
+                if (remitoRows.length === 0) {
+                    console.warn(`Remito con ID ${remitoId} no encontrado, continuando con los siguientes`);
+                    continue;
+                }
+                
+                const remito = remitoRows[0];
+                const productos = await getProductos();
+                
+                if (productos.length === 0) {
+                    console.warn(`No se encontraron productos para el remito con ID ${remitoId}, continuando`);
+                    continue;
+                }
+                
+                const templatePath = path.join(__dirname, "../resources/documents/remito.html");
+                let htmlTemplate = fs.readFileSync(templatePath, "utf8");
+
+                htmlTemplate = htmlTemplate
+                    .replace("{{fecha}}", remito.fecha)
+                    .replace("{{cliente_nombre}}", remito.cliente_nombre)
+                    .replace("{{cliente_cuit}}", remito.cliente_cuit || "No informado")
+                    .replace("{{cliente_cativa}}", remito.cliente_condicion || "No informado")
+                    .replace("{{cliente_direccion}}", remito.cliente_direccion || "No informado")
+                    .replace("{{cliente_provincia}}", remito.cliente_provincia || "No informado")
+                    .replace("{{cliente_telefono}}", remito.cliente_telefono || "No informado")
+                    .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado");
+
+                const itemsHTML = productos
+                    .map(
+                        (producto) => `
+                        <tr>
+                            <td>${producto.producto_id}</td>
+                            <td>${producto.producto_nombre}</td>
+                            <td>${producto.producto_um}</td>
+                            <td>${producto.cantidad}</td>
+                        </tr>`
+                    )
+                    .join("");
+
+                htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
+
+                const page = await browser.newPage();
+                await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
+                const pdfBuffer = await page.pdf({ format: "A4" });
+                await page.close();
+                
+                pdfBuffers.push(pdfBuffer);
+            } catch (error) {
+                console.error(`Error procesando remito ID ${remitoId}:`, error);
+            }
         }
-        res.json({ success: true, data: results });
-    });
+        
+        await browser.close();
+
+        if (pdfBuffers.length === 0) {
+            return res.status(404).json({ error: "No se pudieron generar PDFs para los remitos seleccionados" });
+        }
+
+        // Combinar todos los PDFs
+        const { PDFDocument } = require('pdf-lib');
+        const mergedPdf = await PDFDocument.create();
+        
+        for (const pdfBuffer of pdfBuffers) {
+            const pdf = await PDFDocument.load(pdfBuffer);
+            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+            copiedPages.forEach((page) => mergedPdf.addPage(page));
+        }
+        
+        const mergedPdfBuffer = await mergedPdf.save();
+
+        // Auditar generación de PDFs múltiples
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'remitos',
+            detallesAdicionales: `PDFs múltiples de remitos generados - ${remitosIds.length} remitos solicitados, ${pdfBuffers.length} generados`
+        });
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="Remitos_Multiples.pdf"`);
+        res.end(Buffer.from(mergedPdfBuffer));
+        
+    } catch (error) {
+        console.error("Error generando PDFs múltiples:", error);
+        
+        // Auditar error en generación de PDFs múltiples
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'remitos',
+            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
+        });
+        
+        res.status(500).json({ error: "Error al generar los PDFs múltiples" });
+    }
 };
 
 module.exports = {
@@ -408,8 +565,9 @@ module.exports = {
     buscarProducto, 
     actualizarProducto,
     nuevoRemito,
+    obtenerCategorias,
     obtenerRemitos,
     filtrarProductosRemito,
     generarPdfRemito,
-    obtenerCategorias
+    generarPdfRemitosMultiples
 };

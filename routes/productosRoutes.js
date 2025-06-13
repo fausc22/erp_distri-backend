@@ -52,4 +52,10 @@ router.get('/categorias',
     productosController.obtenerCategorias
 );
 
+router.post('/generarpdf-remitos-multiples', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'remitos' }),
+    productosController.generarPdfRemitosMultiples
+);
+
 module.exports = router;
