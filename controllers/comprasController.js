@@ -4,40 +4,7 @@ const path = require('path');
 const multer = require('multer');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 
-// Definir la ruta de almacenamiento para los comprobantes
-const comprobantesPath = path.join(__dirname, "../storage/comprobantes");
-// Si no existe la carpeta, la crea
-if (!fs.existsSync(comprobantesPath)) {
-    fs.mkdirSync(comprobantesPath, { recursive: true });
-}
 
-// Configuración de multer para guardar los archivos
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, comprobantesPath);
-    },
-    filename: (req, file, cb) => {
-        const timestamp = Date.now();
-        const extension = path.extname(file.originalname);
-        cb(null, `temp-${timestamp}${extension}`);
-    },
-});
-
-const upload = multer({ 
-    storage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // Límite de 10MB
-    fileFilter: (req, file, cb) => {
-        const filetypes = /jpeg|jpg|png|pdf/;
-        const mimetype = filetypes.test(file.mimetype);
-        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-        
-        if (mimetype && extname) {
-            return cb(null, true);
-        }
-        
-        cb(new Error("El archivo debe ser una imagen (JPG, PNG) o un PDF"));
-    }
-}).single("comprobante");
 
 // Función para obtener todas las compras
 const obtenerCompras = (req, res) => {
@@ -209,33 +176,107 @@ const obtenerProductosCompra = (req, res) => {
 
 
 const nuevoGasto = async (req, res) => {
-    const { descripcion, monto, formaPago, observaciones, empleadoId } = req.body;
-    
-    const query = `
-        INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id, cuenta_id)
-        VALUES (NOW(), ?, ?, ?, ?, ?, null)
-    `;
-    
-    db.query(query, [descripcion, monto, formaPago, observaciones, empleadoId], async (err, results) => {
-        if (err) {
-            console.error('Error al crear el gasto:', err);
-            
-            await auditarOperacion(req, {
-                accion: 'INSERT',
-                tabla: 'gastos',
-                detallesAdicionales: `Error al crear gasto: ${err.message}`,
-                datosNuevos: req.body
-            });
-            
-            return res.status(500).json({ 
-                success: false, 
-                message: "Error al crear el gasto" 
+    try {
+        const { descripcion, monto, forma_pago, observaciones } = req.body;
+        const empleado_id = req.user.id; // Obtenido del middleware de autenticación
+
+        // Validaciones
+        if (!descripcion || !monto || !forma_pago) {
+            return res.status(400).json({
+                success: false,
+                message: 'Los campos descripcion, monto y forma_pago son obligatorios'
             });
         }
-        
-        
-    });
+
+        if (typeof monto !== 'number' || monto <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'El monto debe ser un número mayor a 0'
+            });
+        }
+
+        if (monto > 99999999.99) {
+            return res.status(400).json({
+                success: false,
+                message: 'El monto no puede exceder $99.999.999,99'
+            });
+        }
+
+        // Preparar datos para insertar
+        const gastoData = {
+            descripcion: descripcion.trim(),
+            monto: parseFloat(monto).toFixed(2), // Asegurar 2 decimales
+            forma_pago: forma_pago.trim(),
+            observaciones: observaciones ? observaciones.trim() : null,
+            empleado_id: empleado_id,
+            fecha: new Date()
+        };
+
+        // Query de inserción
+        const insertQuery = `
+            INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        `;
+
+        const valores = [
+            gastoData.descripcion,
+            gastoData.monto,
+            gastoData.forma_pago,
+            gastoData.observaciones,
+            gastoData.empleado_id,
+            gastoData.fecha
+        ];
+
+        // Ejecutar inserción
+        db.query(insertQuery, valores, async (err, result) => {
+            if (err) {
+                console.error('Error al insertar gasto:', err);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Error al registrar el gasto en la base de datos'
+                });
+            }
+
+            const gastoId = result.insertId;
+
+            // Auditar la operación
+            try {
+                await auditarOperacion(req, {
+                    accion: 'CREATE',
+                    tabla: 'gastos',
+                    registroId: gastoId,
+                    detallesAdicionales: `Gasto registrado: ${descripcion} - $${monto}`
+                });
+            } catch (auditError) {
+                console.error('Error en auditoría:', auditError);
+                // No fallar la operación por error de auditoría
+            }
+
+            // Respuesta exitosa
+            res.status(201).json({
+                success: true,
+                message: 'Gasto registrado exitosamente',
+                data: {
+                    id: gastoId,
+                    descripcion: gastoData.descripcion,
+                    monto: parseFloat(gastoData.monto),
+                    forma_pago: gastoData.forma_pago,
+                    observaciones: gastoData.observaciones,
+                    empleado_id: gastoData.empleado_id,
+                    fecha: gastoData.fecha
+                }
+            });
+        });
+
+    } catch (error) {
+        console.error('Error en nuevo gasto:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error interno del servidor'
+        });
+    }
 };
+
 
 const actualizarGasto = async (req, res) => {
     const gastoId = req.params.gastoId;

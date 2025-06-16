@@ -25,6 +25,8 @@ const productosRoutes = require('./routes/productosRoutes');
 const finanzasRoutes = require('./routes/finanzasRoutes'); 
 const comprasRoutes = require('./routes/comprasRoutes'); 
  const auditoriaRoutes = require('./routes/auditoriaRoutes');
+const comprobantesRoutes = require('./routes/comprobantesRoutes');
+
 
 //pongo los fronts BIEN
 const allowedOrigins = ['http://localhost:3000', 'https://distri-vertimar.vercel.app'];
@@ -63,7 +65,7 @@ app.use('/finanzas', finanzasRoutes);
 app.use('/ventas', ventasRoutes); 
 app.use('/compras', comprasRoutes);
 app.use('/auditoria', auditoriaRoutes);
-
+app.use('/comprobantes', comprobantesRoutes);
 
 // Iniciar el servidor
 app.listen(port, () => {
