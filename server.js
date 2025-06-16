@@ -23,7 +23,7 @@ const auditoriaRoutes = require('./routes/auditoriaRoutes');
 // CORS configuration - Incluye Railway
 const allowedOrigins = [
     'http://localhost:3000', 
-    'https://vertimar.vercel.app/',
+    'https://vertimar.vercel.app',
     'https://erpdistri-backend-production.up.railway.app', // Agrega tu dominio de Railway aquí
     /https:\/\/.*\.up\.railway\.app$/ // Permite cualquier subdominio de Railway
 ];
