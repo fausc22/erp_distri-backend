@@ -252,6 +252,49 @@ const nuevoRemito = async (req, res) => {
     });
 };
 
+const obtenerStock = async (req, res) => {
+   const productoId = req.params.id;
+    
+    try {
+        console.log('🔍 Consultando stock para producto ID:', productoId);
+        
+        const result = await new Promise((resolve, reject) => {
+            db.query(
+                'SELECT id, nombre, stock_actual FROM productos WHERE id = ?', 
+                [productoId], 
+                (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results);
+                }
+            );
+        });
+        
+        if (result.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Producto no encontrado' 
+            });
+        }
+        
+        const producto = result[0];
+        console.log('✅ Stock encontrado:', producto.stock_actual);
+        
+        res.json({ 
+            success: true, 
+            data: { 
+                stock_actual: Number(producto.stock_actual) || 0,
+                nombre: producto.nombre,
+                id: producto.id
+            }
+        });
+    } catch (error) {
+        console.error('❌ Error al obtener stock:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error al obtener stock del producto' 
+        });
+    }
+};
 
 
 const obtenerCategorias = (req, res) => {
@@ -276,7 +319,7 @@ const obtenerRemitos = (req, res) => {
     // Inicia la consulta con la cláusula básica
     let query = `
       SELECT 
-          id, venta_id, DATE_FORMAT(fecha, '%d-%m-%Y // %H:%i:%s') AS fecha,
+          id, venta_id, fecha,
           cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, 
           cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones,
           empleado_id, empleado_nombre
@@ -363,6 +406,9 @@ const generarPdfRemito = async (req, res) => {
             .replace("{{cliente_provincia}}", remito.cliente_provincia || "No informado")
             .replace("{{cliente_telefono}}", remito.cliente_telefono || "No informado")
             .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado")
+            .replace("{{observacion}}", remito.observaciones || "Sin Observaciones");
+
+            
 
         const itemsHTML = productos
             .map(
@@ -490,7 +536,8 @@ const generarPdfRemitosMultiples = async (req, res) => {
                     .replace("{{cliente_direccion}}", remito.cliente_direccion || "No informado")
                     .replace("{{cliente_provincia}}", remito.cliente_provincia || "No informado")
                     .replace("{{cliente_telefono}}", remito.cliente_telefono || "No informado")
-                    .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado");
+                    .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado")
+                    .replace("{{observacion}}", remito.observaciones || "Sin Observaciones");
 
                 const itemsHTML = productos
                     .map(
@@ -569,5 +616,6 @@ module.exports = {
     obtenerRemitos,
     filtrarProductosRemito,
     generarPdfRemito,
-    generarPdfRemitosMultiples
+    generarPdfRemitosMultiples,
+    obtenerStock
 };

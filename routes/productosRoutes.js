@@ -58,4 +58,10 @@ router.post('/generarpdf-remitos-multiples',
     productosController.generarPdfRemitosMultiples
 );
 
+router.get('/stock/:id', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'productos' }),
+    productosController.obtenerStock
+);
+
 module.exports = router;

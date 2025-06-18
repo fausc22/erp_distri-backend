@@ -136,11 +136,11 @@ const registrarPedido = (pedidoData, callback) => {
 
     const registrarPedidoQuery = `
         INSERT INTO pedidos 
-        (fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
+        (cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
          cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, total, 
          estado, observaciones, empleado_id, empleado_nombre)
         VALUES 
-        (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const pedidoValues = [
@@ -267,7 +267,7 @@ const obtenerPedidos = (req, res) => {
     
     let query = `
         SELECT 
-            id, DATE_FORMAT(fecha, '%d-%m-%Y // %H:%i:%s') AS fecha, 
+            id, fecha, 
             cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
             cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
             subtotal, iva_total, total, estado, observaciones, 
@@ -997,7 +997,10 @@ const generarPdfNotaPedido = async (req, res) => {
             .replace("{{cliente_nombre}}", pedido.cliente_nombre)
             .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
             .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
-            .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado");
+            .replace("{{empleado_nombre}}", pedido.empleado_nombre| "No informado")
+            .replace("{{pedido_observacion}}", pedido.observaciones || "No informado");
+
+            
 
         const itemsHTML = productos.map(p => `
             <tr>
@@ -1152,7 +1155,8 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
                     .replace("{{cliente_nombre}}", pedido.cliente_nombre)
                     .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
                     .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
-                    .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado");
+                    .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado")
+                    .replace("{{pedido_observacion}}", pedido.observaciones || "No informado");
 
                 const itemsHTML = productos
                     .map(p => `

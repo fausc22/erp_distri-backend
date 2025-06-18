@@ -43,8 +43,8 @@ const formatearFecha = (fechaBD) => {
 const obtenerVentas = (req, res) => {
     const query = `
         SELECT 
-            id, DATE_FORMAT(fecha, '%d-%m-%Y // %H:%i:%s') AS fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre, cae_id, cae_fecha
-        FROM ventas ORDER BY fecha ASC`;
+            id, fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre, cae_id, cae_fecha
+        FROM ventas ORDER BY fecha DESC`;
     db.query(query, (err, results) => {
         if (err) {
             console.error('Error al obtener ventas:', err);
@@ -407,7 +407,7 @@ const facturarPedido = async (req, res) => {
         descuentoAplicado 
     } = req.body;
 
-    console.log('🧾 Iniciando facturación de pedido:', pedidoId);
+    console.log('🧾 Iniciando facturación de pedido con remitos:', pedidoId);
 
     // Comenzar transacción
     db.beginTransaction(async (err) => {
@@ -426,6 +426,7 @@ const facturarPedido = async (req, res) => {
             }
             
             const pedido = pedidoResult[0];
+            console.log('📋 Pedido obtenido:', pedido.id, '-', pedido.cliente_nombre);
 
             // 2. Obtener productos del pedido
             const productosQuery = `SELECT * FROM pedidos_cont WHERE pedido_id = ?`;
@@ -434,6 +435,8 @@ const facturarPedido = async (req, res) => {
             if (productos.length === 0) {
                 throw new Error('No se encontraron productos en el pedido');
             }
+            
+            console.log('📦 Productos obtenidos:', productos.length, 'productos');
 
             // 3. Crear la venta
             const ventaQuery = `
@@ -461,13 +464,14 @@ const facturarPedido = async (req, res) => {
                 subtotalSinIva,
                 ivaTotal,
                 totalConIva,
-                `Facturado desde pedido #${pedidoId}${descuentoAplicado ? ` - Descuento aplicado: $${descuentoAplicado.descuentoCalculado.toFixed(2)}` : ''}`,
+                pedido.observaciones,
                 pedido.empleado_id,
                 pedido.empleado_nombre
             ];
 
             const ventaResult = await queryPromise(ventaQuery, ventaValues);
             const ventaId = ventaResult.insertId;
+            console.log('💰 Venta creada con ID:', ventaId);
 
             // 4. Copiar productos del pedido a la venta
             for (const producto of productos) {
@@ -488,8 +492,38 @@ const facturarPedido = async (req, res) => {
                     producto.subtotal
                 ]);
             }
+            console.log('📦 Productos copiados a la venta');
 
-            // 5. Crear movimiento de fondos (INGRESO)
+            // 5. ✅ CREAR REMITO AUTOMÁTICAMENTE
+            console.log('📋 Creando remito automáticamente...');
+            
+            const datosRemito = {
+                venta_id: ventaId,
+                cliente_id: pedido.cliente_id,
+                cliente_nombre: pedido.cliente_nombre,
+                cliente_condicion: pedido.cliente_condicion,
+                cliente_cuit: pedido.cliente_cuit,
+                cliente_telefono: pedido.cliente_telefono,
+                cliente_direccion: pedido.cliente_direccion,
+                cliente_ciudad: pedido.cliente_ciudad,
+                cliente_provincia: pedido.cliente_provincia,
+                estado: 'Generado', // Estado inicial del remito
+                observaciones: pedido.observaciones
+            };
+
+            const remitoId = await registrarRemitoPromise(datosRemito);
+            console.log('📋 Remito creado con ID:', remitoId);
+
+            // 6. ✅ INSERTAR PRODUCTOS EN EL REMITO
+            console.log('📦 Insertando productos en el remito...');
+            
+            const errorProductosRemito = await insertarProductosRemitoPromise(remitoId, productos);
+            if (errorProductosRemito) {
+                throw new Error(`Error insertando productos en remito: ${errorProductosRemito.message}`);
+            }
+            console.log('📦 Productos del remito insertados correctamente');
+
+            // 7. Crear movimiento de fondos (INGRESO)
             const movimientoQuery = `
                 INSERT INTO movimiento_fondos 
                 (cuenta_id, tipo, origen, referencia_id, monto, fecha)
@@ -502,8 +536,9 @@ const facturarPedido = async (req, res) => {
                 ventaId,
                 totalConIva
             ]);
+            console.log('💰 Movimiento de fondos registrado');
 
-            // 6. Actualizar saldo de la cuenta
+            // 8. Actualizar saldo de la cuenta
             const actualizarSaldoQuery = `
                 UPDATE cuenta_fondos 
                 SET saldo = saldo + ? 
@@ -511,8 +546,9 @@ const facturarPedido = async (req, res) => {
             `;
 
             await queryPromise(actualizarSaldoQuery, [totalConIva, cuentaId]);
+            console.log('💳 Saldo de cuenta actualizado');
 
-            // 7. Cambiar estado del pedido a "Facturado"
+            // 9. Cambiar estado del pedido a "Facturado"
             const actualizarPedidoQuery = `
                 UPDATE pedidos 
                 SET estado = 'Facturado' 
@@ -520,8 +556,9 @@ const facturarPedido = async (req, res) => {
             `;
 
             await queryPromise(actualizarPedidoQuery, [pedidoId]);
+            console.log('📋 Estado del pedido actualizado a "Facturado"');
 
-            // Confirmar transacción
+            // 10. Confirmar transacción
             db.commit(async (err) => {
                 if (err) {
                     console.error('Error confirmando transacción:', err);
@@ -546,20 +583,37 @@ const facturarPedido = async (req, res) => {
                     detallesAdicionales: `Pedido #${pedidoId} facturado como venta #${ventaId} - Cliente: ${pedido.cliente_nombre} - Total: $${totalConIva}`
                 });
 
-                console.log('✅ Facturación completada exitosamente');
+                // ✅ AUDITAR CREACIÓN DE REMITO
+                await auditarOperacion(req, {
+                    accion: 'INSERT',
+                    tabla: 'remitos',
+                    registroId: remitoId,
+                    datosNuevos: {
+                        id: remitoId,
+                        venta_id: ventaId,
+                        pedido_origen: pedidoId,
+                        cliente_nombre: pedido.cliente_nombre,
+                        estado: 'Generado'
+                    },
+                    detallesAdicionales: `Remito #${remitoId} generado automáticamente desde facturación - Venta #${ventaId} - Cliente: ${pedido.cliente_nombre}`
+                });
+
+                console.log('✅ Facturación y remito completados exitosamente');
                 res.json({ 
                     success: true, 
-                    message: 'Facturación completada exitosamente',
+                    message: 'Facturación y remito completados exitosamente',
                     data: {
                         ventaId,
+                        remitoId, // ✅ INCLUIR ID DEL REMITO EN LA RESPUESTA
                         pedidoId,
-                        total: totalConIva
+                        total: totalConIva,
+                        productosCount: productos.length
                     }
                 });
             });
 
         } catch (error) {
-            console.error('Error en facturación:', error);
+            console.error('❌ Error en facturación:', error);
             
             // Auditar error en facturación
             await auditarOperacion(req, {
@@ -623,6 +677,55 @@ const obtenerMovimientosCuenta = (req, res) => {
 };
 
 
+const registrarRemitoPromise = (pedidoData) => {
+    return new Promise((resolve, reject) => {
+        const { venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones} = pedidoData;
+
+        const registrarRemitoQuery = `
+            INSERT INTO remitos
+            (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones)
+            VALUES 
+            (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        const remitoValues = [venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones];
+
+        db.query(registrarRemitoQuery, remitoValues, (err, result) => {
+            if (err) {
+                console.error('Error al insertar el remito:', err);
+                return reject(err);
+            }
+            resolve(result.insertId); // Devuelve el ID del remito recién insertado
+        });
+    });
+};
+
+const insertarProductosRemitoPromise = async (remitoId, productos) => {
+    const insertProductoQuery = `
+        INSERT INTO detalle_remitos (remito_id, producto_id, producto_nombre, producto_um, cantidad) 
+        VALUES (?, ?, ?, ?, ?)
+    `;
+
+    try {
+        await Promise.all(productos.map(producto => {
+            const { producto_id, producto_nombre, producto_um, cantidad } = producto;
+            const productoValues = [remitoId, producto_id, producto_nombre, producto_um, cantidad];
+
+            return new Promise((resolve, reject) => {
+                db.query(insertProductoQuery, productoValues, (err, result) => {
+                    if (err) {
+                        console.error('Error al insertar el producto del remito:', err);
+                        return reject(err);
+                    }
+                    resolve(result);
+                });
+            });
+        }));
+        return null;
+    } catch (error) {
+        return error;
+    }
+};
 
 
 
