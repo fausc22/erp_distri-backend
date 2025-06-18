@@ -10,7 +10,7 @@ const multer = require('multer');
 
 const obtenerCuentas = (req, res) => {
   const query = `
-    SELECT * FROM CUENTA_FONDOS
+    SELECT * FROM cuenta_fondos
     ORDER BY id ASC
   `;
   
@@ -41,7 +41,7 @@ const crearCuenta = (req, res) => {
   }
   
   const query = `
-    INSERT INTO CUENTA_FONDOS (nombre, saldo)
+    INSERT INTO cuenta_fondos (nombre, saldo)
     VALUES (?, ?)
   `;
   
@@ -66,7 +66,7 @@ const obtenerCuenta = (req, res) => {
   const cuentaId = req.params.cuentaId;
   
   const query = `
-    SELECT * FROM CUENTA_FONDOS
+    SELECT * FROM cuenta_fondos
     WHERE id = ?
   `;
   
@@ -106,7 +106,7 @@ const registrarMovimiento = (req, res) => {
 
   // 1. Primero insertamos el movimiento
   const insertQuery = `
-    INSERT INTO MOVIMIENTO_FONDOS (cuenta_id, tipo, origen, monto, referencia_id)
+    INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
     VALUES (?, ?, ?, ?, ?)
   `;
   
@@ -157,7 +157,7 @@ const obtenerMovimientos = (req, res) => {
   let { cuenta_id, tipo, desde, hasta, busqueda, limit = 100 } = req.query;
   
   let query = `
-    SELECT * FROM MOVIMIENTO_FONDOS
+    SELECT * FROM movimiento_fondos
     WHERE 1=1
   `;
   
@@ -229,7 +229,7 @@ const realizarTransferencia = (req, res) => {
   
   // 1. Verificar saldo suficiente en cuenta origen
   const checkQuery = `
-    SELECT saldo FROM CUENTA_FONDOS WHERE id = ?
+    SELECT saldo FROM cuenta_fondos WHERE id = ?
   `;
   
   db.query(checkQuery, [cuenta_origen], (err, checkResults) => {
