@@ -32,7 +32,7 @@ const obtenerCompras = (req, res) => {
 const obtenerGastos = (req, res) => {
     const query = `
         SELECT * FROM gastos
-        ORDER BY fecha ASC
+        ORDER BY fecha DESC
     `;
     
     db.query(query, (err, results) => {
@@ -215,7 +215,7 @@ const nuevoGasto = async (req, res) => {
         // Query de inserción
         const insertQuery = `
             INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id) 
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (NOW(), ?, ?, ?, ?, ?)
         `;
 
         const valores = [

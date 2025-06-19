@@ -30,7 +30,7 @@ router.post('/subir/:tipo/:id',
  * GET /comprobantes/obtener/:tipo/:id
  */
 router.get('/obtener/:tipo/:id', 
-    requireEmployee,
+    
     middlewareAuditoria({ 
         accion: 'VIEW', 
         tabla: 'comprobantes'

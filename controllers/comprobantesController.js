@@ -1,4 +1,4 @@
-// controllers/comprobantesController.js
+
 
 const db = require('./db');
 const multer = require('multer');
@@ -257,7 +257,7 @@ const obtenerComprobante = async (req, res) => {
             });
         }
         
-        // Establecer headers apropiados para descarga
+        // Establecer headers apropiados
         const extension = path.extname(rutaCompleta).toLowerCase();
         let contentType = 'application/octet-stream';
         
@@ -282,8 +282,16 @@ const obtenerComprobante = async (req, res) => {
         
         const nombreArchivo = obtenerNombreArchivo(tipo, id) + extension;
         
+        // CAMBIO IMPORTANTE: usar 'inline' en lugar de 'attachment' para mostrar en el navegador
+        const disposition = req.query.download === 'true' ? 'attachment' : 'inline';
+        
         res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Disposition', `attachment; filename="${nombreArchivo}"`);
+        res.setHeader('Content-Disposition', `${disposition}; filename="${nombreArchivo}"`);
+        
+        // Headers adicionales para CORS si es necesario
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+        
         res.sendFile(rutaCompleta);
         
     } catch (error) {

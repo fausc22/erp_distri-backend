@@ -18,7 +18,7 @@ const productosRoutes = require('./routes/productosRoutes');
 const finanzasRoutes = require('./routes/finanzasRoutes'); 
 const comprasRoutes = require('./routes/comprasRoutes'); 
 const auditoriaRoutes = require('./routes/auditoriaRoutes');
-// const comprobantesRoutes = require('./routes/comprobantesRoutes'); // Comentado - no existe en tu proyecto
+const comprobantesRoutes = require('./routes/comprobantesRoutes'); 
 
 // CORS configuration - Incluye Railway
 const allowedOrigins = [
@@ -118,7 +118,7 @@ app.use('/finanzas', finanzasRoutes);
 app.use('/ventas', ventasRoutes); 
 app.use('/compras', comprasRoutes);
 app.use('/auditoria', auditoriaRoutes);
-// app.use('/comprobantes', comprobantesRoutes); // Descomentarcuando exista el archivo
+app.use('/comprobantes', comprobantesRoutes); 
 
 // Middleware para rutas no encontradas
 app.use('*', (req, res) => {

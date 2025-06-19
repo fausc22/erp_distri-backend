@@ -257,7 +257,7 @@ const realizarTransferencia = (req, res) => {
     
     // 2. Registrar el egreso en la cuenta origen
     const egresoQuery = `
-      INSERT INTO MOVIMIENTO_FONDOS (cuenta_id, tipo, origen, monto, referencia_id)
+      INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
       VALUES (?, 'EGRESO', 'transferencia', ?, NULL)
     `;
     
@@ -272,7 +272,7 @@ const realizarTransferencia = (req, res) => {
       
       // 3. Registrar el ingreso en la cuenta destino
       const ingresoQuery = `
-        INSERT INTO MOVIMIENTO_FONDOS (cuenta_id, tipo, origen, monto, referencia_id)
+        INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
         VALUES (?, 'INGRESO', 'transferencia', ?, ?)
       `;
       
@@ -287,7 +287,7 @@ const realizarTransferencia = (req, res) => {
         
         // 4. Actualizar saldo en cuenta origen (restar)
         const updateOrigenQuery = `
-          UPDATE CUENTA_FONDOS SET saldo = saldo - ? WHERE id = ?
+          UPDATE cuenta_fondos SET saldo = saldo - ? WHERE id = ?
         `;
         
         db.query(updateOrigenQuery, [monto, cuenta_origen], (err, updateOrigenResults) => {
@@ -301,7 +301,7 @@ const realizarTransferencia = (req, res) => {
           
           // 5. Actualizar saldo en cuenta destino (sumar)
           const updateDestinoQuery = `
-            UPDATE CUENTA_FONDOS SET saldo = saldo + ? WHERE id = ?
+            UPDATE cuenta_fondos SET saldo = saldo + ? WHERE id = ?
           `;
           
           db.query(updateDestinoQuery, [monto, cuenta_destino], (err, updateDestinoResults) => {
@@ -338,7 +338,7 @@ const obtenerIngresos = (req, res) => {
       v.fecha, 
       'Venta' AS origen,
       'Cuenta Corriente' AS cuenta 
-    FROM VENTAS v 
+    FROM ventas v 
     UNION ALL 
     SELECT 
       mf.tipo, 
@@ -348,8 +348,8 @@ const obtenerIngresos = (req, res) => {
       mf.fecha, 
       mf.origen,
       cf.nombre AS cuenta 
-    FROM MOVIMIENTO_FONDOS mf 
-    JOIN CUENTA_FONDOS cf ON mf.cuenta_id = cf.id 
+    FROM movimiento_fondos mf 
+    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id 
     WHERE mf.tipo = 'INGRESO'
   `;
   
@@ -415,7 +415,7 @@ const obtenerIngresos = (req, res) => {
 
 const obtenerCuentasParaFiltro = (req, res) => {
   const query = `
-    SELECT nombre FROM CUENTA_FONDOS
+    SELECT nombre FROM cuenta_fondos
     UNION
     SELECT 'Cuenta Corriente' AS nombre
     ORDER BY nombre
@@ -454,7 +454,7 @@ const registrarIngreso = (req, res) => {
 
   // 1. Primero insertamos el movimiento
   const insertQuery = `
-    INSERT INTO MOVIMIENTO_FONDOS (cuenta_id, tipo, origen, monto, referencia_id)
+    INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
     VALUES (?, 'INGRESO', ?, ?, ?)
   `;
   
@@ -472,7 +472,7 @@ const registrarIngreso = (req, res) => {
       
       // 2. Luego actualizamos el saldo de la cuenta
       const updateQuery = `
-        UPDATE CUENTA_FONDOS
+        UPDATE cuenta_fondos
         SET saldo = saldo + ?
         WHERE id = ?
       `;
@@ -505,7 +505,7 @@ const obtenerDetalleVenta = (req, res) => {
   
   // Primero obtenemos la información general de la venta
   const ventaQuery = `
-    SELECT * FROM VENTAS
+    SELECT * FROM ventas
     WHERE id = ?
   `;
   
@@ -529,7 +529,7 @@ const obtenerDetalleVenta = (req, res) => {
     
     // Luego obtenemos los productos de la venta
     const productosQuery = `
-      SELECT * FROM DETALLE_VENTAS
+      SELECT * FROM ventas_cont
       WHERE venta_id = ?
     `;
     
@@ -562,8 +562,8 @@ const obtenerDetalleIngreso = (req, res) => {
     SELECT 
       mf.*,
       cf.nombre AS cuenta_nombre
-    FROM MOVIMIENTO_FONDOS mf
-    JOIN CUENTA_FONDOS cf ON mf.cuenta_id = cf.id
+    FROM movimiento_fondos mf
+    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id
     WHERE mf.id = ? AND mf.tipo = 'INGRESO'
   `;
   
@@ -627,8 +627,8 @@ const obtenerEgresos = (req, res) => {
       mf.origen,
       cf.nombre AS cuenta,
       mf.id
-    FROM MOVIMIENTO_FONDOS mf 
-    JOIN CUENTA_FONDOS cf ON mf.cuenta_id = cf.id 
+    FROM movimiento_fondos mf 
+    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id 
     WHERE mf.tipo = 'EGRESO'
   `;
   
@@ -721,7 +721,7 @@ const obtenerDetalleCompra = (req, res) => {
     
     // Luego obtenemos los productos de la compra
     const productosQuery = `
-      SELECT * FROM detalle_compras
+      SELECT * FROM compras_cont
       WHERE compra_id = ?
     `;
     
@@ -827,7 +827,7 @@ const registrarEgreso = (req, res) => {
 
   // 1. Primero insertamos el movimiento
   const insertQuery = `
-    INSERT INTO MOVIMIENTO_FONDOS (cuenta_id, tipo, origen, monto, referencia_id)
+    INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
     VALUES (?, 'EGRESO', ?, ?, ?)
   `;
   
@@ -845,7 +845,7 @@ const registrarEgreso = (req, res) => {
       
       // 2. Luego actualizamos el saldo de la cuenta
       const updateQuery = `
-        UPDATE CUENTA_FONDOS
+        UPDATE cuenta_fondos
         SET saldo = saldo - ?
         WHERE id = ?
       `;
@@ -889,7 +889,7 @@ const obtenerBalanceGeneral = (req, res) => {
       SUM(CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END) AS egresos,
       SUM(CASE WHEN tipo = 'INGRESO' THEN monto ELSE 0 END) - 
       SUM(CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END) AS balance
-    FROM MOVIMIENTO_FONDOS
+    FROM movimiento_fondos
     ${filtroAnio}
     GROUP BY mes
     ORDER BY mes
@@ -950,8 +950,8 @@ const obtenerBalancePorCuenta = (req, res) => {
       SUM(CASE WHEN mf.tipo = 'EGRESO' THEN mf.monto ELSE 0 END) AS egresos,
       SUM(CASE WHEN mf.tipo = 'INGRESO' THEN mf.monto ELSE 0 END) - 
       SUM(CASE WHEN mf.tipo = 'EGRESO' THEN mf.monto ELSE 0 END) AS balance
-    FROM MOVIMIENTO_FONDOS mf
-    JOIN CUENTA_FONDOS cf ON mf.cuenta_id = cf.id
+    FROM movimiento_fondos mf
+    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id
     ${filtroFecha}
     GROUP BY cf.nombre
     ORDER BY balance DESC
@@ -994,7 +994,7 @@ const obtenerDistribucionIngresos = (req, res) => {
   // Primero obtenemos el total de ventas
   const queryVentas = `
     SELECT SUM(total) AS total
-    FROM VENTAS
+    FROM ventas
     WHERE 1=1 ${filtroFecha}
   `;
   
@@ -1012,7 +1012,7 @@ const obtenerDistribucionIngresos = (req, res) => {
     // Luego obtenemos el total de ingresos manuales
     const queryIngresos = `
       SELECT SUM(monto) AS total
-      FROM MOVIMIENTO_FONDOS
+      FROM movimiento_fondos
       WHERE tipo = 'INGRESO' ${filtroFecha}
     `;
     
@@ -1068,7 +1068,7 @@ const obtenerGastosPorCategoria = (req, res) => {
     SELECT 
       origen AS categoria,
       SUM(monto) AS total
-    FROM MOVIMIENTO_FONDOS
+    FROM movimiento_fondos
     WHERE tipo = 'EGRESO' 
     ${filtroFecha ? 'AND ' + filtroFecha.substring(6) : ''}
     GROUP BY origen
@@ -1135,8 +1135,8 @@ const obtenerFlujoDeFondos = (req, res) => {
       monto,
       (CASE WHEN tipo = 'INGRESO' THEN monto ELSE 0 END) AS ingreso,
       (CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END) AS egreso
-    FROM MOVIMIENTO_FONDOS mf
-    JOIN CUENTA_FONDOS cf ON mf.cuenta_id = cf.id
+    FROM movimiento_fondos mf
+    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id
     ${filtro}
     ORDER BY fecha DESC, mf.id DESC
   `;
@@ -1179,7 +1179,7 @@ const obtenerFlujoDeFondos = (req, res) => {
 const obtenerAniosDisponibles = (req, res) => {
   const query = `
     SELECT DISTINCT YEAR(fecha) as anio
-    FROM MOVIMIENTO_FONDOS
+    FROM movimiento_fondos
     ORDER BY anio DESC
   `;
   
@@ -1222,7 +1222,7 @@ const obtenerVentasPorVendedor = (req, res) => {
       empleado_nombre,
       COUNT(*) AS cantidad_ventas,
       SUM(total) AS total_vendido
-    FROM VENTAS
+    FROM ventas
     ${filtro}
     GROUP BY empleado_nombre
     ORDER BY total_vendido DESC
@@ -1265,8 +1265,8 @@ const obtenerProductosMasVendidos = (req, res) => {
     SELECT 
       dv.producto_nombre,
       SUM(dv.cantidad) AS total_vendida
-    FROM DETALLE_VENTAS dv
-    JOIN VENTAS v ON dv.venta_id = v.id
+    FROM ventas_cont dv
+    JOIN ventas v ON dv.venta_id = v.id
     ${filtroFecha}
     GROUP BY dv.producto_nombre
     ORDER BY total_vendida DESC
