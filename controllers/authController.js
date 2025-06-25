@@ -8,7 +8,7 @@ const { auditarAuth, limpiarDatosSensibles } = require('../middlewares/auditoria
 const getTokenExpiration = () => {
     const isDevelopment = process.env.NODE_ENV === 'development';
     return {
-        accessToken: isDevelopment ? '2h' : '15m',  // 2 horas en dev, 15 min en prod
+        accessToken: isDevelopment ? '2h' : '2d',  // 2 horas en dev, 15 min en prod
         refreshToken: isDevelopment ? '30d' : '7d'  // 30 días en dev, 7 días en prod
     };
 };
