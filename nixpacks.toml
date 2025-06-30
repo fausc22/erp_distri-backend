@@ -7,12 +7,10 @@ nixPkgs = [
   "gnumake",
   "chromium",
   "nss",
-  "freetype", 
-  "freetype-dev",
-  "harfbuzz",
-  "ca-certificates",
-  "ttf-freefont"
+  "freetype",
+  "harfbuzz"
 ]
+
 
 [phases.install]
 cmds = [
