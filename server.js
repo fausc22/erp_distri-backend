@@ -4,6 +4,7 @@ const express = require('express');
 const session = require('express-session');
 const cors = require('cors');
 const axios = require('axios');
+const cookieParser = require('cookie-parser');
 
 const port = process.env.PORT || 3001;
 const app = express();
@@ -58,7 +59,8 @@ const corsOptions = {
 // Middlewares
 const { middlewareAuditoria } = require('./middlewares/auditoriaMiddleware');
 
-app.use(cors(corsOptions)); // ✅ Solo una configuración de CORS
+app.use(cors(corsOptions));
+app.use(cookieParser());    
 app.use(express.json({ limit: '10mb' })); // Límite para PDFs grandes
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

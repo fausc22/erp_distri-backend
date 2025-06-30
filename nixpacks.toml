@@ -1,0 +1,29 @@
+[phases.setup]
+nixPkgs = [
+  "nodejs_18",
+  "yarn",
+  "python3",
+  "gcc",
+  "gnumake",
+  "chromium",
+  "nss",
+  "freetype", 
+  "freetype-dev",
+  "harfbuzz",
+  "ca-certificates",
+  "ttf-freefont"
+]
+
+[phases.install]
+cmds = [
+  "npm ci --only=production",
+  "npx puppeteer browsers install chrome"
+]
+
+[start]
+cmd = "npm start"
+
+[variables]
+NODE_ENV = "production"
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "false"
+PUPPETEER_EXECUTABLE_PATH = "/nix/store/*/bin/chromium"

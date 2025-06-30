@@ -62,6 +62,19 @@ router.post('/ingresos/registrar',
     finanzasController.registrarIngreso
 );
 
+// *** NUEVAS RUTAS PARA DETALLES DE INGRESOS ***
+router.get('/ingresos/detalle-venta/:ventaId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas' }),
+    finanzasController.obtenerDetalleVenta
+);
+
+router.get('/ingresos/detalle-ingreso/:ingresoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'movimiento_fondos' }),
+    finanzasController.obtenerDetalleIngreso
+);
+
 // Rutas para historial de egresos
 router.get('/egresos/historial', 
     requireEmployee,
@@ -73,6 +86,25 @@ router.post('/egresos/registrar',
     requireEmployee,
     middlewareAuditoria({ accion: 'INSERT', tabla: 'movimiento_fondos', incluirBody: true }),
     finanzasController.registrarEgreso
+);
+
+// *** NUEVAS RUTAS PARA DETALLES DE EGRESOS ***
+router.get('/egresos/detalle-compra/:compraId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'compras' }),
+    finanzasController.obtenerDetalleCompra
+);
+
+router.get('/egresos/detalle-gasto/:gastoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'gastos' }),
+    finanzasController.obtenerDetalleGasto
+);
+
+router.get('/egresos/detalle-egreso/:egresoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'movimiento_fondos' }),
+    finanzasController.obtenerDetalleEgreso
 );
 
 // Rutas para reportes financieros (solo gerentes para algunos)

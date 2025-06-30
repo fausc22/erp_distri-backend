@@ -4,6 +4,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
+const puppeteerManager = require('../utils/puppeteerConfig');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 
 const nuevoProducto = async (req, res) => {
@@ -386,15 +387,18 @@ const generarPdfRemito = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    // Ruta de la plantilla HTML
+    // ✅ Ruta de la plantilla HTML existente
     const templatePath = path.join(__dirname, "../resources/documents/remito.html");
 
     if (!fs.existsSync(templatePath)) {
+        console.error('❌ Plantilla HTML no encontrada en:', templatePath);
         return res.status(500).json({ error: "Plantilla HTML no encontrada" });
     }
 
     try {
-        // Leer y reemplazar la plantilla HTML
+        console.log('📄 Iniciando generación de PDF de remito con plantilla...');
+
+        // ✅ Leer y reemplazar la plantilla HTML existente
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
         htmlTemplate = htmlTemplate
@@ -408,32 +412,30 @@ const generarPdfRemito = async (req, res) => {
             .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado")
             .replace("{{observacion}}", remito.observaciones || "Sin Observaciones");
 
-            
-
         const itemsHTML = productos
-            .map(
-                (producto) => `
+            .map(producto => `
                 <tr>
                     <td>${producto.producto_id}</td>
                     <td>${producto.producto_nombre}</td>
                     <td>${producto.producto_um}</td>
                     <td>${producto.cantidad}</td>
-                </tr>`
-            )
+                </tr>`)
             .join("");
 
         htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
 
-        // Iniciar Puppeteer y generar PDF
-        const browser = await puppeteer.launch({ headless: "new" });
-        const page = await browser.newPage();
+        // ✅ Usar puppeteerManager con la nueva configuración
+        const pdfBuffer = await puppeteerManager.generatePDF(htmlTemplate, {
+            format: 'A4',
+            margin: {
+                top: '10mm',
+                right: '10mm',
+                bottom: '10mm',
+                left: '10mm'
+            }
+        });
 
-        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
-        const pdfBuffer = await page.pdf({ format: "A4" });
-
-        await browser.close();
-
-        // Auditar generación de PDF
+        // ✅ Auditar generación de PDF
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
@@ -441,15 +443,17 @@ const generarPdfRemito = async (req, res) => {
             detallesAdicionales: `PDF de remito generado para cliente: ${remito.cliente_nombre}`
         });
 
-        // Configurar la respuesta
+        // ✅ Configurar la respuesta
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="REMITO_${remito.cliente_nombre}.pdf"`);
         
         res.end(pdfBuffer);
-    } catch (error) {
-        console.error("Error generando PDF:", error);
         
-        // Auditar error en generación de PDF
+        console.log('✅ PDF de remito generado exitosamente con plantilla');
+
+    } catch (error) {
+        console.error("❌ Error generando PDF:", error);
+        
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
@@ -457,11 +461,14 @@ const generarPdfRemito = async (req, res) => {
             detallesAdicionales: `Error generando PDF de remito: ${error.message}`
         });
         
-        res.status(500).json({ error: "Error al generar el PDF" });
+        res.status(500).json({ 
+            error: "Error al generar el PDF",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 };
 
-// 🆕 NUEVA FUNCIÓN: Generar PDFs múltiples de remitos
+// ✅ GENERAR PDFs MÚLTIPLES DE REMITOS
 const generarPdfRemitosMultiples = async (req, res) => {
     const { remitosIds } = req.body;
     
@@ -469,12 +476,18 @@ const generarPdfRemitosMultiples = async (req, res) => {
         return res.status(400).json({ error: "Debe proporcionar al menos un ID de remito válido" });
     }
 
+    const templatePath = path.join(__dirname, "../resources/documents/remito.html");
+
+    if (!fs.existsSync(templatePath)) {
+        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
+    }
+
     try {
-        const pdfBuffers = [];
-        const browser = await puppeteer.launch({ headless: "new" });
+        console.log(`📄 Iniciando generación de ${remitosIds.length} remitos múltiples con plantilla...`);
+
+        const htmlSections = [];
 
         for (let i = 0; i < remitosIds.length; i++) {
-            // Asegurar que remitoId sea solo el ID numérico
             let remitoId;
             
             if (typeof remitosIds[i] === 'object' && remitosIds[i] !== null) {
@@ -483,49 +496,41 @@ const generarPdfRemitosMultiples = async (req, res) => {
                 remitoId = remitosIds[i];
             }
             
-            // Validar que sea un número válido
             if (!remitoId || isNaN(parseInt(remitoId))) {
-                console.warn(`ID de remito inválido: ${remitoId}, continuando con los siguientes`);
+                console.warn(`ID de remito inválido: ${remitoId}, continuando`);
                 continue;
             }
             
             remitoId = parseInt(remitoId);
             
-            const getRemito = () => {
-                return new Promise((resolve, reject) => {
+            try {
+                const remitoRows = await new Promise((resolve, reject) => {
                     db.query('SELECT * FROM remitos WHERE id = ?', [remitoId], (err, results) => {
                         if (err) return reject(err);
                         resolve(results);
                     });
                 });
-            };
-            
-            const getProductos = () => {
-                return new Promise((resolve, reject) => {
+                
+                if (remitoRows.length === 0) {
+                    console.warn(`Remito con ID ${remitoId} no encontrado, continuando`);
+                    continue;
+                }
+                
+                const productos = await new Promise((resolve, reject) => {
                     db.query('SELECT * FROM detalle_remitos WHERE remito_id = ?', [remitoId], (err, results) => {
                         if (err) return reject(err);
                         resolve(results);
                     });
                 });
-            };
-            
-            try {
-                const remitoRows = await getRemito();
                 
-                if (remitoRows.length === 0) {
-                    console.warn(`Remito con ID ${remitoId} no encontrado, continuando con los siguientes`);
+                if (productos.length === 0) {
+                    console.warn(`No se encontraron productos para el remito ${remitoId}, continuando`);
                     continue;
                 }
                 
                 const remito = remitoRows[0];
-                const productos = await getProductos();
                 
-                if (productos.length === 0) {
-                    console.warn(`No se encontraron productos para el remito con ID ${remitoId}, continuando`);
-                    continue;
-                }
-                
-                const templatePath = path.join(__dirname, "../resources/documents/remito.html");
+                // ✅ Leer plantilla para cada remito
                 let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
                 htmlTemplate = htmlTemplate
@@ -540,72 +545,70 @@ const generarPdfRemitosMultiples = async (req, res) => {
                     .replace("{{observacion}}", remito.observaciones || "Sin Observaciones");
 
                 const itemsHTML = productos
-                    .map(
-                        (producto) => `
+                    .map(producto => `
                         <tr>
                             <td>${producto.producto_id}</td>
                             <td>${producto.producto_nombre}</td>
                             <td>${producto.producto_um}</td>
                             <td>${producto.cantidad}</td>
-                        </tr>`
-                    )
+                        </tr>`)
                     .join("");
 
                 htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-
-                const page = await browser.newPage();
-                await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
-                const pdfBuffer = await page.pdf({ format: "A4" });
-                await page.close();
                 
-                pdfBuffers.push(pdfBuffer);
+                htmlSections.push(htmlTemplate);
+                
             } catch (error) {
                 console.error(`Error procesando remito ID ${remitoId}:`, error);
             }
         }
         
-        await browser.close();
-
-        if (pdfBuffers.length === 0) {
+        if (htmlSections.length === 0) {
             return res.status(404).json({ error: "No se pudieron generar PDFs para los remitos seleccionados" });
         }
 
-        // Combinar todos los PDFs
-        const { PDFDocument } = require('pdf-lib');
-        const mergedPdf = await PDFDocument.create();
-        
-        for (const pdfBuffer of pdfBuffers) {
-            const pdf = await PDFDocument.load(pdfBuffer);
-            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-            copiedPages.forEach((page) => mergedPdf.addPage(page));
-        }
-        
-        const mergedPdfBuffer = await mergedPdf.save();
+        // ✅ Combinar todos los remitos con salto de página
+        const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
 
-        // Auditar generación de PDFs múltiples
+        // ✅ Usar puppeteerManager para generar PDF combinado
+        const pdfBuffer = await puppeteerManager.generatePDF(combinedHTML, {
+            format: 'A4',
+            margin: {
+                top: '10mm',
+                right: '10mm',
+                bottom: '10mm',
+                left: '10mm'
+            }
+        });
+
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
-            detallesAdicionales: `PDFs múltiples de remitos generados - ${remitosIds.length} remitos solicitados, ${pdfBuffers.length} generados`
+            detallesAdicionales: `PDFs múltiples de remitos generados - ${remitosIds.length} remitos solicitados, ${htmlSections.length} generados`
         });
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Remitos_Multiples.pdf"`);
-        res.end(Buffer.from(mergedPdfBuffer));
+        res.end(pdfBuffer);
+        
+        console.log(`✅ ${htmlSections.length} remitos múltiples generados exitosamente`);
         
     } catch (error) {
-        console.error("Error generando PDFs múltiples:", error);
+        console.error("❌ Error generando PDFs múltiples:", error);
         
-        // Auditar error en generación de PDFs múltiples
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
             detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
         });
         
-        res.status(500).json({ error: "Error al generar los PDFs múltiples" });
+        res.status(500).json({ 
+            error: "Error al generar los PDFs múltiples",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 };
+
 
 module.exports = {
     nuevoProducto,

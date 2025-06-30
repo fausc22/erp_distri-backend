@@ -1,23 +1,18 @@
-// controllers/authController.js
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const db = require('./dbPromise');
 const { auditarAuth, limpiarDatosSensibles } = require('../middlewares/auditoriaMiddleware');
 
-// Configuración de tiempos según el entorno
+// ✅ Configuración mejorada de tiempos de token
 const getTokenExpiration = () => {
     const isDevelopment = process.env.NODE_ENV === 'development';
     return {
-        accessToken: isDevelopment ? '2h' : '2d',  // 2 horas en dev, 15 min en prod
-        refreshToken: isDevelopment ? '30d' : '7d'  // 30 días en dev, 7 días en prod
+        accessToken: isDevelopment ? '2h' : '1h',      // Reducido para mayor seguridad
+        refreshToken: isDevelopment ? '30d' : '30d'    // Mantenemos 30 días para "recuérdame"
     };
 };
 
-
-
-
-
-// Validar que los secrets estén configurados correctamente
+// ✅ Validar que los secrets estén configurados correctamente
 const validateSecrets = () => {
     if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
         console.error('❌ JWT_SECRET debe tener al menos 32 caracteres');
@@ -32,10 +27,58 @@ const validateSecrets = () => {
 // Validar secrets al inicio
 validateSecrets();
 
+// ✅ Función helper para crear tokens
+const createTokens = (empleado, remember = false) => {
+    const { accessToken: accessExp, refreshToken: refreshExp } = getTokenExpiration();
 
+    const tokenPayload = { 
+        id: empleado.id, 
+        rol: empleado.rol,
+        nombre: empleado.nombre,
+        apellido: empleado.apellido,
+        usuario: empleado.usuario,
+        iat: Math.floor(Date.now() / 1000)
+    };
+
+    const accessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: accessExp });
+    
+    // Solo crear refresh token si el usuario marca "recuérdame"
+    let refreshToken = null;
+    if (remember) {
+        refreshToken = jwt.sign(
+            { id: empleado.id, iat: Math.floor(Date.now() / 1000) }, 
+            process.env.JWT_REFRESH_SECRET, 
+            { expiresIn: refreshExp }
+        );
+    }
+
+    return { accessToken, refreshToken, accessExp, refreshExp };
+};
+
+// ✅ Función helper para configurar cookies
+const setRefreshTokenCookie = (res, refreshToken, remember) => {
+    if (!refreshToken) {
+        // Limpiar cookie si no hay refresh token
+        res.clearCookie('refreshToken', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax'
+        });
+        return;
+    }
+
+    const cookieOptions = {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+        maxAge: remember ? (30 * 24 * 60 * 60 * 1000) : undefined // 30 días si remember, sino session
+    };
+
+    res.cookie('refreshToken', refreshToken, cookieOptions);
+};
 
 exports.login = async (req, res) => {
-    const { username, password, remember } = req.body;
+    const { username, password, remember = false } = req.body;
 
     if (!username || !password) {
         await auditarAuth(req, {
@@ -82,60 +125,28 @@ exports.login = async (req, res) => {
             return res.status(401).json({ message: 'Contraseña incorrecta' });
         }
 
-        // Obtener configuración de tiempo
-        const { accessToken: accessExp, refreshToken: refreshExp } = getTokenExpiration();
+        // ✅ Crear tokens con configuración mejorada
+        const { accessToken, refreshToken, accessExp } = createTokens(empleado, remember);
 
-        // Generar tokens JWT
-        const tokenPayload = { 
-            id: empleado.id, 
-            rol: empleado.rol,
-            nombre: empleado.nombre,
-            apellido: empleado.apellido,
-            usuario: empleado.usuario,
-            iat: Math.floor(Date.now() / 1000) // issued at
-        };
+        // ✅ Configurar cookie de refresh token
+        setRefreshTokenCookie(res, refreshToken, remember);
 
-        console.log('🔑 Generando tokens con:', {
-            secret: process.env.JWT_SECRET.substring(0, 10) + '...',
-            accessExp,
-            refreshExp,
-            payload: { ...tokenPayload, iat: undefined }
-        });
-
-        const accessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: accessExp });
-        const refreshToken = jwt.sign(
-            { id: empleado.id, iat: Math.floor(Date.now() / 1000) }, 
-            process.env.JWT_REFRESH_SECRET, 
-            { expiresIn: refreshExp }
-        );
-
-        // Configurar cookie del refresh token
-        const cookieOptions = {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-            maxAge: remember ? (parseInt(refreshExp.replace('d', '')) * 24 * 60 * 60 * 1000) : undefined
-        };
-
-        if (remember) {
-            res.cookie('refreshToken', refreshToken, cookieOptions);
-        }
-
-        // Auditar login exitoso
+        // ✅ Auditar login exitoso con más detalles
         await auditarAuth(req, {
             accion: 'LOGIN',
             usuarioId: empleado.id,
             usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
             estado: 'EXITOSO',
-            detallesAdicionales: `Login exitoso - Rol: ${empleado.rol}, Remember: ${remember ? 'Sí' : 'No'}, TokenExp: ${accessExp}`
+            detallesAdicionales: `Login exitoso - Rol: ${empleado.rol}, Remember: ${remember ? 'Sí' : 'No'}, TokenExp: ${accessExp}, RefreshToken: ${refreshToken ? 'Sí' : 'No'}`
         });
 
-        console.log(`✅ Login exitoso para ${empleado.usuario} - Token expira en: ${accessExp}`);
+        console.log(`✅ Login exitoso para ${empleado.usuario} - Remember: ${remember} - Token expira en: ${accessExp}`);
 
-        // Respuesta con información del empleado
+        // ✅ Respuesta con información del empleado
         res.json({ 
             token: accessToken,
             expiresIn: accessExp,
+            hasRefreshToken: !!refreshToken,
             empleado: {
                 id: empleado.id,
                 nombre: empleado.nombre,
@@ -162,19 +173,44 @@ exports.login = async (req, res) => {
 };
 
 exports.refreshToken = async (req, res) => {
-    const refreshToken = req.cookies.refreshToken;
+    // ✅ Manejo seguro de cookies con verificación
+    const refreshToken = req.cookies?.refreshToken;
     
     if (!refreshToken) {
-        return res.status(401).json({ message: 'No autorizado - Refresh token requerido' });
+        console.log('❌ No se encontró refresh token en cookies');
+        return res.status(401).json({ 
+            message: 'No autorizado - Refresh token requerido',
+            code: 'NO_REFRESH_TOKEN'
+        });
     }
 
     try {
         console.log('🔄 Intentando renovar token...');
         
-        // Verificar refresh token
-        const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+        // ✅ Verificar refresh token con manejo de errores específicos
+        let decoded;
+        try {
+            decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+        } catch (jwtError) {
+            console.log('❌ Error verificando refresh token:', jwtError.message);
+            
+            // Limpiar cookie inválida
+            res.clearCookie('refreshToken');
+            
+            if (jwtError.name === 'TokenExpiredError') {
+                return res.status(401).json({ 
+                    message: 'Refresh token expirado - Por favor inicia sesión nuevamente',
+                    code: 'REFRESH_TOKEN_EXPIRED'
+                });
+            }
+            
+            return res.status(403).json({ 
+                message: 'Refresh token inválido',
+                code: 'REFRESH_TOKEN_INVALID'
+            });
+        }
         
-        // Obtener información actualizada del empleado
+        // ✅ Obtener información actualizada del empleado
         const [empleados] = await db.execute(
             'SELECT * FROM empleados WHERE id = ? AND activo = 1', 
             [decoded.id]
@@ -188,15 +224,17 @@ exports.refreshToken = async (req, res) => {
                 detallesAdicionales: 'Refresh token - Empleado no encontrado o inactivo'
             });
             
-            // Limpiar cookie inválida
             res.clearCookie('refreshToken');
-            return res.status(404).json({ message: 'Empleado no encontrado o inactivo' });
+            return res.status(404).json({ 
+                message: 'Empleado no encontrado o inactivo',
+                code: 'USER_NOT_FOUND'
+            });
         }
 
         const empleado = empleados[0];
-        const { accessToken: accessExp } = getTokenExpiration();
 
-        // Generar nuevo access token
+        // ✅ Generar nuevo access token (mantener refresh token existente)
+        const { accessToken: accessExp } = getTokenExpiration();
         const tokenPayload = { 
             id: empleado.id, 
             rol: empleado.rol,
@@ -208,9 +246,9 @@ exports.refreshToken = async (req, res) => {
 
         const newAccessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: accessExp });
         
-        // Auditar refresh exitoso
+        // ✅ Auditar refresh exitoso
         await auditarAuth(req, {
-            accion: 'LOGIN',
+            accion: 'TOKEN_REFRESH',
             usuarioId: empleado.id,
             usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
             estado: 'EXITOSO',
@@ -239,17 +277,23 @@ exports.refreshToken = async (req, res) => {
         // Limpiar cookie inválida
         res.clearCookie('refreshToken');
         
-        if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({ message: 'Refresh token expirado - Por favor inicia sesión nuevamente' });
-        }
+        // ✅ Auditar error en refresh
+        await auditarAuth(req, {
+            accion: 'TOKEN_REFRESH_FAILED',
+            estado: 'FALLIDO',
+            detallesAdicionales: `Error en refresh token: ${error.message}`
+        });
         
-        res.status(403).json({ message: 'Refresh token inválido' });
+        res.status(500).json({ 
+            message: 'Error interno del servidor',
+            code: 'INTERNAL_ERROR'
+        });
     }
 };
 
 exports.logout = async (req, res) => {
     try {
-        // Auditar logout
+        // ✅ Auditar logout
         if (req.user) {
             await auditarAuth(req, {
                 accion: 'LOGOUT',
@@ -262,8 +306,17 @@ exports.logout = async (req, res) => {
             console.log(`👋 Logout para ${req.user.usuario}`);
         }
         
-        res.clearCookie('refreshToken');
-        res.json({ message: 'Logout exitoso' });
+        // ✅ Limpiar cookie de refresh token de forma segura
+        res.clearCookie('refreshToken', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax'
+        });
+        
+        res.json({ 
+            message: 'Logout exitoso',
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         console.error('❌ Error en logout:', error);
         res.status(500).json({ message: 'Error interno del servidor' });
@@ -336,7 +389,7 @@ exports.changePassword = async (req, res) => {
             [hashedNewPassword, empleadoId]
         );
 
-        // Auditar cambio exitoso de contraseña
+        // ✅ Auditar cambio exitoso de contraseña
         await auditarAuth(req, {
             accion: 'PASSWORD_CHANGE',
             usuarioId: req.user.id,

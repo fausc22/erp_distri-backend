@@ -5,6 +5,7 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 const puppeteer = require("puppeteer");
 const multer = require('multer');
+const puppeteerManager = require('../utils/puppeteerConfig');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 
 
@@ -973,7 +974,6 @@ const actualizarTotalesPedido = async (req, res) => {
     }
 };
 
-// FUNCIÓN DEFINITIVA para PDF individual
 const generarPdfNotaPedido = async (req, res) => {
     const { pedido, productos } = req.body;
 
@@ -981,26 +981,29 @@ const generarPdfNotaPedido = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
+    // ✅ Ruta de la plantilla HTML existente
     const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
 
     if (!fs.existsSync(templatePath)) {
+        console.error('❌ Plantilla HTML no encontrada en:', templatePath);
         return res.status(500).json({ error: "Plantilla HTML no encontrada" });
     }
 
     try {
+        console.log('📄 Iniciando generación de PDF de nota de pedido con plantilla...');
+
+        // ✅ Leer y reemplazar la plantilla HTML existente
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
         const fechaFormateada = formatearFecha(pedido.fecha);
-                htmlTemplate = htmlTemplate
-                    .replace("{{fecha}}", fechaFormateada)
+        htmlTemplate = htmlTemplate
+            .replace("{{fecha}}", fechaFormateada)
             .replace("{{id}}", pedido.id)
             .replace("{{cliente_nombre}}", pedido.cliente_nombre)
             .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
             .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
-            .replace("{{empleado_nombre}}", pedido.empleado_nombre| "No informado")
+            .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado")
             .replace("{{pedido_observacion}}", pedido.observaciones || "No informado");
-
-            
 
         const itemsHTML = productos.map(p => `
             <tr>
@@ -1014,39 +1017,9 @@ const generarPdfNotaPedido = async (req, res) => {
 
         htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
 
-        const browser = await puppeteer.launch({ 
-            headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox'] // Mejora estabilidad
-        });
-        const page = await browser.newPage();
-
-        // CONFIGURACIÓN OPTIMIZADA DE LA PÁGINA
-        await page.setViewport({ 
-            width: 794,   // A4 width en pixels
-            height: 1123  // A4 height en pixels
-        });
-
-        await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
-
-        
-
-        // OBTENER ALTURA REAL DEL CONTENIDO
-        const bodyHeight = await page.evaluate(() => {
-            return Math.max(
-                document.body.scrollHeight,
-                document.body.offsetHeight,
-                document.documentElement.clientHeight,
-                document.documentElement.scrollHeight,
-                document.documentElement.offsetHeight
-            );
-        });
-
-        console.log(`📏 Altura del contenido: ${bodyHeight}px`);
-
-        // CONFIGURACIÓN DEFINITIVA DEL PDF
-        const pdfBuffer = await page.pdf({
+        // ✅ Usar puppeteerManager con configuración dinámica de altura
+        const pdfBuffer = await puppeteerManager.generatePDF(htmlTemplate, {
             width: '210mm',
-            height: `${Math.ceil(bodyHeight * 0.264583) + 20}mm`, // px to mm + margen de seguridad
             margin: {
                 top: '8mm',
                 right: '8mm',
@@ -1056,25 +1029,26 @@ const generarPdfNotaPedido = async (req, res) => {
             printBackground: true,
             preferCSSPageSize: false,
             displayHeaderFooter: false,
-            scale: 0.95  // Escalar ligeramente para mejor ajuste
+            scale: 0.95
         });
 
-        await browser.close();
-
-        // Auditar generación de PDF
+        // ✅ Auditar generación de PDF
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
             registroId: pedido.id,
-            detallesAdicionales: `PDF de nota de pedido generado para cliente: ${pedido.cliente_nombre} - Altura: ${bodyHeight}px`
+            detallesAdicionales: `PDF de nota de pedido generado para cliente: ${pedido.cliente_nombre}`
         });
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="NotaPedido_${pedido.cliente_nombre}.pdf"`);
 
         res.end(pdfBuffer);
+        
+        console.log('✅ PDF de nota de pedido generado exitosamente con plantilla');
+
     } catch (error) {
-        console.error("Error generando PDF:", error);
+        console.error("❌ Error generando PDF:", error);
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
@@ -1083,11 +1057,14 @@ const generarPdfNotaPedido = async (req, res) => {
             detallesAdicionales: `Error generando PDF de nota de pedido: ${error.message}`
         });
 
-        res.status(500).json({ error: "Error al generar el PDF" });
+        res.status(500).json({ 
+            error: "Error al generar el PDF",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 };
 
-// FUNCIÓN DEFINITIVA para PDFs múltiples
+// ✅ GENERAR PDFs MÚLTIPLES DE NOTAS DE PEDIDO 
 const generarPdfNotasPedidoMultiples = async (req, res) => {
     const { pedidosIds } = req.body;
     
@@ -1095,57 +1072,48 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
         return res.status(400).json({ error: "Debe proporcionar al menos un ID de pedido válido" });
     }
 
+    const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
+
+    if (!fs.existsSync(templatePath)) {
+        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
+    }
+
     try {
-        const pdfBuffers = [];
-        const browser = await puppeteer.launch({ 
-            headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        console.log(`📄 Iniciando generación de ${pedidosIds.length} notas de pedido múltiples con plantilla...`);
+
+        const htmlSections = [];
 
         for (let i = 0; i < pedidosIds.length; i++) {
             const pedidoId = pedidosIds[i];
             
-            const getPedido = () => {
-                return new Promise((resolve, reject) => {
+            try {
+                const pedidoRows = await new Promise((resolve, reject) => {
                     db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
                         if (err) return reject(err);
                         resolve(results);
                     });
                 });
-            };
-            
-            const getProductosPedido = () => {
-                return new Promise((resolve, reject) => {
-                    db.query('SELECT * FROM pedidos_cont WHERE pedido_id = ?', [pedidoId], (err, results) => {
-                        if (err) return reject(err);
-                        resolve(results);
-                    });
-                });
-            };
-            
-            try {
-                const pedidoRows = await getPedido();
                 
                 if (pedidoRows.length === 0) {
                     console.warn(`Pedido con ID ${pedidoId} no encontrado, continuando`);
                     continue;
                 }
                 
-                const pedido = pedidoRows[0];
-                const productos = await getProductosPedido();
+                const productos = await new Promise((resolve, reject) => {
+                    db.query('SELECT * FROM pedidos_cont WHERE pedido_id = ?', [pedidoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    });
+                });
                 
                 if (productos.length === 0) {
-                    console.warn(`No se encontraron productos para el pedido con ID ${pedidoId}, continuando`);
+                    console.warn(`No se encontraron productos para el pedido ${pedidoId}, continuando`);
                     continue;
                 }
                 
-                const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
+                const pedido = pedidoRows[0];
                 
-                if (!fs.existsSync(templatePath)) {
-                    console.error(`Plantilla HTML no encontrada`);
-                    continue;
-                }
-                
+                // ✅ Leer plantilla para cada pedido
                 let htmlTemplate = fs.readFileSync(templatePath, "utf8");
                 
                 const fechaFormateada = formatearFecha(pedido.fecha);
@@ -1171,78 +1139,50 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
                     .join("");
 
                 htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-
-                const page = await browser.newPage();
                 
-                await page.setViewport({ width: 794, height: 1123 });
-                await page.setContent(htmlTemplate, { waitUntil: "networkidle0" });
+                htmlSections.push(htmlTemplate);
                 
-
-                // Obtener altura para este pedido específico
-                const bodyHeight = await page.evaluate(() => {
-                    return Math.max(
-                        document.body.scrollHeight,
-                        document.body.offsetHeight,
-                        document.documentElement.scrollHeight
-                    );
-                });
-
-                const pdfBuffer = await page.pdf({
-                    width: '210mm',
-                    height: `${Math.ceil(bodyHeight * 0.264583) + 15}mm`, // Menos margen para múltiples
-                    margin: {
-                        top: '6mm',    // Márgenes menores para múltiples
-                        right: '6mm', 
-                        bottom: '6mm',
-                        left: '6mm'
-                    },
-                    printBackground: true,
-                    preferCSSPageSize: false,
-                    scale: 0.9
-                });
-                
-                await page.close();
-                
-                pdfBuffers.push(pdfBuffer);
-                
-                console.log(`✅ PDF generado para pedido ID ${pedidoId} - Altura: ${bodyHeight}px`);
+                console.log(`✅ PDF generado para pedido ID ${pedidoId}`);
                 
             } catch (error) {
                 console.error(`❌ Error procesando pedido ID ${pedidoId}:`, error);
             }
         }
-        
-        await browser.close();
 
-        if (pdfBuffers.length === 0) {
+        if (htmlSections.length === 0) {
             return res.status(404).json({ 
                 error: "No se pudieron generar PDFs para las notas de pedido seleccionadas"
             });
         }
 
-        // Combinar PDFs
-        const { PDFDocument } = require('pdf-lib');
-        const mergedPdf = await PDFDocument.create();
-        
-        for (const pdfBuffer of pdfBuffers) {
-            const pdf = await PDFDocument.load(pdfBuffer);
-            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-            copiedPages.forEach((page) => mergedPdf.addPage(page));
-        }
-        
-        const mergedPdfBuffer = await mergedPdf.save();
+        // ✅ Combinar todas las notas de pedido con salto de página
+        const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
+
+        // ✅ Usar puppeteerManager para generar PDF combinado
+        const pdfBuffer = await puppeteerManager.generatePDF(combinedHTML, {
+            width: '210mm',
+            margin: {
+                top: '6mm',
+                right: '6mm', 
+                bottom: '6mm',
+                left: '6mm'
+            },
+            printBackground: true,
+            preferCSSPageSize: false,
+            scale: 0.9
+        });
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
-            detallesAdicionales: `PDFs múltiples generados: ${pdfBuffers.length} notas de pedido combinadas`
+            detallesAdicionales: `PDFs múltiples generados: ${htmlSections.length} notas de pedido combinadas`
         });
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Notas_Pedidos_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
-        res.end(Buffer.from(mergedPdfBuffer));
+        res.end(pdfBuffer);
         
-        console.log(`🎉 ${pdfBuffers.length} notas de pedido generadas y combinadas exitosamente`);
+        console.log(`🎉 ${htmlSections.length} notas de pedido generadas y combinadas exitosamente`);
         
     } catch (error) {
         console.error("❌ Error generando PDFs múltiples:", error);
@@ -1255,7 +1195,7 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
         
         res.status(500).json({ 
             error: "Error al generar los PDFs múltiples",
-            detalles: error.message 
+            detalles: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };

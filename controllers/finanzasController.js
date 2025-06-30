@@ -328,7 +328,7 @@ const obtenerIngresos = (req, res) => {
   // Filtros opcionales
   let { desde, hasta, tipo, cuenta, busqueda, limit = 100 } = req.query;
   
-  // Construimos la consulta base que une ventas y movimientos
+  // Construimos la consulta base que une ventas y solo los ingresos manuales (no automáticos)
   let query = `
     SELECT 
       'Venta' AS tipo, 
@@ -350,7 +350,15 @@ const obtenerIngresos = (req, res) => {
       cf.nombre AS cuenta 
     FROM movimiento_fondos mf 
     JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id 
-    WHERE mf.tipo = 'INGRESO'
+    WHERE mf.tipo = 'INGRESO' 
+    AND (
+      mf.origen = 'ingreso manual' OR 
+      mf.origen = 'cobro' OR 
+      mf.origen = 'reintegro' OR 
+      mf.origen = 'ajuste' OR 
+      mf.origen = 'otro' OR
+      (mf.origen != 'venta' AND mf.referencia_id IS NULL)
+    )
   `;
   
   // Aplicamos filtros
