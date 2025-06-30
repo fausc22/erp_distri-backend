@@ -121,186 +121,185 @@ exports.crearEmpleado = async (req, res) => {
 
 // Buscar empleados
 exports.buscarEmpleado = async (req, res) => {
-    try {
-        const { q } = req.query;
+  try {
+    // ✅ Usar "search" como en el frontend
+    const { search } = req.query;
 
-        if (!q || q.trim().length < 1) {
-            return res.json([]);
-        }
-
-        const searchTerm = `%${q.trim()}%`;
-
-        const query = `
-            SELECT id, nombre, apellido, dni, telefono, email, usuario, rol, activo
-            FROM empleados 
-            WHERE (nombre LIKE ? OR apellido LIKE ? OR usuario LIKE ? OR CONCAT(nombre, ' ', apellido) LIKE ?)
-            AND activo = 1
-            ORDER BY nombre, apellido
-            LIMIT 50
-        `;
-
-        const [empleados] = await db.execute(query, [searchTerm, searchTerm, searchTerm, searchTerm]);
-
-        // Añadir campo nombre completo para facilitar la búsqueda
-        const empleadosConNombreCompleto = empleados.map(emp => ({
-            ...emp,
-            nombre_completo: `${emp.nombre} ${emp.apellido}`
-        }));
-
-        res.json(empleadosConNombreCompleto);
-
-    } catch (error) {
-        console.error('Error al buscar empleados:', error);
-        res.status(500).json({ message: 'Error interno del servidor' });
+    if (!search || search.trim().length < 1) {
+      return res.json([]);
     }
+
+    const searchTerm = `%${search.trim()}%`;
+
+    const query = `
+      SELECT id, nombre, apellido, dni, telefono, email, usuario, rol, activo
+      FROM empleados 
+      WHERE (nombre LIKE ? OR apellido LIKE ? OR usuario LIKE ? OR CONCAT(nombre, ' ', apellido) LIKE ?)
+      AND activo = 1
+      ORDER BY nombre, apellido
+      LIMIT 50
+    `;
+
+    const [empleados] = await db.execute(query, [
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm
+    ]);
+
+    // ✅ Agregar campo nombre_completo
+    const empleadosConNombreCompleto = empleados.map(emp => ({
+      ...emp,
+      nombre_completo: `${emp.nombre} ${emp.apellido}`
+    }));
+
+    res.json(empleadosConNombreCompleto);
+
+  } catch (error) {
+    console.error('Error al buscar empleados:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
 };
+
 
 // Actualizar empleado
 exports.actualizarEmpleado = async (req, res) => {
-    try {
-        const { id } = req.body;
-        const { 
-            nombre, 
-            apellido, 
-            dni, 
-            telefono, 
-            email, 
-            usuario, 
-            password, 
-            rol 
-        } = req.body;
+  try {
+    const { id } = req.params; // 👈 CAMBIO CLAVE
+    const {
+      nombre,
+      apellido,
+      dni,
+      telefono,
+      email,
+      usuario,
+      password,
+      rol
+    } = req.body;
 
-        if (!id) {
-            return res.status(400).json({ message: 'ID del empleado es requerido' });
-        }
-
-        // Validaciones básicas
-        if (!nombre || !apellido || !usuario || !rol) {
-            return res.status(400).json({ 
-                message: 'Los campos nombre, apellido, usuario y rol son obligatorios' 
-            });
-        }
-
-        // Validar rol
-        if (!['GERENTE', 'VENDEDOR'].includes(rol)) {
-            return res.status(400).json({ 
-                message: 'El rol debe ser GERENTE o VENDEDOR' 
-            });
-        }
-
-        // Obtener datos anteriores para auditoría
-        const datosAnteriores = await obtenerDatosAnteriores('empleados', id);
-        if (!datosAnteriores) {
-            return res.status(404).json({ message: 'Empleado no encontrado' });
-        }
-
-        // Verificar si el usuario ya existe en otro empleado
-        const [usuarioExistente] = await db.execute(
-            'SELECT id FROM empleados WHERE usuario = ? AND id != ?', 
-            [usuario, id]
-        );
-        if (usuarioExistente.length > 0) {
-            return res.status(400).json({ message: 'El usuario ya está en uso por otro empleado' });
-        }
-
-        // Verificar si el DNI ya existe en otro empleado (si se proporciona)
-        if (dni) {
-            const [dniExistente] = await db.execute(
-                'SELECT id FROM empleados WHERE dni = ? AND id != ?', 
-                [dni, id]
-            );
-            if (dniExistente.length > 0) {
-                return res.status(400).json({ message: 'El DNI ya está registrado por otro empleado' });
-            }
-        }
-
-        let query;
-        let params;
-        let datosNuevos = {
-            nombre: nombre.trim(),
-            apellido: apellido.trim(),
-            dni: dni?.trim() || null,
-            telefono: telefono?.trim() || null,
-            email: email?.trim() || null,
-            usuario: usuario.trim(),
-            rol
-        };
-
-        // Si se proporciona nueva contraseña, actualizarla también
-        if (password && password.trim().length > 0) {
-            if (password.length < 6) {
-                return res.status(400).json({ 
-                    message: 'La contraseña debe tener al menos 6 caracteres' 
-                });
-            }
-
-            const hashedPassword = await bcrypt.hash(password, 10);
-            datosNuevos.password = hashedPassword;
-            
-            query = `
-                UPDATE empleados 
-                SET nombre = ?, apellido = ?, dni = ?, telefono = ?, email = ?, usuario = ?, password = ?, rol = ?
-                WHERE id = ?
-            `;
-            params = [
-                nombre.trim(),
-                apellido.trim(),
-                dni?.trim() || null,
-                telefono?.trim() || null,
-                email?.trim() || null,
-                usuario.trim(),
-                hashedPassword,
-                rol,
-                id
-            ];
-        } else {
-            // Actualizar sin cambiar la contraseña
-            query = `
-                UPDATE empleados 
-                SET nombre = ?, apellido = ?, dni = ?, telefono = ?, email = ?, usuario = ?, rol = ?
-                WHERE id = ?
-            `;
-            params = [
-                nombre.trim(),
-                apellido.trim(),
-                dni?.trim() || null,
-                telefono?.trim() || null,
-                email?.trim() || null,
-                usuario.trim(),
-                rol,
-                id
-            ];
-        }
-
-        await db.execute(query, params);
-
-        // Auditar actualización del empleado
-        await auditarOperacion(req, {
-            accion: 'UPDATE',
-            tabla: 'empleados',
-            registroId: id,
-            datosAnteriores: limpiarDatosSensibles(datosAnteriores),
-            datosNuevos: limpiarDatosSensibles(datosNuevos),
-            detallesAdicionales: `Empleado actualizado: ${nombre} ${apellido}${password ? ' - Contraseña cambiada' : ''}`
-        });
-
-        res.json({ message: 'Empleado actualizado exitosamente' });
-
-    } catch (error) {
-        console.error('Error al actualizar empleado:', error);
-        
-        // Auditar error en actualización
-        await auditarOperacion(req, {
-            accion: 'UPDATE',
-            tabla: 'empleados',
-            registroId: req.body.id,
-            detallesAdicionales: `Error al actualizar empleado: ${error.message}`,
-            datosNuevos: limpiarDatosSensibles(req.body)
-        });
-        
-        res.status(500).json({ message: 'Error interno del servidor' });
+    if (!id) {
+      return res.status(400).json({ message: 'ID del empleado es requerido' });
     }
+
+    // Validaciones básicas
+    if (!nombre || !apellido || !usuario || !rol) {
+      return res.status(400).json({
+        message: 'Los campos nombre, apellido, usuario y rol son obligatorios'
+      });
+    }
+
+    if (!['GERENTE', 'VENDEDOR'].includes(rol)) {
+      return res.status(400).json({
+        message: 'El rol debe ser GERENTE o VENDEDOR'
+      });
+    }
+
+    const datosAnteriores = await obtenerDatosAnteriores('empleados', id);
+    if (!datosAnteriores) {
+      return res.status(404).json({ message: 'Empleado no encontrado' });
+    }
+
+    // Validar usuario duplicado
+    const [usuarioExistente] = await db.execute(
+      'SELECT id FROM empleados WHERE usuario = ? AND id != ?',
+      [usuario, id]
+    );
+    if (usuarioExistente.length > 0) {
+      return res.status(400).json({ message: 'El usuario ya está en uso por otro empleado' });
+    }
+
+    if (dni) {
+      const [dniExistente] = await db.execute(
+        'SELECT id FROM empleados WHERE dni = ? AND id != ?',
+        [dni, id]
+      );
+      if (dniExistente.length > 0) {
+        return res.status(400).json({ message: 'El DNI ya está registrado por otro empleado' });
+      }
+    }
+
+    let query;
+    let params;
+    let datosNuevos = {
+      nombre: nombre.trim(),
+      apellido: apellido.trim(),
+      dni: dni?.trim() || null,
+      telefono: telefono?.trim() || null,
+      email: email?.trim() || null,
+      usuario: usuario.trim(),
+      rol
+    };
+
+    if (password && password.trim().length > 0) {
+      if (password.length < 6) {
+        return res.status(400).json({ message: 'La contraseña debe tener al menos 6 caracteres' });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+      datosNuevos.password = hashedPassword;
+
+      query = `
+        UPDATE empleados 
+        SET nombre = ?, apellido = ?, dni = ?, telefono = ?, email = ?, usuario = ?, password = ?, rol = ?
+        WHERE id = ?
+      `;
+      params = [
+        nombre.trim(),
+        apellido.trim(),
+        dni?.trim() || null,
+        telefono?.trim() || null,
+        email?.trim() || null,
+        usuario.trim(),
+        hashedPassword,
+        rol,
+        id
+      ];
+    } else {
+      query = `
+        UPDATE empleados 
+        SET nombre = ?, apellido = ?, dni = ?, telefono = ?, email = ?, usuario = ?, rol = ?
+        WHERE id = ?
+      `;
+      params = [
+        nombre.trim(),
+        apellido.trim(),
+        dni?.trim() || null,
+        telefono?.trim() || null,
+        email?.trim() || null,
+        usuario.trim(),
+        rol,
+        id
+      ];
+    }
+
+    await db.execute(query, params);
+
+    await auditarOperacion(req, {
+      accion: 'UPDATE',
+      tabla: 'empleados',
+      registroId: id,
+      datosAnteriores: limpiarDatosSensibles(datosAnteriores),
+      datosNuevos: limpiarDatosSensibles(datosNuevos),
+      detallesAdicionales: `Empleado actualizado: ${nombre} ${apellido}${password ? ' - Contraseña cambiada' : ''}`
+    });
+
+    res.json({ message: 'Empleado actualizado exitosamente' });
+
+  } catch (error) {
+    console.error('Error al actualizar empleado:', error);
+
+    await auditarOperacion(req, {
+      accion: 'UPDATE',
+      tabla: 'empleados',
+      registroId: req.params.id,
+      detallesAdicionales: `Error al actualizar empleado: ${error.message}`,
+      datosNuevos: limpiarDatosSensibles(req.body)
+    });
+
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
 };
+
 
 // Listar todos los empleados (para gerentes)
 exports.listarEmpleados = async (req, res) => {
