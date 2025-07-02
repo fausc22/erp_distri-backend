@@ -1,8 +1,8 @@
 const puppeteer = require('puppeteer');
 
 /**
- * Configuración de Puppeteer optimizada para producción
- * Soluciona problemas en contenedores Docker y Railway
+ * Configuración de Puppeteer optimizada para Railway y producción
+ * Soluciona problemas de detección de Chrome/Chromium
  */
 class PuppeteerManager {
     constructor() {
@@ -11,26 +11,95 @@ class PuppeteerManager {
     }
 
     /**
+     * Detecta automáticamente la ruta del ejecutable de Chrome
+     */
+    detectChromeExecutable() {
+        const possiblePaths = [
+            // Railway/Nix paths
+            '/nix/store/*/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            // Puppeteer bundled Chrome
+            require('puppeteer').executablePath(),
+        ];
+
+        // Si hay un path específico en variables de entorno
+        if (process.env.PUPPETEER_EXECUTABLE_PATH && 
+            process.env.PUPPETEER_EXECUTABLE_PATH !== '/nix/store/*/bin/chromium') {
+            possiblePaths.unshift(process.env.PUPPETEER_EXECUTABLE_PATH);
+        }
+
+        const fs = require('fs');
+        const { execSync } = require('child_process');
+
+        // Intentar encontrar chromium dinámicamente en Railway
+        try {
+            const whichChromium = execSync('which chromium-browser 2>/dev/null || which chromium 2>/dev/null || echo ""', { encoding: 'utf8' }).trim();
+            if (whichChromium && fs.existsSync(whichChromium)) {
+                console.log(`✅ Chrome encontrado con 'which': ${whichChromium}`);
+                return whichChromium;
+            }
+        } catch (e) {
+            console.log('⚠️ No se pudo usar "which" para encontrar Chrome');
+        }
+
+        // Buscar en rutas específicas de Nix
+        try {
+            const nixStores = execSync('find /nix/store -name "chromium*" -type f -executable 2>/dev/null | head -5 || echo ""', { encoding: 'utf8' }).trim();
+            if (nixStores) {
+                const chromiumPaths = nixStores.split('\n').filter(path => path.includes('/bin/'));
+                for (const path of chromiumPaths) {
+                    if (fs.existsSync(path)) {
+                        console.log(`✅ Chrome encontrado en Nix store: ${path}`);
+                        return path;
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('⚠️ No se pudo buscar en /nix/store');
+        }
+
+        // Probar rutas conocidas
+        for (const path of possiblePaths) {
+            try {
+                if (path.includes('*')) continue; // Saltar patrones con wildcard
+                if (fs.existsSync(path)) {
+                    console.log(`✅ Chrome encontrado en: ${path}`);
+                    return path;
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+
+        console.log('⚠️ No se encontró Chrome, usando Puppeteer bundled');
+        return null; // Usar el Chrome bundled de Puppeteer
+    }
+
+    /**
      * Obtiene la configuración de launch para Puppeteer
      */
     getLaunchOptions() {
         const baseOptions = {
-            headless: 'new', // Usar nuevo modo headless
-            timeout: 30000,  // 30 segundos timeout
+            headless: 'new',
+            timeout: 30000,
         };
 
         if (this.isProduction) {
-            // ✅ Configuración específica para producción/contenedores
-            return {
+            const executablePath = this.detectChromeExecutable();
+            
+            const productionOptions = {
                 ...baseOptions,
                 args: [
-                    '--no-sandbox',                    // ✅ CRÍTICO: Necesario para contenedores
-                    '--disable-setuid-sandbox',       // ✅ CRÍTICO: Seguridad en contenedores
-                    '--disable-dev-shm-usage',        // ✅ Evita problemas de memoria compartida
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--single-process',               // ✅ CRÍTICO: Evita problemas de procesos múltiples
+                    '--single-process',
                     '--disable-gpu',
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
@@ -41,12 +110,19 @@ class PuppeteerManager {
                     '--disable-features=VizDisplayCompositor',
                     '--disable-extensions',
                     '--disable-plugins',
-                    '--disable-images',              // ✅ Optimización: No cargar imágenes
-                    '--disable-javascript',          // ✅ Solo si no necesitas JS en el PDF
-                    '--virtual-time-budget=5000',    // ✅ Límite de tiempo virtual
+                    '--disable-images',
+                    '--virtual-time-budget=5000',
+                    '--memory-pressure-off',
+                    '--max_old_space_size=4096',
                 ],
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
             };
+
+            // Solo agregar executablePath si se encontró uno válido
+            if (executablePath) {
+                productionOptions.executablePath = executablePath;
+            }
+
+            return productionOptions;
         } else {
             // Configuración para desarrollo
             return {
@@ -61,11 +137,10 @@ class PuppeteerManager {
     }
 
     /**
-     * Lanza una nueva instancia de browser o reutiliza la existente
+     * Lanza una nueva instancia de browser con múltiples intentos
      */
     async getBrowser() {
         try {
-            // Verificar si el browser existente sigue funcionando
             if (this.browser && this.browser.isConnected()) {
                 return this.browser;
             }
@@ -78,37 +153,58 @@ class PuppeteerManager {
                 console.log('🐳 Configuración para producción:', {
                     headless: options.headless,
                     argsCount: options.args.length,
-                    executablePath: options.executablePath || 'default'
+                    executablePath: options.executablePath || 'bundled'
                 });
             }
 
-            this.browser = await puppeteer.launch(options);
-            
-            console.log('✅ Puppeteer lanzado exitosamente');
-            return this.browser;
-
-        } catch (error) {
-            console.error('❌ Error lanzando Puppeteer:', error.message);
-            
-            // Intentar con configuración mínima como fallback
-            if (this.isProduction && !error.message.includes('--no-sandbox')) {
-                console.log('🔄 Intentando con configuración mínima...');
+            // Primer intento con configuración completa
+            try {
+                this.browser = await puppeteer.launch(options);
+                console.log('✅ Puppeteer lanzado exitosamente');
+                return this.browser;
+            } catch (primaryError) {
+                console.log('⚠️ Primer intento falló:', primaryError.message);
                 
-                try {
-                    this.browser = await puppeteer.launch({
-                        headless: 'new',
-                        args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process'],
-                        timeout: 15000,
-                    });
+                // Segundo intento: sin executablePath (usar bundled)
+                if (options.executablePath) {
+                    console.log('🔄 Intentando con Chrome bundled...');
+                    const fallbackOptions = { ...options };
+                    delete fallbackOptions.executablePath;
                     
+                    try {
+                        this.browser = await puppeteer.launch(fallbackOptions);
+                        console.log('✅ Puppeteer lanzado con Chrome bundled');
+                        return this.browser;
+                    } catch (bundledError) {
+                        console.log('⚠️ Chrome bundled también falló:', bundledError.message);
+                    }
+                }
+
+                // Tercer intento: configuración mínima absoluta
+                console.log('🔄 Intentando con configuración mínima...');
+                const minimalOptions = {
+                    headless: 'new',
+                    args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--single-process',
+                        '--disable-gpu'
+                    ],
+                    timeout: 15000,
+                };
+
+                try {
+                    this.browser = await puppeteer.launch(minimalOptions);
                     console.log('✅ Puppeteer lanzado con configuración mínima');
                     return this.browser;
-                } catch (fallbackError) {
-                    console.error('❌ Error incluso con configuración mínima:', fallbackError.message);
-                    throw fallbackError;
+                } catch (minimalError) {
+                    console.error('❌ Todas las configuraciones fallaron');
+                    throw new Error(`No se pudo lanzar Puppeteer: ${minimalError.message}`);
                 }
             }
-            
+
+        } catch (error) {
+            console.error('❌ Error fatal lanzando Puppeteer:', error.message);
             throw error;
         }
     }
@@ -123,31 +219,31 @@ class PuppeteerManager {
             const browser = await this.getBrowser();
             page = await browser.newPage();
 
-            // ✅ Configuraciones de página optimizadas
+            // Configuraciones de página optimizadas
             await page.setViewport({ 
                 width: 1280, 
                 height: 720,
                 deviceScaleFactor: 1
             });
 
-            // ✅ Desactivar imágenes y recursos innecesarios para PDFs
+            // Interceptar y bloquear recursos innecesarios
             await page.setRequestInterception(true);
             page.on('request', (request) => {
                 const resourceType = request.resourceType();
-                if (['image', 'media', 'font'].includes(resourceType)) {
+                if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
                     request.abort();
                 } else {
                     request.continue();
                 }
             });
 
-            // ✅ Configurar contenido HTML
+            // Configurar contenido HTML con timeout reducido
             await page.setContent(htmlContent, { 
-                waitUntil: 'networkidle0',
-                timeout: 15000 
+                waitUntil: 'domcontentloaded', // Cambiar de networkidle0 a domcontentloaded
+                timeout: 10000 
             });
 
-            // ✅ Configuración por defecto del PDF
+            // Configuración por defecto del PDF
             const defaultPdfOptions = {
                 format: 'A4',
                 margin: {
@@ -159,21 +255,20 @@ class PuppeteerManager {
                 printBackground: true,
                 preferCSSPageSize: false,
                 displayHeaderFooter: false,
-                timeout: 30000,
+                timeout: 20000,
                 ...pdfOptions
             };
 
             console.log('📄 Generando PDF...');
             const pdfBuffer = await page.pdf(defaultPdfOptions);
             
-            console.log('✅ PDF generado exitosamente');
+            console.log(`✅ PDF generado exitosamente (${pdfBuffer.length} bytes)`);
             return pdfBuffer;
 
         } catch (error) {
             console.error('❌ Error generando PDF:', error.message);
             throw new Error(`Error generando PDF: ${error.message}`);
         } finally {
-            // ✅ Cerrar página para liberar memoria
             if (page) {
                 try {
                     await page.close();
@@ -208,15 +303,42 @@ class PuppeteerManager {
             isProduction: this.isProduction,
             hasBrowser: !!this.browser,
             isConnected: this.browser ? this.browser.isConnected() : false,
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 'default'
+            detectedExecutable: this.detectChromeExecutable()
         };
+    }
+
+    /**
+     * Endpoint de diagnóstico para verificar Puppeteer
+     */
+    async diagnostics() {
+        const status = this.getStatus();
+        
+        try {
+            const browser = await this.getBrowser();
+            const version = await browser.version();
+            await this.closeBrowser();
+            
+            return {
+                ...status,
+                browserVersion: version,
+                canLaunch: true,
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            return {
+                ...status,
+                canLaunch: false,
+                error: error.message,
+                timestamp: new Date().toISOString()
+            };
+        }
     }
 }
 
-// ✅ Crear instancia única
+// Crear instancia única
 const puppeteerManager = new PuppeteerManager();
 
-// ✅ Manejar cierre graceful del proceso
+// Manejar cierre graceful del proceso
 process.on('SIGTERM', async () => {
     console.log('🛑 SIGTERM recibido, cerrando Puppeteer...');
     await puppeteerManager.closeBrowser();

@@ -8,14 +8,15 @@ nixPkgs = [
   "chromium",
   "nss",
   "freetype",
-  "harfbuzz"
+  "harfbuzz",
+  "fontconfig",
+  "liberation_ttf"
 ]
-
 
 [phases.install]
 cmds = [
   "npm ci --only=production",
-  "npx puppeteer browsers install chrome"
+  "npx puppeteer browsers install chrome --path /tmp/chrome || echo 'Chrome download failed, using system chromium'"
 ]
 
 [start]
@@ -24,4 +25,4 @@ cmd = "npm start"
 [variables]
 NODE_ENV = "production"
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "false"
-PUPPETEER_EXECUTABLE_PATH = "/nix/store/*/bin/chromium"
+# No establecer PUPPETEER_EXECUTABLE_PATH aquí, dejar que el código lo detecte

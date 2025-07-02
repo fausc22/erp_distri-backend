@@ -152,6 +152,28 @@ app.use((error, req, res, next) => {
     });
 });
 
+
+// Diagnóstico de Puppeteer para Railway
+app.get('/puppeteer-status', async (req, res) => {
+    try {
+        const puppeteerManager = require('./utils/puppeteerConfig');
+        const diagnostics = await puppeteerManager.diagnostics();
+        
+        res.json({
+            status: '🔍 Puppeteer Diagnostics',
+            timestamp: new Date().toISOString(),
+            ...diagnostics
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: '❌ Puppeteer Error',
+            timestamp: new Date().toISOString(),
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});
+
 // Iniciar el servidor
 app.listen(port, '0.0.0.0', () => {
     console.log(`🚀 Servidor escuchando en el puerto ${port}`);
