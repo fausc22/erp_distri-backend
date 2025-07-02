@@ -210,7 +210,7 @@ class PuppeteerManager {
     }
 
     /**
-     * Genera un PDF con configuración optimizada
+     * Genera un PDF con configuración optimizada y manejo de timeouts
      */
     async generatePDF(htmlContent, pdfOptions = {}) {
         let page = null;
@@ -226,22 +226,33 @@ class PuppeteerManager {
                 deviceScaleFactor: 1
             });
 
-            // Interceptar y bloquear recursos innecesarios
-            await page.setRequestInterception(true);
-            page.on('request', (request) => {
-                const resourceType = request.resourceType();
-                if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
-                    request.abort();
-                } else {
-                    request.continue();
-                }
-            });
+            console.log('📄 Configurando página...');
 
-            // Configurar contenido HTML con timeout reducido
-            await page.setContent(htmlContent, { 
-                waitUntil: 'domcontentloaded', // Cambiar de networkidle0 a domcontentloaded
-                timeout: 10000 
-            });
+            // ✅ ESTRATEGIA SIMPLIFICADA: No interceptar requests para evitar problemas
+            // Solo configurar timeouts más largos y usar setContent directamente
+
+            // ✅ Método 1: Intentar setContent con HTML directo
+            try {
+                console.log('📝 Cargando HTML directamente...');
+                await page.setContent(htmlContent, { 
+                    waitUntil: 'load', // Usar 'load' en lugar de 'domcontentloaded'
+                    timeout: 30000     // Aumentar timeout a 30 segundos
+                });
+                console.log('✅ HTML cargado con setContent');
+            } catch (setContentError) {
+                console.log('⚠️ setContent falló, intentando método alternativo...');
+                
+                // ✅ Método 2: Navegar a data URI como fallback
+                const dataUri = `data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`;
+                await page.goto(dataUri, {
+                    waitUntil: 'load',
+                    timeout: 30000
+                });
+                console.log('✅ HTML cargado con data URI');
+            }
+
+            // ✅ Esperar un momento adicional para que se renderice el CSS
+            await page.waitForTimeout(1000);
 
             // Configuración por defecto del PDF
             const defaultPdfOptions = {
@@ -255,7 +266,7 @@ class PuppeteerManager {
                 printBackground: true,
                 preferCSSPageSize: false,
                 displayHeaderFooter: false,
-                timeout: 20000,
+                timeout: 30000, // Aumentar timeout del PDF también
                 ...pdfOptions
             };
 
@@ -267,7 +278,15 @@ class PuppeteerManager {
 
         } catch (error) {
             console.error('❌ Error generando PDF:', error.message);
-            throw new Error(`Error generando PDF: ${error.message}`);
+            
+            // ✅ Proporcionar más información del error
+            if (error.message.includes('Navigation timeout')) {
+                throw new Error(`Timeout cargando HTML. Verifica que el HTML sea válido y no tenga recursos externos.`);
+            } else if (error.message.includes('Target closed')) {
+                throw new Error(`La página se cerró inesperadamente. Puede ser un problema de memoria.`);
+            } else {
+                throw new Error(`Error generando PDF: ${error.message}`);
+            }
         } finally {
             if (page) {
                 try {
