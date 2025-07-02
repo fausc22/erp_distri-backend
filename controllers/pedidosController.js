@@ -690,7 +690,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
     `;
 
     try {
-        // Insertar el producto en pedidos_cont
+        // 1. Insertar el producto en pedidos_cont
         const insertResult = await new Promise((resolve, reject) => {
             db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal], (err, results) => {
                 if (err) {
@@ -701,10 +701,13 @@ const agregarProductoPedidoExistente = async (req, res) => {
             });
         });
 
-        // Actualizar stock (restar la cantidad)
+        // 2. Actualizar stock (restar la cantidad)
         await actualizarStockProducto(producto_id, -cantidad, 'agregar_producto_pedido');
 
-        // Auditar agregado de producto
+        // 3. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
+        const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
+
+        // 4. Auditar agregado de producto
         await auditarOperacion(req, {
             accion: 'INSERT',
             tabla: 'pedidos_cont',
@@ -714,19 +717,21 @@ const agregarProductoPedidoExistente = async (req, res) => {
                 pedido_id: pedidoId,
                 ...req.body
             },
-            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad}`
+            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad} - Nuevos totales: $${totalesActualizados.total}`
         });
 
         res.json({ 
             success: true, 
-            message: "Producto agregado correctamente y stock actualizado", 
-            data: insertResult 
+            message: "Producto agregado correctamente, stock y totales actualizados", 
+            data: {
+                producto: insertResult,
+                totales: totalesActualizados
+            }
         });
 
     } catch (error) {
         console.error('Error en agregarProductoPedidoExistente:', error);
         
-        // Auditar error
         await auditarOperacion(req, {
             accion: 'INSERT',
             tabla: 'pedidos_cont',
@@ -761,7 +766,7 @@ const actualizarProductoPedido = async (req, res) => {
     }
 
     try {
-        // Obtener datos anteriores del producto en el pedido
+        // 1. Obtener datos anteriores del producto en el pedido
         const obtenerDatosAnterioresPromise = () => {
             return new Promise((resolve, reject) => {
                 db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
@@ -778,9 +783,10 @@ const actualizarProductoPedido = async (req, res) => {
 
         const cantidadAnterior = datosAnteriores.cantidad;
         const productoId = datosAnteriores.producto_id;
+        const pedidoId = datosAnteriores.pedido_id;
         const diferenciaCantidad = cantidad - cantidadAnterior;
 
-        // Actualizar el producto en pedidos_cont
+        // 2. Actualizar el producto en pedidos_cont
         const queryActualizar = `
             UPDATE pedidos_cont SET cantidad = ?, precio = ?, IVA = ?, subtotal = ? WHERE id = ?
         `;
@@ -798,30 +804,35 @@ const actualizarProductoPedido = async (req, res) => {
             });
         });
 
-        // Ajustar stock si hay diferencia en cantidad
+        // 3. Ajustar stock si hay diferencia en cantidad
         if (diferenciaCantidad !== 0) {
             await actualizarStockProducto(productoId, -diferenciaCantidad, 'actualizar_cantidad_pedido');
         }
 
-        // Auditar actualización del producto
+        // 4. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
+        const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
+
+        // 5. Auditar actualización del producto
         await auditarOperacion(req, {
             accion: 'UPDATE',
             tabla: 'pedidos_cont',
             registroId: productId,
             datosAnteriores,
             datosNuevos: { ...datosAnteriores, cantidad, precio, iva, subtotal },
-            detallesAdicionales: `Producto actualizado en pedido: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad}`
+            detallesAdicionales: `Producto actualizado en pedido ${pedidoId}: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad} - Nuevos totales: $${totalesActualizados.total}`
         });
 
         res.json({ 
             success: true, 
-            message: 'Producto actualizado correctamente y stock ajustado' 
+            message: 'Producto actualizado correctamente, stock y totales ajustados',
+            data: {
+                totales: totalesActualizados
+            }
         });
 
     } catch (error) {
         console.error('Error en actualizarProductoPedido:', error);
         
-        // Auditar error
         await auditarOperacion(req, {
             accion: 'UPDATE',
             tabla: 'pedidos_cont',
@@ -848,7 +859,7 @@ const eliminarProductoPedido = async (req, res) => {
     const productId = req.params.productId;
 
     try {
-        // Obtener datos del producto antes de eliminarlo
+        // 1. Obtener datos del producto antes de eliminarlo
         const obtenerDatosPromise = () => {
             return new Promise((resolve, reject) => {
                 db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
@@ -863,7 +874,9 @@ const eliminarProductoPedido = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Producto en pedido no encontrado' });
         }
 
-        // Eliminar el producto del pedido
+        const pedidoId = datosProducto.pedido_id;
+
+        // 2. Eliminar el producto del pedido
         const queryEliminar = `DELETE FROM pedidos_cont WHERE id = ?`;
 
         await new Promise((resolve, reject) => {
@@ -876,27 +889,32 @@ const eliminarProductoPedido = async (req, res) => {
             });
         });
 
-        // Restaurar stock (sumar la cantidad que se había restado)
+        // 3. Restaurar stock (sumar la cantidad que se había restado)
         await actualizarStockProducto(datosProducto.producto_id, datosProducto.cantidad, 'eliminar_producto_pedido');
 
-        // Auditar eliminación del producto
+        // 4. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
+        const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
+
+        // 5. Auditar eliminación del producto
         await auditarOperacion(req, {
             accion: 'DELETE',
             tabla: 'pedidos_cont',
             registroId: productId,
             datosAnteriores: datosProducto,
-            detallesAdicionales: `Producto eliminado del pedido: ${datosProducto.producto_nombre} x${datosProducto.cantidad}`
+            detallesAdicionales: `Producto eliminado del pedido ${pedidoId}: ${datosProducto.producto_nombre} x${datosProducto.cantidad} - Nuevos totales: $${totalesActualizados.total}`
         });
 
         res.json({ 
             success: true, 
-            message: 'Producto eliminado correctamente y stock restaurado' 
+            message: 'Producto eliminado correctamente, stock restaurado y totales actualizados',
+            data: {
+                totales: totalesActualizados
+            }
         });
 
     } catch (error) {
         console.error('Error en eliminarProductoPedido:', error);
         
-        // Auditar error
         await auditarOperacion(req, {
             accion: 'DELETE',
             tabla: 'pedidos_cont',
@@ -914,7 +932,6 @@ const eliminarProductoPedido = async (req, res) => {
 // Actualizar totales del pedido
 const actualizarTotalesPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
-    const { subtotal, iva_total, total } = req.body;
     
     try {
         // Obtener datos anteriores para auditoría
@@ -932,21 +949,8 @@ const actualizarTotalesPedido = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
-        const query = `UPDATE pedidos SET subtotal = ?, iva_total = ?, total = ? WHERE id = ?`;
-
-        const result = await new Promise((resolve, reject) => {
-            db.query(query, [subtotal, iva_total, total, pedidoId], (err, result) => {
-                if (err) {
-                    console.error('Error al actualizar totales:', err);
-                    return reject(err);
-                }
-                resolve(result);
-            });
-        });
-        
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
-        }
+        // ✅ USAR LA NUEVA FUNCIÓN DE RECÁLCULO
+        const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
 
         // Auditar actualización de totales
         await auditarOperacion(req, {
@@ -954,23 +958,27 @@ const actualizarTotalesPedido = async (req, res) => {
             tabla: 'pedidos',
             registroId: pedidoId,
             datosAnteriores,
-            datosNuevos: { ...datosAnteriores, subtotal, iva_total, total },
-            detallesAdicionales: `Totales actualizados - Cliente: ${datosAnteriores.cliente_nombre} - Total: $${datosAnteriores.total} → $${total}`
+            datosNuevos: { ...datosAnteriores, ...totalesActualizados },
+            detallesAdicionales: `Totales recalculados - Cliente: ${datosAnteriores.cliente_nombre} - Total: $${datosAnteriores.total} → $${totalesActualizados.total}`
         });
         
-        res.json({ success: true, message: 'Totales actualizados correctamente' });
+        res.json({ 
+            success: true, 
+            message: 'Totales recalculados correctamente desde BD',
+            data: totalesActualizados
+        });
+        
     } catch (error) {
         console.error('Error en actualizarTotalesPedido:', error);
         
-        // Auditar error
         await auditarOperacion(req, {
             accion: 'UPDATE',
             tabla: 'pedidos',
             registroId: pedidoId,
-            detallesAdicionales: `Error al actualizar totales: ${error.message}`
+            detallesAdicionales: `Error al recalcular totales: ${error.message}`
         });
         
-        res.status(500).json({ success: false, message: 'Error al actualizar totales' });
+        res.status(500).json({ success: false, message: 'Error al recalcular totales' });
     }
 };
 
@@ -1263,6 +1271,72 @@ const obtenerDatosFiltros = (req, res) => {
     });
 };
 
+const recalcularYActualizarTotalesPedido = async (pedidoId) => {
+    return new Promise((resolve, reject) => {
+        // 1. Obtener todos los productos actuales del pedido desde BD
+        const queryProductos = `
+            SELECT SUM(subtotal) as subtotal_total, 
+                   SUM(IVA) as iva_total 
+            FROM pedidos_cont 
+            WHERE pedido_id = ?
+        `;
+        
+        db.query(queryProductos, [pedidoId], (err, results) => {
+            if (err) {
+                console.error('Error al calcular totales:', err);
+                return reject(err);
+            }
+            
+            // Manejar caso sin productos
+            if (results.length === 0 || !results[0].subtotal_total) {
+                const totalesCero = { subtotal: 0, iva_total: 0, total: 0 };
+                
+                const queryActualizar = `
+                    UPDATE pedidos 
+                    SET subtotal = ?, iva_total = ?, total = ? 
+                    WHERE id = ?
+                `;
+                
+                db.query(queryActualizar, [0, 0, 0, pedidoId], (err, result) => {
+                    if (err) {
+                        console.error('Error al actualizar totales a cero:', err);
+                        return reject(err);
+                    }
+                    console.log(`💰 Totales actualizados a cero para pedido ${pedidoId}`);
+                    resolve(totalesCero);
+                });
+                return;
+            }
+            
+            // Calcular totales desde BD
+            const subtotalTotal = parseFloat(results[0].subtotal_total) || 0;
+            const ivaTotal = parseFloat(results[0].iva_total) || 0;
+            const total = subtotalTotal + ivaTotal;
+            
+            // 2. Actualizar la tabla pedidos con los totales correctos
+            const queryActualizar = `
+                UPDATE pedidos 
+                SET subtotal = ?, iva_total = ?, total = ? 
+                WHERE id = ?
+            `;
+            
+            db.query(queryActualizar, [subtotalTotal, ivaTotal, total, pedidoId], (err, result) => {
+                if (err) {
+                    console.error('Error al actualizar totales del pedido:', err);
+                    return reject(err);
+                }
+                
+                console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Total=${total}`);
+                resolve({
+                    subtotal: subtotalTotal,
+                    iva_total: ivaTotal,
+                    total: total
+                });
+            });
+        });
+    });
+};
+
 module.exports = {
      // Funciones de búsqueda
     buscarCliente,
@@ -1283,7 +1357,7 @@ module.exports = {
     eliminarProductoPedido,
     actualizarTotalesPedido,
     actualizarObservacionesPedido,
-    
+    recalcularYActualizarTotalesPedido,
     // Alias para compatibilidad
     registrarPedido: nuevoPedido,
     filtrarCliente: buscarCliente,

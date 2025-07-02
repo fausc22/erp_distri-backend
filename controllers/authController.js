@@ -7,8 +7,8 @@ const { auditarAuth, limpiarDatosSensibles } = require('../middlewares/auditoria
 const getTokenExpiration = () => {
     const isDevelopment = process.env.NODE_ENV === 'development';
     return {
-        accessToken: isDevelopment ? '2h' : '1h',      // Reducido para mayor seguridad
-        refreshToken: isDevelopment ? '30d' : '30d'    // Mantenemos 30 días para "recuérdame"
+        accessToken: isDevelopment ? '2h' : '1h',
+        refreshToken: '30d' // ✅ FIJO: 30 días siempre que se active "recuérdame"
     };
 };
 
@@ -24,7 +24,6 @@ const validateSecrets = () => {
     }
 };
 
-// Validar secrets al inicio
 validateSecrets();
 
 // ✅ Función helper para crear tokens
@@ -42,11 +41,15 @@ const createTokens = (empleado, remember = false) => {
 
     const accessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: accessExp });
     
-    // Solo crear refresh token si el usuario marca "recuérdame"
+    // ✅ CREAR refresh token SIEMPRE que remember sea true
     let refreshToken = null;
     if (remember) {
         refreshToken = jwt.sign(
-            { id: empleado.id, iat: Math.floor(Date.now() / 1000) }, 
+            { 
+                id: empleado.id, 
+                type: 'refresh', // ✅ Añadir tipo para seguridad
+                iat: Math.floor(Date.now() / 1000) 
+            }, 
             process.env.JWT_REFRESH_SECRET, 
             { expiresIn: refreshExp }
         );
@@ -55,15 +58,17 @@ const createTokens = (empleado, remember = false) => {
     return { accessToken, refreshToken, accessExp, refreshExp };
 };
 
-// ✅ Función helper para configurar cookies
+// ✅ Función helper para configurar cookies - CORREGIDA
 const setRefreshTokenCookie = (res, refreshToken, remember) => {
-    if (!refreshToken) {
-        // Limpiar cookie si no hay refresh token
+    if (!refreshToken || !remember) {
+        // ✅ Limpiar cookie si no hay refresh token o no se quiere recordar
         res.clearCookie('refreshToken', {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax'
+            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+            path: '/' // ✅ IMPORTANTE: Especificar path
         });
+        console.log('🍪 Cookie de refresh token limpiada');
         return;
     }
 
@@ -71,14 +76,19 @@ const setRefreshTokenCookie = (res, refreshToken, remember) => {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-        maxAge: remember ? (30 * 24 * 60 * 60 * 1000) : undefined // 30 días si remember, sino session
+        path: '/', // ✅ IMPORTANTE: Especificar path
+        maxAge: 30 * 24 * 60 * 60 * 1000 // ✅ 30 días en millisegundos
     };
 
     res.cookie('refreshToken', refreshToken, cookieOptions);
+    console.log('🍪 Cookie de refresh token establecida por 30 días');
 };
 
 exports.login = async (req, res) => {
     const { username, password, remember = false } = req.body;
+
+    // ✅ Convertir a boolean si viene como string
+    const rememberBool = remember === true || remember === 'true';
 
     if (!username || !password) {
         await auditarAuth(req, {
@@ -126,10 +136,10 @@ exports.login = async (req, res) => {
         }
 
         // ✅ Crear tokens con configuración mejorada
-        const { accessToken, refreshToken, accessExp } = createTokens(empleado, remember);
+        const { accessToken, refreshToken, accessExp } = createTokens(empleado, rememberBool);
 
         // ✅ Configurar cookie de refresh token
-        setRefreshTokenCookie(res, refreshToken, remember);
+        setRefreshTokenCookie(res, refreshToken, rememberBool);
 
         // ✅ Auditar login exitoso con más detalles
         await auditarAuth(req, {
@@ -137,10 +147,10 @@ exports.login = async (req, res) => {
             usuarioId: empleado.id,
             usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
             estado: 'EXITOSO',
-            detallesAdicionales: `Login exitoso - Rol: ${empleado.rol}, Remember: ${remember ? 'Sí' : 'No'}, TokenExp: ${accessExp}, RefreshToken: ${refreshToken ? 'Sí' : 'No'}`
+            detallesAdicionales: `Login exitoso - Rol: ${empleado.rol}, Remember: ${rememberBool ? 'Sí' : 'No'}, TokenExp: ${accessExp}, RefreshToken: ${refreshToken ? 'Sí' : 'No'}`
         });
 
-        console.log(`✅ Login exitoso para ${empleado.usuario} - Remember: ${remember} - Token expira en: ${accessExp}`);
+        console.log(`✅ Login exitoso para ${empleado.usuario} - Remember: ${rememberBool} - Token expira en: ${accessExp} - Refresh token: ${refreshToken ? 'CREADO' : 'NO CREADO'}`);
 
         // ✅ Respuesta con información del empleado
         res.json({ 
@@ -173,11 +183,23 @@ exports.login = async (req, res) => {
 };
 
 exports.refreshToken = async (req, res) => {
-    // ✅ Manejo seguro de cookies con verificación
-    const refreshToken = req.cookies?.refreshToken;
+    // ✅ MEJORAR: Verificar múltiples formas de obtener el refresh token
+    let refreshToken = req.cookies?.refreshToken;
+    
+    // ✅ También verificar en headers como fallback
+    if (!refreshToken && req.headers.authorization) {
+        const authHeader = req.headers.authorization;
+        if (authHeader.startsWith('Refresh ')) {
+            refreshToken = authHeader.slice(8);
+        }
+    }
+    
+    console.log('🔄 Intentando renovar token...');
+    console.log('🍪 Cookies recibidas:', Object.keys(req.cookies || {}));
+    console.log('🔑 Refresh token encontrado:', refreshToken ? 'SÍ' : 'NO');
     
     if (!refreshToken) {
-        console.log('❌ No se encontró refresh token en cookies');
+        console.log('❌ No se encontró refresh token');
         return res.status(401).json({ 
             message: 'No autorizado - Refresh token requerido',
             code: 'NO_REFRESH_TOKEN'
@@ -185,17 +207,21 @@ exports.refreshToken = async (req, res) => {
     }
 
     try {
-        console.log('🔄 Intentando renovar token...');
-        
         // ✅ Verificar refresh token con manejo de errores específicos
         let decoded;
         try {
             decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+            console.log('✅ Refresh token verificado correctamente');
         } catch (jwtError) {
             console.log('❌ Error verificando refresh token:', jwtError.message);
             
             // Limpiar cookie inválida
-            res.clearCookie('refreshToken');
+            res.clearCookie('refreshToken', {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+                path: '/'
+            });
             
             if (jwtError.name === 'TokenExpiredError') {
                 return res.status(401).json({ 
@@ -210,6 +236,16 @@ exports.refreshToken = async (req, res) => {
             });
         }
         
+        // ✅ Verificar que sea un refresh token válido
+        if (decoded.type !== 'refresh') {
+            console.log('❌ Token no es de tipo refresh');
+            res.clearCookie('refreshToken', { path: '/' });
+            return res.status(403).json({ 
+                message: 'Token inválido',
+                code: 'INVALID_TOKEN_TYPE'
+            });
+        }
+        
         // ✅ Obtener información actualizada del empleado
         const [empleados] = await db.execute(
             'SELECT * FROM empleados WHERE id = ? AND activo = 1', 
@@ -218,13 +254,13 @@ exports.refreshToken = async (req, res) => {
         
         if (empleados.length === 0) {
             await auditarAuth(req, {
-                accion: 'LOGIN_FAILED',
+                accion: 'TOKEN_REFRESH_FAILED',
                 usuarioId: decoded.id,
                 estado: 'FALLIDO',
                 detallesAdicionales: 'Refresh token - Empleado no encontrado o inactivo'
             });
             
-            res.clearCookie('refreshToken');
+            res.clearCookie('refreshToken', { path: '/' });
             return res.status(404).json({ 
                 message: 'Empleado no encontrado o inactivo',
                 code: 'USER_NOT_FOUND'
@@ -275,7 +311,7 @@ exports.refreshToken = async (req, res) => {
         console.error('❌ Error en refresh token:', error);
         
         // Limpiar cookie inválida
-        res.clearCookie('refreshToken');
+        res.clearCookie('refreshToken', { path: '/' });
         
         // ✅ Auditar error en refresh
         await auditarAuth(req, {
@@ -310,7 +346,8 @@ exports.logout = async (req, res) => {
         res.clearCookie('refreshToken', {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax'
+            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+            path: '/' // ✅ IMPORTANTE: Especificar path
         });
         
         res.json({ 

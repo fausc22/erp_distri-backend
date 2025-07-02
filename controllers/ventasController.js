@@ -108,7 +108,7 @@ const generarPdfFactura = async (req, res) => {
 
         // ✅ Reemplazar placeholders como antes
         htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", venta.fecha)
+            .replace("{{fecha}}", formatearFecha(venta.fecha))
             .replace("{{cliente_nombre}}", venta.cliente_nombre)
             .replace("{{cliente_cuit}}", venta.cliente_cuit || "No informado")
             .replace("{{cliente_cativa}}", venta.cliente_condicion || "No informado");
@@ -338,7 +338,7 @@ const generarPdfListaPrecio = async (req, res) => {
         let htmlTemplate = fs.readFileSync(templatePath, "utf8");
 
         htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", new Date().toLocaleDateString())
+            .replace("{{fecha}}", formatearFecha(new Date().toLocaleDateString()))
             .replace("{{cliente_nombre}}", cliente.nombre)
             .replace("{{cliente_cuit}}", cliente.cuit || "No informado")
             .replace("{{cliente_cativa}}", cliente.condicion_iva || "No informado");
