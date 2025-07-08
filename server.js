@@ -21,13 +21,20 @@ const comprasRoutes = require('./routes/comprasRoutes');
 const auditoriaRoutes = require('./routes/auditoriaRoutes');
 const comprobantesRoutes = require('./routes/comprobantesRoutes'); 
 
-// CORS configuration - Incluye Railway
+// CORS configuration - Optimizado para VPS
 const allowedOrigins = [
     'http://localhost:3000', 
     'https://vertimar.vercel.app',
-    'https://erpdistri-backend-production.up.railway.app', // Agrega tu dominio de Railway aquí
-    /https:\/\/.*\.up\.railway\.app$/ // Permite cualquier subdominio de Railway
+    // Agrega aquí tu dominio de VPS cuando lo tengas configurado
+    // 'https://tu-dominio.com',
+    // 'https://www.tu-dominio.com'
 ];
+
+// En desarrollo, permitir cualquier origen localhost
+if (process.env.NODE_ENV === 'development') {
+    allowedOrigins.push(/^http:\/\/localhost:\d+$/);
+    allowedOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
+}
 
 const corsOptions = {
     origin: (origin, callback) => {
@@ -64,25 +71,45 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' })); // Límite para PDFs grandes
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Health check endpoint para Railway
+// Health check endpoint optimizado para VPS
 app.get('/health', async (req, res) => {
     try {
         // Test básico de conexión a BD
         const db = require('./controllers/dbPromise');
+        const startTime = Date.now();
         await db.execute('SELECT 1');
+        const dbResponseTime = Date.now() - startTime;
+        
+        // Test de Puppeteer
+        const puppeteerManager = require('./utils/puppeteerConfig');
+        const puppeteerHealth = await puppeteerManager.healthCheck();
         
         res.json({
-            status: '✅ OK',
+            status: '✅ VPS Healthy',
             timestamp: new Date().toISOString(),
             environment: process.env.NODE_ENV || 'development',
-            database: '✅ Connected',
-            port: port,
-            version: '1.0.0'
+            server: {
+                platform: 'VPS Hostinger',
+                uptime: Math.floor(process.uptime()),
+                memory: process.memoryUsage(),
+                port: port,
+                version: '1.0.0'
+            },
+            database: {
+                status: '✅ Connected',
+                responseTime: `${dbResponseTime}ms`
+            },
+            puppeteer: puppeteerHealth
         });
     } catch (error) {
         res.status(500).json({
-            status: '❌ ERROR',
+            status: '❌ VPS Error',
             timestamp: new Date().toISOString(),
+            server: {
+                platform: 'VPS Hostinger',
+                uptime: Math.floor(process.uptime()),
+                memory: process.memoryUsage()
+            },
             database: '❌ Disconnected',
             error: error.message
         });
@@ -92,9 +119,11 @@ app.get('/health', async (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({
-        message: '🚀 API Distri-Back funcionando correctamente',
+        message: '🚀 API Distri-Back en VPS Hostinger',
         version: '1.0.0',
         environment: process.env.NODE_ENV || 'development',
+        platform: 'VPS Hostinger',
+        uptime: Math.floor(process.uptime()),
         endpoints: {
             auth: '/auth',
             personas: '/personas',
@@ -105,7 +134,9 @@ app.get('/', (req, res) => {
             finanzas: '/finanzas',
             compras: '/compras',
             auditoria: '/auditoria',
-            health: '/health'
+            comprobantes: '/comprobantes',
+            health: '/health',
+            'puppeteer-status': '/puppeteer-status'
         }
     });
 });
@@ -128,45 +159,48 @@ app.use('*', (req, res) => {
         error: 'Endpoint no encontrado',
         path: req.originalUrl,
         method: req.method,
+        server: 'VPS Hostinger',
         available_endpoints: [
             'GET /',
             'GET /health',
+            'GET /puppeteer-status',
             'POST /auth/login',
             'GET /productos/buscar-producto',
             'GET /pedidos/obtener-pedidos',
-            // Agrega más endpoints importantes aquí
+            'POST /ventas/generarpdf-factura',
+            'POST /pedidos/generarpdf-notapedido'
         ]
     });
 });
 
 // Middleware global de manejo de errores
 app.use((error, req, res, next) => {
-    console.error('💥 Error global:', error);
+    console.error('💥 Error global en VPS:', error);
     
     res.status(error.status || 500).json({
         error: process.env.NODE_ENV === 'production' 
             ? 'Error interno del servidor' 
             : error.message,
         timestamp: new Date().toISOString(),
-        path: req.originalUrl
+        path: req.originalUrl,
+        server: 'VPS Hostinger'
     });
 });
 
-
-// Diagnóstico de Puppeteer para Railway
+// Diagnóstico de Puppeteer optimizado para VPS
 app.get('/puppeteer-status', async (req, res) => {
     try {
         const puppeteerManager = require('./utils/puppeteerConfig');
         const diagnostics = await puppeteerManager.diagnostics();
         
         res.json({
-            status: '🔍 Puppeteer Diagnostics',
+            status: '🔍 Puppeteer Diagnostics - VPS',
             timestamp: new Date().toISOString(),
             ...diagnostics
         });
     } catch (error) {
         res.status(500).json({
-            status: '❌ Puppeteer Error',
+            status: '❌ Puppeteer Error - VPS',
             timestamp: new Date().toISOString(),
             error: error.message,
             stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -174,12 +208,91 @@ app.get('/puppeteer-status', async (req, res) => {
     }
 });
 
-// Iniciar el servidor
-app.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Servidor escuchando en el puerto ${port}`);
-    console.log(`🌍 Entorno: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🔗 URL local: http://localhost:${port}`);
-    if (process.env.RAILWAY_STATIC_URL) {
-        console.log(`🚂 URL Railway: ${process.env.RAILWAY_STATIC_URL}`);
+// Endpoint para test rápido de PDF
+app.get('/test-pdf', async (req, res) => {
+    try {
+        const puppeteerManager = require('./utils/puppeteerConfig');
+        const testHtml = `
+            <html>
+                <head>
+                    <style>
+                        body { font-family: Arial, sans-serif; padding: 20px; }
+                        h1 { color: #333; }
+                    </style>
+                </head>
+                <body>
+                    <h1>Test PDF - VPS Hostinger</h1>
+                    <p>Fecha: ${new Date().toLocaleString()}</p>
+                    <p>Servidor: VPS Hostinger</p>
+                    <p>Estado: ✅ Funcionando correctamente</p>
+                </body>
+            </html>
+        `;
+        
+        const pdfBuffer = await puppeteerManager.generatePDF(testHtml);
+        
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename="test-vps.pdf"');
+        res.end(pdfBuffer);
+        
+    } catch (error) {
+        res.status(500).json({
+            error: 'Error generando PDF de prueba',
+            message: error.message,
+            server: 'VPS Hostinger'
+        });
     }
+});
+
+// Función para graceful shutdown en VPS
+const gracefulShutdown = async (signal) => {
+    console.log(`🛑 Recibida señal ${signal}, cerrando servidor VPS...`);
+    
+    try {
+        // Cerrar Puppeteer primero
+        const puppeteerManager = require('./utils/puppeteerConfig');
+        await puppeteerManager.cleanup();
+        
+        // Cerrar conexiones de base de datos
+        const db = require('./controllers/dbPromise');
+        await db.end();
+        
+        console.log('✅ Servidor VPS cerrado correctamente');
+        process.exit(0);
+    } catch (error) {
+        console.error('❌ Error cerrando servidor VPS:', error);
+        process.exit(1);
+    }
+};
+
+// Manejar señales de cierre en VPS
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Manejar errores no capturados en VPS
+process.on('uncaughtException', async (error) => {
+    console.error('💥 Excepción no capturada en VPS:', error);
+    await gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+    console.error('💥 Promise rechazada no manejada en VPS:', reason);
+    await gracefulShutdown('unhandledRejection');
+});
+
+// Iniciar el servidor en VPS
+const server = app.listen(port, '0.0.0.0', () => {
+    console.log(`🚀 Servidor iniciado en VPS Hostinger`);
+    console.log(`🌍 Puerto: ${port}`);
+    console.log(`🔧 Entorno: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🔗 URL local: http://localhost:${port}`);
+    console.log(`💾 Memoria inicial: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+    console.log(`⏰ Iniciado: ${new Date().toLocaleString()}`);
+    
+    // Log de configuración importante para VPS
+    console.log(`📋 Configuración VPS:`);
+    console.log(`   - Node.js: ${process.version}`);
+    console.log(`   - Plataforma: ${process.platform}`);
+    console.log(`   - Arquitectura: ${process.arch}`);
+    console.log(`   - PID: ${process.pid}`);
 });
