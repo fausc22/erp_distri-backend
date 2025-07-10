@@ -1,4 +1,3 @@
-
 const db = require('./dbPromise');
 
 /**
@@ -276,11 +275,14 @@ const obtenerEstadisticasAuditoria = async (req, res) => {
 };
 
 /**
- * Limpiar registros antiguos de auditoría
+ * Limpiar registros antiguos de auditoría - CORREGIDO
  */
 const limpiarAuditoriaAntigua = async (req, res) => {
     try {
         const { dias = 90 } = req.body;
+        
+        // ✅ CORREGIDO: Variable diasInt correctamente definida
+        const diasInt = parseInt(dias);
 
         if (diasInt < 30) {
             return res.status(400).json({
@@ -294,7 +296,7 @@ const limpiarAuditoriaAntigua = async (req, res) => {
             WHERE fecha_hora < DATE_SUB(NOW(), INTERVAL ? DAY)
         `;
 
-        const [resultado] = await db.execute(query, [parseInt(dias)]);
+        const [resultado] = await db.execute(query, [diasInt]);
 
         res.json({
             success: true,

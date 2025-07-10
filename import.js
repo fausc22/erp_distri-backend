@@ -1,19 +1,17 @@
 const fs = require('fs');
 const mysql = require('mysql2/promise');
-const pdf = require('pdf-parse');
-const path = require('path');
-
+const XLSX = require('xlsx');
 
 // Configuración de la base de datos
 const dbConfig = {
-    host: 'localhost',
-    user: 'root',
-    password: '251199',
-    database: 'erp_distri',
+    host: '31.97.251.186',
+    user: 'remote_user',
+    password: 'remoteuser251199',
+    database: 'DB_distri',
     charset: 'utf8mb4'
 };
 
-// Mapeo de categorías del PDF a IDs de la base de datos
+// Mapeo de categorías - mismas que en tu algoritmo original
 const categoriaMapping = {
     'ACIDO': 2,
     'AGUA': 18,
@@ -39,10 +37,9 @@ const categoriaMapping = {
     'TRAPOS DE PISO-SECADORES': 23
 };
 
-class ProductImporter {
+class ExcelProductImporter {
     constructor() {
         this.connection = null;
-        this.currentCategoryId = null;
     }
 
     async connect() {
@@ -62,86 +59,63 @@ class ProductImporter {
         }
     }
 
-    // Función para limpiar y normalizar nombres
+    // Función para limpiar nombres de productos
     cleanProductName(name) {
         return name
-            .replace(/^>+/, '') // Quitar >> del inicio
+            .replace(/^>>+/, '') // Quitar >> del inicio
+            .replace(/\r\n/g, ' ') // Reemplazar saltos de línea por espacios
+            .replace(/\n/g, ' ') // Reemplazar saltos de línea por espacios
             .trim()
-            .replace(/\s+/g, ' '); // Normalizar espacios
+            .replace(/\s+/g, ' '); // Normalizar espacios múltiples
     }
 
-    // Función para determinar si una línea es una categoría
-    isCategory(line) {
-        const cleanLine = this.cleanProductName(line);
+    // Función para determinar la categoría del producto basada en palabras clave
+    determineCategory(productName) {
+        const name = productName.toUpperCase();
         
-        // Buscar coincidencias exactas primero
-        for (const [categoryName, categoryId] of Object.entries(categoriaMapping)) {
-            if (cleanLine.toUpperCase().includes(categoryName.toUpperCase())) {
-                return { isCategory: true, categoryId, categoryName };
+        // Mapeos específicos por palabras clave
+        const keywordMappings = {
+            'ACIDO': 2,
+            'AGUA': 18,
+            'CERA': 17,
+            'CLORO': 4,
+            'PILETA': 4,
+            'DESODORANTE': 5,
+            'DETERGENTE': 6,
+            'ESCOBA': 3,
+            'ESCOBILLON': 3,
+            'PLUMERO': 3,
+            'ESPONJA': 15,
+            'JABON': 16,
+            'VIRGINIA': 11,
+            'LAMPAZO': 12,
+            'MOPA': 12,
+            'LAVANDINA': 13,
+            'LYSOFORM': 14,
+            'PAPEL HIGIENICO': 7,
+            'ROLLO': 7,
+            'PASTILLA': 8,
+            'GRANEL': 19,
+            'AEROSOL': 9,
+            'REJILLA': 20,
+            'PAÑO': 20,
+            'FRANELA': 20,
+            'SODA CAUSTICA': 21,
+            'CAUCHET': 21,
+            'SUAVIZANTE': 22,
+            'TRAPO': 23,
+            'SECADOR': 23
+        };
+
+        // Buscar coincidencias
+        for (const [keyword, categoryId] of Object.entries(keywordMappings)) {
+            if (name.includes(keyword)) {
+                return categoryId;
             }
         }
 
-        // Verificar patrones específicos de categorías
-        const categoryPatterns = [
-            /^(TODOS LOS PRODUCTOS|ACIDO|AGUA|CERAS|CLORO|DESODORANTES|DETERGENTES|ESCOBAS|ESPONJAS|JABONES|LA VIRGINIA|LAMPAZOS|LAVANDINA|LYSOFORM|PAPEL HIGIENICO|PASTILLAS|PRODUCTOS|REJILLAS|SODA|SUAVIZANTES|TRAPOS)/i
-        ];
-
-        for (const pattern of categoryPatterns) {
-            if (pattern.test(cleanLine)) {
-                // Buscar la categoría más específica que coincida
-                let bestMatch = null;
-                let bestMatchLength = 0;
-
-                for (const [categoryName, categoryId] of Object.entries(categoriaMapping)) {
-                    if (cleanLine.toUpperCase().includes(categoryName.toUpperCase()) && 
-                        categoryName.length > bestMatchLength) {
-                        bestMatch = { categoryId, categoryName };
-                        bestMatchLength = categoryName.length;
-                    }
-                }
-
-                if (bestMatch) {
-                    return { isCategory: true, ...bestMatch };
-                }
-            }
-        }
-
-        return { isCategory: false };
-    }
-
-    // Función para extraer datos de producto de una línea
-    parseProductLine(line) {
-        try {
-            // Patrón para capturar: Nombre + Unidad + Costo + Precio
-            const pattern = /^(.*?)\s+(Kilogramos|Litros|Unidades)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)$/;
-            const match = line.match(pattern);
-
-            if (!match) {
-                return null;
-            }
-
-            const [, nombre, unidadMedida, costoStr, precioStr] = match;
-
-            const cleanNombre = this.cleanProductName(nombre);
-            const costo = parseFloat(costoStr.replace(/,/g, ''));
-            const precio = parseFloat(precioStr.replace(/,/g, ''));
-
-            // Validar que los valores sean números válidos
-            if (isNaN(costo) || isNaN(precio)) {
-                return null;
-            }
-
-            return {
-                nombre: cleanNombre,
-                unidadMedida: unidadMedida,
-                costo: costo,
-                precio: precio,
-                categoriaId: this.currentCategoryId
-            };
-        } catch (error) {
-            console.warn('⚠️ Error al parsear línea:', line, error.message);
-            return null;
-        }
+        // Si no se encuentra una categoría específica, usar "PRODUCTOS VARIOS"
+        return 10;
     }
 
     // Función para insertar producto en la base de datos
@@ -149,8 +123,8 @@ class ProductImporter {
         try {
             // Verificar si el producto ya existe
             const [existing] = await this.connection.execute(
-                'SELECT id FROM productos WHERE nombre = ? AND categoria_id = ?',
-                [product.nombre, product.categoriaId]
+                'SELECT id FROM productos WHERE nombre = ?',
+                [product.nombre]
             );
 
             if (existing.length > 0) {
@@ -173,7 +147,7 @@ class ProductImporter {
                 product.categoriaId
             ]);
 
-            console.log(`✅ Insertado: ${product.nombre} - $${product.precio}`);
+            console.log(`✅ Insertado: ${product.nombre} - $${product.precio} (Cat: ${product.categoriaId})`);
             return true;
         } catch (error) {
             console.error(`❌ Error al insertar ${product.nombre}:`, error.message);
@@ -181,59 +155,77 @@ class ProductImporter {
         }
     }
 
-    // Función principal para procesar el PDF
-    async processPDF(pdfPath) {
+    // Función principal para procesar el Excel
+    async processExcel(excelPath) {
         try {
-            console.log('📖 Leyendo archivo PDF...');
+            console.log('📖 Leyendo archivo Excel...');
             
-            const dataBuffer = fs.readFileSync(pdfPath);
-            const pdfData = await pdf(dataBuffer);
+            // Leer el archivo Excel
+            const workbook = XLSX.readFile(excelPath);
+            const sheetName = workbook.SheetNames[0]; // Usar la primera hoja
+            const worksheet = workbook.Sheets[sheetName];
             
-            console.log('📄 PDF leído exitosamente');
-            console.log('📊 Procesando contenido...');
+            // Convertir a JSON
+            const data = XLSX.utils.sheet_to_json(worksheet);
+            
+            console.log(`📊 Productos encontrados: ${data.length}`);
+            console.log('🔧 Procesando productos...');
 
-            const lines = pdfData.text.split('\n');
             let productsInserted = 0;
             let productsSkipped = 0;
-            let categoriesFound = 0;
+            let processedCount = 0;
 
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim();
+            for (const row of data) {
+                processedCount++;
                 
-                if (!line || line.length < 10) continue;
+                // Extraer datos del Excel
+                const rawNombre = row['Producto'] || '';
+                const unidadMedida = row['Unidad'] || 'Unidades';
+                const precio = parseFloat(row['Precio Venta']) || 0;
 
-                // Verificar si es una categoría
-                const categoryCheck = this.isCategory(line);
-                
-                if (categoryCheck.isCategory) {
-                    this.currentCategoryId = categoryCheck.categoryId;
-                    categoriesFound++;
-                    console.log(`📁 Categoría encontrada: ${categoryCheck.categoryName} (ID: ${categoryCheck.categoryId})`);
+                // Validar que tengamos datos válidos
+                if (!rawNombre || precio <= 0) {
+                    console.log(`⚠️ Fila ${processedCount}: Datos incompletos - ${rawNombre}`);
+                    productsSkipped++;
                     continue;
                 }
 
-                // Si tenemos una categoría actual, intentar parsear como producto
-                if (this.currentCategoryId) {
-                    const product = this.parseProductLine(line);
-                    
-                    if (product) {
-                        const inserted = await this.insertProduct(product);
-                        if (inserted) {
-                            productsInserted++;
-                        } else {
-                            productsSkipped++;
-                        }
-                    }
+                // Limpiar el nombre del producto
+                const nombreLimpio = this.cleanProductName(rawNombre);
+                
+                // Determinar la categoría
+                const categoriaId = this.determineCategory(nombreLimpio);
+
+                // Crear objeto producto
+                const product = {
+                    nombre: nombreLimpio,
+                    unidadMedida: unidadMedida,
+                    costo: 0, // No tenemos costo en el Excel, usar 0
+                    precio: precio,
+                    categoriaId: categoriaId
+                };
+
+                // Mostrar progreso cada 100 productos
+                if (processedCount % 100 === 0) {
+                    console.log(`📋 Procesando... ${processedCount}/${data.length}`);
+                }
+
+                // Insertar en la base de datos
+                const inserted = await this.insertProduct(product);
+                if (inserted) {
+                    productsInserted++;
+                } else {
+                    productsSkipped++;
                 }
             }
 
             console.log('\n📊 RESUMEN DEL PROCESO:');
-            console.log(`📁 Categorías procesadas: ${categoriesFound}`);
+            console.log(`📝 Productos procesados: ${processedCount}`);
             console.log(`✅ Productos insertados: ${productsInserted}`);
             console.log(`⚠️ Productos omitidos: ${productsSkipped}`);
 
         } catch (error) {
-            console.error('❌ Error al procesar PDF:', error.message);
+            console.error('❌ Error al procesar Excel:', error.message);
             throw error;
         }
     }
@@ -241,22 +233,22 @@ class ProductImporter {
 
 // Función principal
 async function main() {
-    const importer = new ProductImporter();
+    const importer = new ExcelProductImporter();
     
     try {
-        // Verificar que el archivo PDF existe
-        const pdfPath = './productos.pdf'; // Cambia esta ruta por la de tu archivo
+        // Ruta al archivo Excel
+        const excelPath = './productosnuevos.xlsx'; // Cambia esta ruta por la de tu archivo
 
-        if (!fs.existsSync(pdfPath)) {
-            console.error('❌ Archivo PDF no encontrado:', pdfPath);
+        if (!fs.existsSync(excelPath)) {
+            console.error('❌ Archivo Excel no encontrado:', excelPath);
             console.log('💡 Asegúrate de que el archivo existe y la ruta es correcta');
             return;
         }
 
-        console.log('🚀 Iniciando importación de productos...');
+        console.log('🚀 Iniciando importación de productos desde Excel...');
         
         await importer.connect();
-        await importer.processPDF(pdfPath);
+        await importer.processExcel(excelPath);
         
         console.log('🎉 Importación completada exitosamente!');
         
@@ -272,4 +264,4 @@ if (require.main === module) {
     main().catch(console.error);
 }
 
-module.exports = ProductImporter;
+module.exports = ExcelProductImporter;

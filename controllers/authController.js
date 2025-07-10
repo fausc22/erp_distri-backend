@@ -3,12 +3,12 @@ const bcrypt = require('bcryptjs');
 const db = require('./dbPromise');
 const { auditarAuth, limpiarDatosSensibles } = require('../middlewares/auditoriaMiddleware');
 
-// ✅ Configuración mejorada de tiempos de token
+// ✅ CONFIGURACIÓN PARA 7 DÍAS - PWA COMPATIBLE
 const getTokenExpiration = () => {
     const isDevelopment = process.env.NODE_ENV === 'development';
     return {
         accessToken: isDevelopment ? '2h' : '1h',
-        refreshToken: '30d' // ✅ FIJO: 30 días siempre que se active "recuérdame"
+        refreshToken: '7d' // 7 días como solicitaste
     };
 };
 
@@ -47,7 +47,7 @@ const createTokens = (empleado, remember = false) => {
         refreshToken = jwt.sign(
             { 
                 id: empleado.id, 
-                type: 'refresh', // ✅ Añadir tipo para seguridad
+                type: 'refresh',
                 iat: Math.floor(Date.now() / 1000) 
             }, 
             process.env.JWT_REFRESH_SECRET, 
@@ -56,32 +56,6 @@ const createTokens = (empleado, remember = false) => {
     }
 
     return { accessToken, refreshToken, accessExp, refreshExp };
-};
-
-// ✅ Función helper para configurar cookies - CORREGIDA
-const setRefreshTokenCookie = (res, refreshToken, remember) => {
-    if (!refreshToken || !remember) {
-        // ✅ Limpiar cookie si no hay refresh token o no se quiere recordar
-        res.clearCookie('refreshToken', {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-            path: '/' // ✅ IMPORTANTE: Especificar path
-        });
-        console.log('🍪 Cookie de refresh token limpiada');
-        return;
-    }
-
-    const cookieOptions = {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-        path: '/', // ✅ IMPORTANTE: Especificar path
-        maxAge: 30 * 24 * 60 * 60 * 1000 // ✅ 30 días en millisegundos
-    };
-
-    res.cookie('refreshToken', refreshToken, cookieOptions);
-    console.log('🍪 Cookie de refresh token establecida por 30 días');
 };
 
 exports.login = async (req, res) => {
@@ -135,27 +109,29 @@ exports.login = async (req, res) => {
             return res.status(401).json({ message: 'Contraseña incorrecta' });
         }
 
-        // ✅ Crear tokens con configuración mejorada
-        const { accessToken, refreshToken, accessExp } = createTokens(empleado, rememberBool);
+        // ✅ Crear tokens
+        const { accessToken, refreshToken, accessExp, refreshExp } = createTokens(empleado, rememberBool);
 
-        // ✅ Configurar cookie de refresh token
-        setRefreshTokenCookie(res, refreshToken, rememberBool);
+        // ✅ PWA COMPATIBLE: NO configurar cookies HTTPOnly, el frontend manejará localStorage
+        // Simplemente enviar el refresh token en la respuesta para que el frontend lo guarde
 
-        // ✅ Auditar login exitoso con más detalles
+        // ✅ Auditar login exitoso
         await auditarAuth(req, {
             accion: 'LOGIN',
             usuarioId: empleado.id,
             usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
             estado: 'EXITOSO',
-            detallesAdicionales: `Login exitoso - Rol: ${empleado.rol}, Remember: ${rememberBool ? 'Sí' : 'No'}, TokenExp: ${accessExp}, RefreshToken: ${refreshToken ? 'Sí' : 'No'}`
+            detallesAdicionales: `Login exitoso PWA - Rol: ${empleado.rol}, Remember: ${rememberBool ? 'Sí (7d)' : 'No'}, AccessTokenExp: ${accessExp}, RefreshToken: ${refreshToken ? 'CREADO' : 'NO CREADO'} - Método: localStorage`
         });
 
-        console.log(`✅ Login exitoso para ${empleado.usuario} - Remember: ${rememberBool} - Token expira en: ${accessExp} - Refresh token: ${refreshToken ? 'CREADO' : 'NO CREADO'}`);
+        console.log(`✅ Login PWA exitoso para ${empleado.usuario} - Remember: ${rememberBool} - AccessToken expira en: ${accessExp} - RefreshToken: ${refreshToken ? `CREADO (${refreshExp}) - localStorage` : 'NO CREADO'}`);
 
-        // ✅ Respuesta con información del empleado
+        // ✅ RESPUESTA PWA COMPATIBLE: Incluir refresh token en la respuesta
         res.json({ 
             token: accessToken,
+            refreshToken: refreshToken, // ✅ NUEVO: Enviar refresh token al frontend
             expiresIn: accessExp,
+            refreshExpiresIn: refreshToken ? refreshExp : null,
             hasRefreshToken: !!refreshToken,
             empleado: {
                 id: empleado.id,
@@ -182,24 +158,16 @@ exports.login = async (req, res) => {
     }
 };
 
+// ✅ REFRESH TOKEN MODIFICADO PARA PWA (localStorage)
 exports.refreshToken = async (req, res) => {
-    // ✅ MEJORAR: Verificar múltiples formas de obtener el refresh token
-    let refreshToken = req.cookies?.refreshToken;
+    // ✅ PWA: Obtener refresh token del body en lugar de cookies
+    const refreshToken = req.body.refreshToken || req.headers['x-refresh-token'];
     
-    // ✅ También verificar en headers como fallback
-    if (!refreshToken && req.headers.authorization) {
-        const authHeader = req.headers.authorization;
-        if (authHeader.startsWith('Refresh ')) {
-            refreshToken = authHeader.slice(8);
-        }
-    }
-    
-    console.log('🔄 Intentando renovar token...');
-    console.log('🍪 Cookies recibidas:', Object.keys(req.cookies || {}));
-    console.log('🔑 Refresh token encontrado:', refreshToken ? 'SÍ' : 'NO');
+    console.log('🔄 PWA: Intentando renovar token...');
+    console.log('🔑 Refresh token recibido:', refreshToken ? 'SÍ (localStorage)' : 'NO');
     
     if (!refreshToken) {
-        console.log('❌ No se encontró refresh token');
+        console.log('❌ No se encontró refresh token en body ni headers');
         return res.status(401).json({ 
             message: 'No autorizado - Refresh token requerido',
             code: 'NO_REFRESH_TOKEN'
@@ -207,26 +175,19 @@ exports.refreshToken = async (req, res) => {
     }
 
     try {
-        // ✅ Verificar refresh token con manejo de errores específicos
+        // ✅ Verificar refresh token
         let decoded;
         try {
             decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-            console.log('✅ Refresh token verificado correctamente');
+            console.log('✅ PWA: Refresh token verificado correctamente - Expira en:', new Date(decoded.exp * 1000));
         } catch (jwtError) {
             console.log('❌ Error verificando refresh token:', jwtError.message);
-            
-            // Limpiar cookie inválida
-            res.clearCookie('refreshToken', {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-                path: '/'
-            });
             
             if (jwtError.name === 'TokenExpiredError') {
                 return res.status(401).json({ 
                     message: 'Refresh token expirado - Por favor inicia sesión nuevamente',
-                    code: 'REFRESH_TOKEN_EXPIRED'
+                    code: 'REFRESH_TOKEN_EXPIRED',
+                    expired_at: jwtError.expiredAt
                 });
             }
             
@@ -239,7 +200,6 @@ exports.refreshToken = async (req, res) => {
         // ✅ Verificar que sea un refresh token válido
         if (decoded.type !== 'refresh') {
             console.log('❌ Token no es de tipo refresh');
-            res.clearCookie('refreshToken', { path: '/' });
             return res.status(403).json({ 
                 message: 'Token inválido',
                 code: 'INVALID_TOKEN_TYPE'
@@ -257,10 +217,9 @@ exports.refreshToken = async (req, res) => {
                 accion: 'TOKEN_REFRESH_FAILED',
                 usuarioId: decoded.id,
                 estado: 'FALLIDO',
-                detallesAdicionales: 'Refresh token - Empleado no encontrado o inactivo'
+                detallesAdicionales: 'PWA Refresh token - Empleado no encontrado o inactivo'
             });
             
-            res.clearCookie('refreshToken', { path: '/' });
             return res.status(404).json({ 
                 message: 'Empleado no encontrado o inactivo',
                 code: 'USER_NOT_FOUND'
@@ -269,7 +228,7 @@ exports.refreshToken = async (req, res) => {
 
         const empleado = empleados[0];
 
-        // ✅ Generar nuevo access token (mantener refresh token existente)
+        // ✅ Generar nuevo access token
         const { accessToken: accessExp } = getTokenExpiration();
         const tokenPayload = { 
             id: empleado.id, 
@@ -288,14 +247,16 @@ exports.refreshToken = async (req, res) => {
             usuarioId: empleado.id,
             usuarioNombre: `${empleado.nombre} ${empleado.apellido}`,
             estado: 'EXITOSO',
-            detallesAdicionales: `Token renovado exitosamente - Exp: ${accessExp}`
+            detallesAdicionales: `PWA Token renovado - AccessToken exp: ${accessExp}, RefreshToken restante: ${Math.round((decoded.exp * 1000 - Date.now()) / (1000 * 60 * 60 * 24))} días`
         });
 
-        console.log(`✅ Token renovado para ${empleado.usuario} - Expira en: ${accessExp}`);
+        console.log(`✅ PWA Token renovado para ${empleado.usuario} - AccessToken expira en: ${accessExp}`);
         
+        // ✅ RESPUESTA PWA: Solo access token (refresh token se mantiene igual)
         res.json({ 
             accessToken: newAccessToken,
             expiresIn: accessExp,
+            refreshTokenExpiresIn: Math.round((decoded.exp * 1000 - Date.now()) / 1000),
             empleado: {
                 id: empleado.id,
                 nombre: empleado.nombre,
@@ -308,16 +269,12 @@ exports.refreshToken = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Error en refresh token:', error);
+        console.error('❌ Error en PWA refresh token:', error);
         
-        // Limpiar cookie inválida
-        res.clearCookie('refreshToken', { path: '/' });
-        
-        // ✅ Auditar error en refresh
         await auditarAuth(req, {
             accion: 'TOKEN_REFRESH_FAILED',
             estado: 'FALLIDO',
-            detallesAdicionales: `Error en refresh token: ${error.message}`
+            detallesAdicionales: `PWA Error en refresh token: ${error.message}`
         });
         
         res.status(500).json({ 
@@ -327,35 +284,30 @@ exports.refreshToken = async (req, res) => {
     }
 };
 
+// ✅ LOGOUT SIMPLIFICADO PARA PWA
 exports.logout = async (req, res) => {
     try {
-        // ✅ Auditar logout
+        // ✅ Auditar logout PWA
         if (req.user) {
             await auditarAuth(req, {
                 accion: 'LOGOUT',
                 usuarioId: req.user.id,
                 usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
                 estado: 'EXITOSO',
-                detallesAdicionales: 'Logout exitoso'
+                detallesAdicionales: 'PWA Logout exitoso - localStorage'
             });
             
-            console.log(`👋 Logout para ${req.user.usuario}`);
+            console.log(`👋 PWA Logout para ${req.user.usuario}`);
         }
         
-        // ✅ Limpiar cookie de refresh token de forma segura
-        res.clearCookie('refreshToken', {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-            path: '/' // ✅ IMPORTANTE: Especificar path
-        });
-        
+        // ✅ PWA: No hay cookies que limpiar, el frontend maneja localStorage
         res.json({ 
             message: 'Logout exitoso',
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            method: 'localStorage_cleanup'
         });
     } catch (error) {
-        console.error('❌ Error en logout:', error);
+        console.error('❌ Error en PWA logout:', error);
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };
@@ -432,7 +384,7 @@ exports.changePassword = async (req, res) => {
             usuarioId: req.user.id,
             usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
             estado: 'EXITOSO',
-            detallesAdicionales: 'Contraseña actualizada exitosamente'
+            detallesAdicionales: 'PWA Contraseña actualizada exitosamente'
         });
 
         res.json({ message: 'Contraseña actualizada exitosamente' });
@@ -446,7 +398,7 @@ exports.changePassword = async (req, res) => {
                 usuarioId: req.user.id,
                 usuarioNombre: `${req.user.nombre} ${req.user.apellido}`,
                 estado: 'FALLIDO',
-                detallesAdicionales: `Error interno: ${error.message}`
+                detallesAdicionales: `PWA Error interno: ${error.message}`
             });
         }
         

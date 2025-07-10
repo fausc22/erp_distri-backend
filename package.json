@@ -8,7 +8,12 @@
     "postinstall": "npx puppeteer browsers install chrome || echo 'Chrome installation failed but continuing...'",
     "install-deps": "apt-get update && apt-get install -y chromium-browser || echo 'Chromium installation failed'"
   },
-  "keywords": ["api", "express", "mysql", "erp"],
+  "keywords": [
+    "api",
+    "express",
+    "mysql",
+    "erp"
+  ],
   "author": "",
   "license": "ISC",
   "description": "API para sistema ERP de distribuidora",
@@ -26,10 +31,11 @@
     "express-session": "^1.18.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.2",
-    "mysql2": "^3.12.0",
+    "mysql2": "^3.14.1",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1",
-    "puppeteer": "^24.6.1"
+    "puppeteer": "^24.6.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"
