@@ -1,4 +1,4 @@
-const pdf = require('html-pdf');
+const htmlpdf = require('html-pdf-node');
 const fs = require('fs');
 const path = require('path');
 
@@ -7,7 +7,7 @@ class PdfGenerator {
         this.templatesPath = path.join(__dirname, '../resources/documents');
     }
 
-    // ✅ FORMATEAR FECHA (mantener la misma lógica exacta)
+    // ✅ FORMATEAR FECHA
     formatearFecha(fechaBD) {
         if (!fechaBD) return 'Fecha no disponible';
         
@@ -35,61 +35,95 @@ class PdfGenerator {
         }
     }
 
-    // ✅ FUNCIÓN GENÉRICA MEJORADA PARA GENERAR PDF DESDE HTML
-    async generatePdfFromHtml(htmlContent, options = {}) {
-        const defaultOptions = {
+    // ✅ CONFIGURACIÓN INTELIGENTE (DESARROLLO vs PRODUCCIÓN)
+    getOptions(customOptions = {}) {
+        const isProduction = process.env.NODE_ENV === 'production';
+        const isVPS = process.platform === 'linux' && isProduction;
+        
+        const baseOptions = {
             format: 'A4',
-            border: {
-                top: '10mm',
-                right: '8mm',
-                bottom: '10mm',
-                left: '8mm'
+            printBackground: true,
+            margin: {
+                top: '8mm',
+                right: '6mm',
+                bottom: '8mm',
+                left: '6mm'
             },
-            timeout: 30000,
-            quality: "75",
-            type: "pdf",
-            // ✅ OPCIONES ADICIONALES PARA EVITAR CORTES
-            height: "297mm",        // Altura A4
-            width: "210mm",         // Ancho A4
-            orientation: "portrait",
-            // ✅ CONFIGURACIONES PARA MEJOR RENDERIZADO
-            httpHeaders: {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-            },
-            // ✅ CONFIGURACIONES PHANTOMJS PARA MEJOR COMPATIBILIDAD
-            phantomPath: undefined,
-            phantomArgs: [
-                "--load-images=no",
-                "--ignore-ssl-errors=yes",
-                "--ssl-protocol=any"
-            ],
-            // ✅ CONFIGURACIONES DE PÁGINA PARA EVITAR CORTES
-            zoomFactor: 1,
-            paginationOffset: 0,
-            header: {
-                height: "0mm"
-            },
-            footer: {
-                height: "0mm"
-            }
+            timeout: 30000
         };
 
-        const pdfOptions = { ...defaultOptions, ...options };
+        // ✅ CONFIGURACIÓN ESPECÍFICA PARA VPS/PRODUCCIÓN
+        if (isVPS) {
+            return {
+                ...baseOptions,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--no-first-run',
+                    '--no-default-browser-check',
+                    '--disable-web-security'
+                ],
+                ...customOptions
+            };
+        }
 
-        return new Promise((resolve, reject) => {
-            pdf.create(htmlContent, pdfOptions).toBuffer((err, buffer) => {
-                if (err) {
-                    console.error('❌ Error generando PDF:', err);
-                    reject(err);
-                } else {
-                    console.log(`✅ PDF generado exitosamente - Tamaño: ${buffer.length} bytes`);
-                    resolve(buffer);
-                }
-            });
-        });
+        // ✅ CONFIGURACIÓN PARA DESARROLLO (Windows/Mac/Linux local)
+        return {
+            ...baseOptions,
+            args: [
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
+            ],
+            ...customOptions
+        };
     }
 
-    // ✅ GENERAR FACTURA - CONFIGURACIÓN ESPECÍFICA
+    // ✅ FUNCIÓN GENÉRICA PARA GENERAR PDF
+    async generatePdfFromHtml(htmlContent, options = {}) {
+        try {
+            const environment = process.env.NODE_ENV === 'production' ? 'PRODUCCIÓN' : 'DESARROLLO';
+            console.log(`🔧 Generando PDF con html-pdf-node (${environment})...`);
+            
+            const pdfOptions = this.getOptions(options);
+            const file = { content: htmlContent };
+            
+            const buffer = await htmlpdf.generatePdf(file, pdfOptions);
+            
+            console.log(`✅ PDF generado exitosamente en ${environment} - Tamaño: ${buffer.length} bytes`);
+            return buffer;
+            
+        } catch (error) {
+            console.error('❌ Error generando PDF:', error);
+            
+            // ✅ REINTENTO SOLO EN PRODUCCIÓN
+            if (process.env.NODE_ENV === 'production') {
+                console.log('🔄 Reintentando con configuración simplificada...');
+                try {
+                    const simpleOptions = {
+                        format: 'A4',
+                        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+                        timeout: 60000
+                    };
+                    
+                    const file = { content: htmlContent };
+                    const buffer = await htmlpdf.generatePdf(file, simpleOptions);
+                    
+                    console.log(`✅ PDF generado en segundo intento - Tamaño: ${buffer.length} bytes`);
+                    return buffer;
+                    
+                } catch (retryError) {
+                    console.error('❌ Error en segundo intento:', retryError);
+                    throw retryError;
+                }
+            } else {
+                throw error;
+            }
+        }
+    }
+
+    // ✅ GENERAR FACTURA
     async generarFactura(venta, productos) {
         const templatePath = path.join(this.templatesPath, 'factura.html');
         
@@ -99,13 +133,11 @@ class PdfGenerator {
 
         let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
         
-        // Reemplazar datos de la venta
         const fechaFormateada = this.formatearFecha(venta.fecha);
         htmlTemplate = htmlTemplate
-            .replace('{{fecha}}', fechaFormateada)
-            .replace('{{cliente_nombre}}', venta.cliente_nombre || 'No informado');
+            .replace(/{{fecha}}/g, fechaFormateada)
+            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado');
 
-        // Generar filas de productos
         const itemsHTML = productos.map(producto => {
             const subtotal = parseFloat(producto.subtotal) || 0;
             const iva = parseFloat(producto.iva || producto.IVA) || 0;
@@ -123,39 +155,20 @@ class PdfGenerator {
             `;
         }).join('');
 
-        htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
-        // Calcular y reemplazar total
         const totalFactura = productos.reduce((acc, item) => {
             const subtotal = parseFloat(item.subtotal) || 0;
             const iva = parseFloat(item.iva || item.IVA) || 0;
             return acc + subtotal + iva;
         }, 0);
 
-        htmlTemplate = htmlTemplate.replace('{{total}}', venta.total || totalFactura.toFixed(2));
+        htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
 
-        // ✅ CONFIGURACIÓN ESPECÍFICA PARA FACTURAS
-        const facturaOptions = {
-            format: 'A4',
-            border: {
-                top: '8mm',
-                right: '6mm',
-                bottom: '8mm',
-                left: '6mm'
-            },
-            timeout: 30000,
-            quality: "75",
-            type: "pdf",
-            height: "297mm",
-            width: "210mm",
-            orientation: "portrait"
-        };
-
-        // Generar PDF
-        return await this.generatePdfFromHtml(htmlTemplate, facturaOptions);
+        return await this.generatePdfFromHtml(htmlTemplate);
     }
 
-    // ✅ GENERAR NOTA DE PEDIDO - CONFIGURACIÓN ESPECÍFICA
+    // ✅ GENERAR NOTA DE PEDIDO
     async generarNotaPedido(pedido, productos) {
         const templatePath = path.join(this.templatesPath, 'nota_pedido2.html');
         
@@ -165,18 +178,16 @@ class PdfGenerator {
 
         let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
         
-        // Reemplazar datos del pedido
         const fechaFormateada = this.formatearFecha(pedido.fecha);
         htmlTemplate = htmlTemplate
-            .replace('{{fecha}}', fechaFormateada)
-            .replace('{{id}}', pedido.id)
-            .replace('{{cliente_nombre}}', pedido.cliente_nombre)
-            .replace('{{cliente_direccion}}', pedido.cliente_direccion || 'No informado')
-            .replace('{{cliente_telefono}}', pedido.cliente_telefono || 'No informado')
-            .replace('{{empleado_nombre}}', pedido.empleado_nombre || 'No informado')
-            .replace('{{pedido_observacion}}', pedido.observaciones || 'No informado');
+            .replace(/{{fecha}}/g, fechaFormateada)
+            .replace(/{{id}}/g, pedido.id)
+            .replace(/{{cliente_nombre}}/g, pedido.cliente_nombre)
+            .replace(/{{cliente_direccion}}/g, pedido.cliente_direccion || 'No informado')
+            .replace(/{{cliente_telefono}}/g, pedido.cliente_telefono || 'No informado')
+            .replace(/{{empleado_nombre}}/g, pedido.empleado_nombre || 'No informado')
+            .replace(/{{pedido_observacion}}/g, pedido.observaciones || 'No informado');
 
-        // Generar filas de productos
         const itemsHTML = productos.map(producto => `
             <tr>
                 <td>${producto.producto_id || ''}</td>
@@ -187,29 +198,12 @@ class PdfGenerator {
             </tr>
         `).join('');
 
-        htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
-        // ✅ CONFIGURACIÓN ESPECÍFICA PARA NOTAS DE PEDIDO
-        const notaPedidoOptions = {
-            format: 'A4',
-            border: {
-                top: '8mm',
-                right: '6mm',
-                bottom: '8mm',
-                left: '6mm'
-            },
-            timeout: 30000,
-            quality: "75",
-            type: "pdf",
-            height: "297mm",
-            width: "210mm",
-            orientation: "portrait"
-        };
-
-        return await this.generatePdfFromHtml(htmlTemplate, notaPedidoOptions);
+        return await this.generatePdfFromHtml(htmlTemplate);
     }
 
-    // ✅ GENERAR LISTA DE PRECIOS - CONFIGURACIÓN ESPECÍFICA MEJORADA
+    // ✅ GENERAR LISTA DE PRECIOS
     async generarListaPrecios(cliente, productos) {
         const templatePath = path.join(this.templatesPath, 'lista_precio.html');
         
@@ -219,21 +213,17 @@ class PdfGenerator {
 
         let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
         
-        // Reemplazar datos del cliente
         const fechaActual = this.formatearFecha(new Date());
         htmlTemplate = htmlTemplate
-            .replace('{{fecha}}', fechaActual)
-            .replace('{{cliente_nombre}}', cliente.nombre || 'No informado')
-            
+            .replace(/{{fecha}}/g, fechaActual)
+            .replace(/{{cliente_nombre}}/g, cliente.nombre || 'No informado')
+            .replace(/{{cliente_cuit}}/g, cliente.cuit || 'No informado')
+            .replace(/{{cliente_cativa}}/g, cliente.condicion_iva || 'No informado');
 
-        // Generar filas de productos
         const itemsHTML = productos.map(producto => {
-            
+            const precio = parseFloat(producto.precio_venta) || 0;
             const cantidad = parseInt(producto.cantidad) || 1;
-            
-            const subtotal = parseFloat(producto.subtotal) || 0;
-            const iva = parseFloat(producto.iva || producto.IVA) || 0;
-            const total = subtotal + iva;
+            const subtotal = precio * cantidad;
 
             return `
                 <tr>
@@ -241,202 +231,38 @@ class PdfGenerator {
                     <td>${producto.nombre}</td>
                     <td>${producto.unidad_medida}</td>
                     <td>${cantidad}</td>
-                    <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
-                    <td style="text-align: right;">$${total.toFixed(2)}</td>
+                    <td style="text-align: right;">$${precio.toFixed(2)}</td>
+                    <td style="text-align: right;">$${subtotal.toFixed(2)}</td>
                 </tr>
             `;
         }).join('');
 
-        htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
-        // ✅ CONFIGURACIÓN ESPECÍFICA PARA LISTA DE PRECIOS
-        const listaPreciosOptions = {
-            format: 'A4',
-            border: {
-                top: '8mm',
-                right: '6mm',
-                bottom: '8mm',
-                left: '6mm'
-            },
-            timeout: 30000,
-            quality: "75",
-            type: "pdf",
-            height: "297mm",
-            width: "210mm",
-            orientation: "portrait"
-        };
-
-        return await this.generatePdfFromHtml(htmlTemplate, listaPreciosOptions);
+        return await this.generatePdfFromHtml(htmlTemplate);
     }
 
-    // ✅ GENERAR REMITO - ERROR TIPOGRÁFICO CORREGIDO
+    // ✅ GENERAR REMITO (CON DOBLE COPIA)
     async generarRemito(remito, productos) {
-    const templatePath = path.join(this.templatesPath, 'remito.html');
-    
-    if (!fs.existsSync(templatePath)) {
-        throw new Error('Plantilla remito.html no encontrada');
-    }
-
-    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-    
-    // Reemplazar datos del remito
-    const fechaFormateada = this.formatearFecha(remito.fecha);
-    htmlTemplate = htmlTemplate
-        .replace('{{fecha}}', fechaFormateada)
-        .replace('{{cliente_nombre}}', remito.cliente_nombre || 'No informado')
-        .replace('{{cliente_cuit}}', remito.cliente_cuit || 'No informado')
-        .replace('{{cliente_cativa}}', remito.cliente_condicion || 'No informado')
-        .replace('{{cliente_direccion}}', remito.cliente_direccion || 'No informado')
-        .replace('{{cliente_ciudad}}', remito.cliente_ciudad || 'No informado')
-        .replace('{{cliente_provincia}}', remito.cliente_provincia || 'No informado')
-        .replace('{{cliente_telefono}}', remito.cliente_telefono || 'No informado')
-        .replace('{{observacion}}', remito.observaciones || 'Sin observaciones');
-
-    // Generar filas de productos
-    const itemsHTML = productos.map(producto => `
-        <tr>
-            <td>${producto.producto_id}</td>
-            <td>${producto.producto_nombre}</td>
-            <td>${producto.producto_um}</td>
-            <td>${producto.cantidad}</td>
-        </tr>
-    `).join('');
-
-    htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
-
-    // ✅ SIMPLEMENTE DUPLICAR EL MISMO REMITO 2 VECES
-    const htmlDoble = htmlTemplate + '<div style="page-break-before: always;"></div>' + htmlTemplate;
-
-    // Configuración específica para remitos
-    const remitoOptions = {
-        format: 'A4',
-        border: {
-            top: '8mm',
-            right: '6mm',
-            bottom: '8mm',
-            left: '6mm'
-        },
-        timeout: 30000,
-        quality: "75",
-        type: "pdf",
-        height: "297mm",
-        width: "210mm",
-        orientation: "portrait"
-    };
-
-    return await this.generatePdfFromHtml(htmlDoble, remitoOptions);
-    }
-
-    // ✅ NUEVA FUNCIÓN: Generar PDFs múltiples para cualquier tipo de documento
-    async generarPDFsMultiples(documentos, tipo) {
-        try {
-            const htmlSections = [];
-
-            for (const doc of documentos) {
-                let htmlContent;
-                
-                switch (tipo) {
-                    case 'facturas':
-                        htmlContent = await this.generarFacturaHTML(doc.venta, doc.productos);
-                        break;
-                    case 'remitos':
-                        const htmlRemito = await this.generarRemitoHTML(doc.remito, doc.productos);
-                        htmlSections.push(htmlRemito); 
-                        htmlSections.push(htmlRemito); 
-                        break;
-                    case 'notas_pedido':
-                        htmlContent = await this.generarNotaPedidoHTML(doc.pedido, doc.productos);
-                        break;
-                    default:
-                        throw new Error(`Tipo de documento no soportado: ${tipo}`);
-                }
-                
-                htmlSections.push(htmlContent);
-            }
-
-            // Combinar todas las secciones con salto de página
-            const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
-
-            // ✅ CONFIGURACIÓN PARA PDFs MÚLTIPLES
-            const multiplesOptions = {
-                format: 'A4',
-                border: {
-                    top: '8mm',
-                    right: '6mm',
-                    bottom: '8mm',
-                    left: '6mm'
-                },
-                timeout: 60000, // Mayor timeout para múltiples páginas
-                quality: "75",
-                type: "pdf",
-                height: "297mm",
-                width: "210mm",
-                orientation: "portrait"
-            };
-
-            return await this.generatePdfFromHtml(combinedHTML, multiplesOptions);
-
-        } catch (error) {
-            console.error('❌ Error en generarPDFsMultiples:', error);
-            throw error;
-        }
-    }
-
-    // ✅ FUNCIONES HELPER PARA GENERAR SOLO HTML (sin PDF)
-    async generarFacturaHTML(venta, productos) {
-        const templatePath = path.join(this.templatesPath, 'factura.html');
-        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-        
-        const fechaFormateada = this.formatearFecha(venta.fecha);
-        htmlTemplate = htmlTemplate
-            .replace('{{fecha}}', fechaFormateada)
-            .replace('{{cliente_nombre}}', venta.cliente_nombre || 'No informado');
-
-        const itemsHTML = productos.map(producto => {
-            const subtotal = parseFloat(producto.subtotal) || 0;
-            const iva = parseFloat(producto.iva || producto.IVA) || 0;
-            const total = subtotal + iva;
-
-            return `
-                <tr>
-                    <td>${producto.producto_id}</td>
-                    <td>${producto.producto_nombre}</td>
-                    <td>${producto.producto_um}</td>
-                    <td>${producto.cantidad}</td>
-                    <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
-                    <td style="text-align: right;">$${total.toFixed(2)}</td>
-                </tr>
-            `;
-        }).join('');
-
-        htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
-
-        const totalFactura = productos.reduce((acc, item) => {
-            const subtotal = parseFloat(item.subtotal) || 0;
-            const iva = parseFloat(item.iva || item.IVA) || 0;
-            return acc + subtotal + iva;
-        }, 0);
-
-        htmlTemplate = htmlTemplate.replace('{{total}}', venta.total || totalFactura.toFixed(2));
-        
-        return htmlTemplate;
-    }
-
-    async generarRemitoHTML(remito, productos) {
         const templatePath = path.join(this.templatesPath, 'remito.html');
+        
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla remito.html no encontrada');
+        }
+
         let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
         
         const fechaFormateada = this.formatearFecha(remito.fecha);
         htmlTemplate = htmlTemplate
-            .replace('{{fecha}}', fechaFormateada)
-            .replace('{{cliente_nombre}}', remito.cliente_nombre || 'No informado')
-            .replace('{{cliente_cuit}}', remito.cliente_cuit || 'No informado')
-            .replace('{{cliente_cativa}}', remito.cliente_condicion || 'No informado')
-            .replace('{{cliente_direccion}}', remito.cliente_direccion || 'No informado')
-            .replace('{{cliente_ciudad}}', remito.cliente_ciudad || 'No informado')
-            .replace('{{cliente_provincia}}', remito.cliente_provincia || 'No informado')
-            .replace('{{cliente_telefono}}', remito.cliente_telefono || 'No informado')
-            .replace('{{observacion}}', remito.observaciones || 'Sin observaciones');
+            .replace(/{{fecha}}/g, fechaFormateada)
+            .replace(/{{cliente_nombre}}/g, remito.cliente_nombre || 'No informado')
+            .replace(/{{cliente_cuit}}/g, remito.cliente_cuit || 'No informado')
+            .replace(/{{cliente_cativa}}/g, remito.cliente_condicion || 'No informado')
+            .replace(/{{cliente_direccion}}/g, remito.cliente_direccion || 'No informado')
+            .replace(/{{cliente_ciudad}}/g, remito.cliente_ciudad || 'No informado')
+            .replace(/{{cliente_provincia}}/g, remito.cliente_provincia || 'No informado')
+            .replace(/{{cliente_telefono}}/g, remito.cliente_telefono || 'No informado')
+            .replace(/{{observacion}}/g, remito.observaciones || 'Sin observaciones');
 
         const itemsHTML = productos.map(producto => `
             <tr>
@@ -447,7 +273,125 @@ class PdfGenerator {
             </tr>
         `).join('');
 
-        htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+        // ✅ DUPLICAR EL REMITO (2 COPIAS)
+        const htmlDoble = htmlTemplate + '<div style="page-break-before: always;"></div>' + htmlTemplate;
+
+        return await this.generatePdfFromHtml(htmlDoble);
+    }
+
+    // ✅ GENERAR PDFs MÚLTIPLES
+    async generarPDFsMultiples(documentos, tipo) {
+        try {
+            const htmlSections = [];
+
+            for (const doc of documentos) {
+                let htmlContent;
+                
+                switch (tipo) {
+                    case 'facturas':
+                        htmlContent = await this.generarFacturaHTML(doc.venta, doc.productos);
+                        htmlSections.push(htmlContent);
+                        break;
+                        
+                    case 'remitos':
+                        // Para remitos: generar HTML y agregarlo 2 veces
+                        const htmlRemito = await this.generarRemitoHTML(doc.remito, doc.productos);
+                        htmlSections.push(htmlRemito); // Primera copia
+                        htmlSections.push(htmlRemito); // Segunda copia
+                        break;
+                        
+                    case 'notas_pedido':
+                        htmlContent = await this.generarNotaPedidoHTML(doc.pedido, doc.productos);
+                        htmlSections.push(htmlContent);
+                        break;
+                        
+                    default:
+                        throw new Error(`Tipo de documento no soportado: ${tipo}`);
+                }
+            }
+
+            if (htmlSections.length === 0) {
+                throw new Error('No se generaron secciones HTML');
+            }
+
+            const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
+
+            return await this.generatePdfFromHtml(combinedHTML, { timeout: 60000 });
+
+        } catch (error) {
+            console.error('❌ Error en generarPDFsMultiples:', error);
+            throw error;
+        }
+    }
+
+    // ✅ FUNCIONES HELPER PARA GENERAR SOLO HTML
+    async generarFacturaHTML(venta, productos) {
+        const templatePath = path.join(this.templatesPath, 'factura.html');
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+        
+        const fechaFormateada = this.formatearFecha(venta.fecha);
+        htmlTemplate = htmlTemplate
+            .replace(/{{fecha}}/g, fechaFormateada)
+            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado');
+
+        const itemsHTML = productos.map(producto => {
+            const subtotal = parseFloat(producto.subtotal) || 0;
+            const iva = parseFloat(producto.iva || producto.IVA) || 0;
+            const total = subtotal + iva;
+
+            return `
+                <tr>
+                    <td>${producto.producto_id}</td>
+                    <td>${producto.producto_nombre}</td>
+                    <td>${producto.producto_um}</td>
+                    <td>${producto.cantidad}</td>
+                    <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
+                    <td style="text-align: right;">$${total.toFixed(2)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+        const totalFactura = productos.reduce((acc, item) => {
+            const subtotal = parseFloat(item.subtotal) || 0;
+            const iva = parseFloat(item.iva || item.IVA) || 0;
+            return acc + subtotal + iva;
+        }, 0);
+
+        htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
+        
+        return htmlTemplate;
+    }
+
+    async generarRemitoHTML(remito, productos) {
+        const templatePath = path.join(this.templatesPath, 'remito.html');
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+        
+        const fechaFormateada = this.formatearFecha(remito.fecha);
+        htmlTemplate = htmlTemplate
+            .replace(/{{fecha}}/g, fechaFormateada)
+            .replace(/{{cliente_nombre}}/g, remito.cliente_nombre || 'No informado')
+            .replace(/{{cliente_cuit}}/g, remito.cliente_cuit || 'No informado')
+            .replace(/{{cliente_cativa}}/g, remito.cliente_condicion || 'No informado')
+            .replace(/{{cliente_direccion}}/g, remito.cliente_direccion || 'No informado')
+            .replace(/{{cliente_ciudad}}/g, remito.cliente_ciudad || 'No informado')
+            .replace(/{{cliente_provincia}}/g, remito.cliente_provincia || 'No informado')
+            .replace(/{{cliente_telefono}}/g, remito.cliente_telefono || 'No informado')
+            .replace(/{{observacion}}/g, remito.observaciones || 'Sin observaciones');
+
+        const itemsHTML = productos.map(producto => `
+            <tr>
+                <td>${producto.producto_id}</td>
+                <td>${producto.producto_nombre}</td>
+                <td>${producto.producto_um}</td>
+                <td>${producto.cantidad}</td>
+            </tr>
+        `).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
         
         return htmlTemplate;
     }
@@ -458,13 +402,13 @@ class PdfGenerator {
         
         const fechaFormateada = this.formatearFecha(pedido.fecha);
         htmlTemplate = htmlTemplate
-            .replace('{{fecha}}', fechaFormateada)
-            .replace('{{id}}', pedido.id)
-            .replace('{{cliente_nombre}}', pedido.cliente_nombre)
-            .replace('{{cliente_direccion}}', pedido.cliente_direccion || 'No informado')
-            .replace('{{cliente_telefono}}', pedido.cliente_telefono || 'No informado')
-            .replace('{{empleado_nombre}}', pedido.empleado_nombre || 'No informado')
-            .replace('{{pedido_observacion}}', pedido.observaciones || 'No informado');
+            .replace(/{{fecha}}/g, fechaFormateada)
+            .replace(/{{id}}/g, pedido.id)
+            .replace(/{{cliente_nombre}}/g, pedido.cliente_nombre)
+            .replace(/{{cliente_direccion}}/g, pedido.cliente_direccion || 'No informado')
+            .replace(/{{cliente_telefono}}/g, pedido.cliente_telefono || 'No informado')
+            .replace(/{{empleado_nombre}}/g, pedido.empleado_nombre || 'No informado')
+            .replace(/{{pedido_observacion}}/g, pedido.observaciones || 'No informado');
 
         const itemsHTML = productos.map(producto => `
             <tr>
@@ -476,7 +420,7 @@ class PdfGenerator {
             </tr>
         `).join('');
 
-        htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
         
         return htmlTemplate;
     }
