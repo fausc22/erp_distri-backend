@@ -7,6 +7,7 @@ const dotenv = require('dotenv');
 const multer = require('multer');
 const puppeteerManager = require('../utils/puppeteerConfig');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
+const pdfGenerator = require('../utils/pdfGenerator');
 
 
 
@@ -92,77 +93,31 @@ const generarPdfFactura = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    // ✅ Ruta de la plantilla HTML existente
-    const templatePath = path.join(__dirname, "../resources/documents/factura.html");
-
-    if (!fs.existsSync(templatePath)) {
-        console.error('❌ Plantilla HTML no encontrada en:', templatePath);
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
-    }
-
     try {
-        console.log('📄 Iniciando generación de PDF de factura con plantilla...');
+        console.log('📄 Generando PDF de factura optimizado...');
+        const startTime = Date.now();
 
-        // ✅ Leer y procesar la plantilla HTML existente
-        let htmlTemplate = fs.readFileSync(templatePath, "utf8");
+        // ✅ USAR PLANTILLA HTML EXACTA (mismo que antes)
+        const pdfBuffer = await pdfGenerator.generarFactura(venta, productos);
 
-        // ✅ Reemplazar placeholders como antes
-        htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", formatearFecha(venta.fecha))
-            .replace("{{cliente_nombre}}", venta.cliente_nombre)
-            
-
-        // ✅ Generar HTML de productos
-        const itemsHTML = productos
-            .map(producto => `
-                <tr>
-                    <td>${producto.producto_id}</td>
-                    <td>${producto.producto_nombre}</td>
-                    <td>${producto.producto_um}</td>
-                    <td>${producto.cantidad}</td>
-                    <td style="text-align: right;">$${producto.precio}</td>
-                    
-                    <td style="text-align: right;">$${producto.subtotal}</td>
-                </tr>`)
-            .join("");
-
-        htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-        
-        // ✅ Calcular totales
-        const subtotalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0).toFixed(2);
-        const ivaPdf = productos.reduce((acc, item) => acc + (parseFloat(item.iva) || 0), 0).toFixed(2);
-        const totalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0) + (parseFloat(item.iva) || 0), 0).toFixed(2);
-
-        // htmlTemplate = htmlTemplate.replace("{{subtotal}}", subtotalPdf);
-        // htmlTemplate = htmlTemplate.replace("{{iva}}", ivaPdf);
-        htmlTemplate = htmlTemplate.replace("{{total}}", totalPdf);
-
-        // ✅ Usar puppeteerManager con la nueva configuración
-        const pdfBuffer = await puppeteerManager.generatePDF(htmlTemplate, {
-            format: 'A4',
-            margin: {
-                top: '10mm',
-                right: '10mm', 
-                bottom: '10mm',
-                left: '10mm'
-            }
-        });
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ PDF de factura generado en ${generationTime}ms`);
 
         // ✅ Auditar generación de PDF
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'ventas',
             registroId: venta.id,
-            detallesAdicionales: `PDF de factura generado para cliente: ${venta.cliente_nombre} - Total: $${venta.total}`
+            detallesAdicionales: `PDF de factura generado optimizado en ${generationTime}ms - Cliente: ${venta.cliente_nombre} - Total: $${venta.total}`
         });
 
-        // ✅ Enviar respuesta
+        // ✅ Enviar respuesta (igual que antes)
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="Factura_${venta.cliente_nombre}.pdf"`);
+        res.setHeader("Content-Disposition", `attachment; filename="Factura_${venta.cliente_nombre.replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);
         
         res.end(pdfBuffer);
         
-        console.log('✅ PDF de factura generado exitosamente con plantilla');
+        console.log('✅ PDF de factura enviado exitosamente');
 
     } catch (error) {
         console.error("❌ Error generando PDF:", error);
@@ -171,7 +126,7 @@ const generarPdfFactura = async (req, res) => {
             accion: 'EXPORT',
             tabla: 'ventas',
             registroId: venta.id,
-            detallesAdicionales: `Error generando PDF de factura: ${error.message}`
+            detallesAdicionales: `Error generando PDF de factura optimizado: ${error.message}`
         });
         
         res.status(500).json({ 
@@ -181,7 +136,7 @@ const generarPdfFactura = async (req, res) => {
     }
 };
 
-// ✅ GENERAR PDFs MÚLTIPLES 
+// ✅ NUEVA FUNCIÓN - Generar PDFs múltiples de facturas
 const generarPdfFacturasMultiples = async (req, res) => {
     const { ventasIds } = req.body;
     
@@ -189,20 +144,15 @@ const generarPdfFacturasMultiples = async (req, res) => {
         return res.status(400).json({ error: "Debe proporcionar al menos un ID de venta válido" });
     }
 
-    const templatePath = path.join(__dirname, "../resources/documents/factura.html");
-
-    if (!fs.existsSync(templatePath)) {
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
-    }
-
     try {
-        console.log(`📄 Iniciando generación de ${ventasIds.length} facturas múltiples con plantilla...`);
+        console.log(`📄 Generando ${ventasIds.length} facturas múltiples optimizadas...`);
+        const startTime = Date.now();
 
         const htmlSections = [];
 
+        // ✅ USAR LA MISMA LÓGICA QUE LA FUNCIÓN INDIVIDUAL
         for (const ventaId of ventasIds) {
             try {
-                // Obtener venta
                 const ventaRows = await new Promise((resolve, reject) => {
                     db.query('SELECT * FROM ventas WHERE id = ?', [ventaId], (err, results) => {
                         if (err) return reject(err);
@@ -215,7 +165,6 @@ const generarPdfFacturasMultiples = async (req, res) => {
                     continue;
                 }
                 
-                // Obtener productos
                 const productos = await new Promise((resolve, reject) => {
                     db.query('SELECT * FROM ventas_cont WHERE venta_id = ?', [ventaId], (err, results) => {
                         if (err) return reject(err);
@@ -228,40 +177,34 @@ const generarPdfFacturasMultiples = async (req, res) => {
                     continue;
                 }
                 
-                const venta = ventaRows[0];
+                // ✅ USAR EXACTAMENTE LA MISMA LÓGICA QUE generarFactura()
+                const templatePath = path.join(pdfGenerator.templatesPath, 'factura.html');
+                let htmlTemplate = require('fs').readFileSync(templatePath, 'utf8');
                 
-                // ✅ Leer plantilla para cada factura
-                let htmlTemplate = fs.readFileSync(templatePath, "utf8");
-                
-                const fechaFormateada = formatearFecha(venta.fecha);
                 htmlTemplate = htmlTemplate
-                    .replace("{{fecha}}", fechaFormateada)
-                    .replace("{{cliente_nombre}}", venta.cliente_nombre)
-                    
-
-                const itemsHTML = productos
-                    .map(producto => `
-                        <tr>
-                            <td>${producto.producto_id}</td>
-                            <td>${producto.producto_nombre}</td>
-                            <td>${producto.producto_um}</td>
-                            <td>${producto.cantidad}</td>
-                            <td style="text-align: right;">$${producto.precio}</td>
-                            
-                            <td style="text-align: right;">$${producto.subtotal}</td>
-                        </tr>`)
-                    .join("");
-
-                htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
+                    .replace('{{fecha}}', pdfGenerator.formatearFecha(ventaRows[0].fecha))
+                    .replace('{{cliente_nombre}}', ventaRows[0].cliente_nombre);
                 
-                const subtotalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0).toFixed(2);
-                const ivaPdf = productos.reduce((acc, item) => acc + (parseFloat(item.IVA) || 0), 0).toFixed(2);
-                const totalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0) + (parseFloat(item.iva) || 0), 0).toFixed(2);
+                const itemsHTML = productos.map(producto => `
+                    <tr>
+                        <td>${producto.producto_id}</td>
+                        <td>${producto.producto_nombre}</td>
+                        <td>${producto.producto_um}</td>
+                        <td>${producto.cantidad}</td>
+                        <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
+                        <td style="text-align: right;">$${(parseFloat(producto.subtotal || 0) + parseFloat(producto.iva || producto.IVA || 0)).toFixed(2)}</td>
+                    </tr>
+                `).join('');
+                
+                htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
+                
+                // ✅ CALCULAR TOTALES EXACTAMENTE IGUAL
+            const subtotalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0).toFixed(2);
+            const ivaPdf = productos.reduce((acc, item) => acc + (parseFloat(item.iva) || 0), 0).toFixed(2);
+            const totalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0) + (parseFloat(item.iva) || 0), 0).toFixed(2);
 
-                // htmlTemplate = htmlTemplate.replace("{{subtotal}}", venta.subtotal || subtotalPdf);
-                // htmlTemplate = htmlTemplate.replace("{{iva}}", venta.ivatotal || ivaPdf);
-                htmlTemplate = htmlTemplate.replace("{{total}}", venta.total || totalPdf);
-
+            htmlTemplate = htmlTemplate.replace('{{total}}', ventaRows[0].total || totalPdf);
+                
                 htmlSections.push(htmlTemplate);
                 
             } catch (error) {
@@ -270,44 +213,22 @@ const generarPdfFacturasMultiples = async (req, res) => {
         }
         
         if (htmlSections.length === 0) {
-            return res.status(404).json({ error: "No se pudieron generar PDFs para las ventas seleccionadas" });
+            return res.status(404).json({ error: "No se pudieron obtener datos para las ventas seleccionadas" });
         }
 
-        // ✅ Combinar todas las facturas con salto de página
+        // ✅ COMBINAR TODAS LAS SECCIONES
         const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
+        const pdfBuffer = await pdfGenerator.generatePdfFromHtml(combinedHTML);
 
-        // ✅ Usar puppeteerManager para generar PDF combinado
-        const pdfBuffer = await puppeteerManager.generatePDF(combinedHTML, {
-            format: 'A4',
-            margin: {
-                top: '10mm',
-                right: '10mm',
-                bottom: '10mm', 
-                left: '10mm'
-            }
-        });
-
-        await auditarOperacion(req, {
-            accion: 'EXPORT',
-            tabla: 'ventas',
-            detallesAdicionales: `PDFs múltiples de facturas generados - ${ventasIds.length} ventas solicitadas, ${htmlSections.length} generadas`
-        });
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ ${htmlSections.length} facturas múltiples generadas en ${generationTime}ms`);
 
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="Facturas_Multiples.pdf"`);
+        res.setHeader("Content-Disposition", `attachment; filename="Facturas_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
         res.end(pdfBuffer);
-        
-        console.log(`✅ ${htmlSections.length} facturas múltiples generadas exitosamente`);
         
     } catch (error) {
         console.error("❌ Error generando PDFs múltiples:", error);
-        
-        await auditarOperacion(req, {
-            accion: 'EXPORT',
-            tabla: 'ventas',
-            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
-        });
-        
         res.status(500).json({ 
             error: "Error al generar los PDFs múltiples",
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -315,7 +236,7 @@ const generarPdfFacturasMultiples = async (req, res) => {
     }
 };
 
-// ✅ GENERAR PDF LISTA DE PRECIOS 
+// ✅ NUEVA FUNCIÓN - Generar PDF de lista de precios
 const generarPdfListaPrecio = async (req, res) => {
     const { cliente, productos } = req.body;
 
@@ -323,64 +244,34 @@ const generarPdfListaPrecio = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    const templatePath = path.join(__dirname, "../resources/documents/lista_precio.html");
-
-    if (!fs.existsSync(templatePath)) {
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
-    }
-
     try {
-        console.log('📄 Iniciando generación de PDF de lista de precios con plantilla...');
+        console.log('📄 Generando PDF de lista de precios optimizado...');
+        const startTime = Date.now();
 
-        // ✅ Leer y procesar la plantilla HTML existente
-        let htmlTemplate = fs.readFileSync(templatePath, "utf8");
+        // ✅ USAR PLANTILLA HTML EXACTA
+        const pdfBuffer = await pdfGenerator.generarListaPrecios(cliente, productos);
 
-        htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", formatearFecha(new Date().toLocaleDateString()))
-            .replace("{{cliente_nombre}}", cliente.nombre)
-            // .replace("{{cliente_cuit}}", cliente.cuit || "No informado")
-            // .replace("{{cliente_cativa}}", cliente.condicion_iva || "No informado");
-
-        const itemsHTML = productos
-            .map(producto => `
-                <tr>
-                    <td>${producto.id}</td>
-                    <td>${producto.nombre}</td>
-                    <td>${producto.unidad_medida}</td>
-                    <td>${producto.cantidad}</td>
-                    <td style="text-align: right;">$${producto.precio}</td>
-                    
-                    <td style="text-align: right;">$${producto.subtotal}</td>
-                </tr>`)
-            .join("");
-
-        htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-
-        // ✅ Usar puppeteerManager
-        const pdfBuffer = await puppeteerManager.generatePDF(htmlTemplate, {
-            format: 'A4'
-        });
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ PDF de lista de precios generado en ${generationTime}ms`);
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'productos',
-            detallesAdicionales: `Lista de precios generada para cliente: ${cliente.nombre} - ${productos.length} productos`
+            detallesAdicionales: `Lista de precios generada optimizada en ${generationTime}ms - Cliente: ${cliente.nombre} - ${productos.length} productos`
         });
 
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="Lista_Precios_${cliente.nombre}.pdf"`);
+        res.setHeader("Content-Disposition", `attachment; filename="Lista_Precios_${cliente.nombre.replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);
         
         res.end(pdfBuffer);
         
-        console.log('✅ PDF de lista de precios generado exitosamente');
-
     } catch (error) {
         console.error("❌ Error generando PDF:", error);
         
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'productos',
-            detallesAdicionales: `Error generando lista de precios: ${error.message}`
+            detallesAdicionales: `Error generando lista de precios optimizada: ${error.message}`
         });
         
         res.status(500).json({ 
@@ -422,8 +313,8 @@ const facturarPedido = async (req, res) => {
 
     console.log('🧾 Iniciando facturación de pedido con remitos:', pedidoId);
 
-    // Comenzar transacción
-    db.beginTransaction(async (err) => {
+    // ✅ USAR beginTransaction CORRECTAMENTE según db.js
+    db.beginTransaction(async (err, connection) => {
         if (err) {
             console.error('Error iniciando transacción:', err);
             return res.status(500).json({ success: false, message: 'Error iniciando transacción' });
@@ -432,7 +323,7 @@ const facturarPedido = async (req, res) => {
         try {
             // 1. Obtener datos del pedido
             const pedidoQuery = `SELECT * FROM pedidos WHERE id = ?`;
-            const pedidoResult = await queryPromise(pedidoQuery, [pedidoId]);
+            const pedidoResult = await queryPromiseWithConnection(connection, pedidoQuery, [pedidoId]);
             
             if (pedidoResult.length === 0) {
                 throw new Error('Pedido no encontrado');
@@ -443,7 +334,7 @@ const facturarPedido = async (req, res) => {
 
             // 2. Obtener productos del pedido
             const productosQuery = `SELECT * FROM pedidos_cont WHERE pedido_id = ?`;
-            const productos = await queryPromise(productosQuery, [pedidoId]);
+            const productos = await queryPromiseWithConnection(connection, productosQuery, [pedidoId]);
 
             if (productos.length === 0) {
                 throw new Error('No se encontraron productos en el pedido');
@@ -482,7 +373,7 @@ const facturarPedido = async (req, res) => {
                 pedido.empleado_nombre
             ];
 
-            const ventaResult = await queryPromise(ventaQuery, ventaValues);
+            const ventaResult = await queryPromiseWithConnection(connection, ventaQuery, ventaValues);
             const ventaId = ventaResult.insertId;
             console.log('💰 Venta creada con ID:', ventaId);
 
@@ -494,7 +385,7 @@ const facturarPedido = async (req, res) => {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 `;
                 
-                await queryPromise(productoVentaQuery, [
+                await queryPromiseWithConnection(connection, productoVentaQuery, [
                     ventaId,
                     producto.producto_id,
                     producto.producto_nombre,
@@ -520,17 +411,19 @@ const facturarPedido = async (req, res) => {
                 cliente_direccion: pedido.cliente_direccion,
                 cliente_ciudad: pedido.cliente_ciudad,
                 cliente_provincia: pedido.cliente_provincia,
-                estado: 'Generado', // Estado inicial del remito
-                observaciones: pedido.observaciones
+                estado: 'Generado',
+                observaciones: pedido.observaciones,
+                empleado_id: pedido.empleado_id,
+                empleado_nombre: pedido.empleado_nombre,
             };
 
-            const remitoId = await registrarRemitoPromise(datosRemito);
+            const remitoId = await registrarRemitoPromiseWithConnection(connection, datosRemito);
             console.log('📋 Remito creado con ID:', remitoId);
 
             // 6. ✅ INSERTAR PRODUCTOS EN EL REMITO
             console.log('📦 Insertando productos en el remito...');
             
-            const errorProductosRemito = await insertarProductosRemitoPromise(remitoId, productos);
+            const errorProductosRemito = await insertarProductosRemitoPromiseWithConnection(connection, remitoId, productos);
             if (errorProductosRemito) {
                 throw new Error(`Error insertando productos en remito: ${errorProductosRemito.message}`);
             }
@@ -543,7 +436,7 @@ const facturarPedido = async (req, res) => {
                 VALUES (?, 'INGRESO', ?, ?, ?, NOW())
             `;
 
-            await queryPromise(movimientoQuery, [
+            await queryPromiseWithConnection(connection, movimientoQuery, [
                 cuentaId,
                 `Facturación - ${pedido.cliente_nombre}`,
                 ventaId,
@@ -558,7 +451,7 @@ const facturarPedido = async (req, res) => {
                 WHERE id = ?
             `;
 
-            await queryPromise(actualizarSaldoQuery, [totalConIva, cuentaId]);
+            await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalConIva, cuentaId]);
             console.log('💳 Saldo de cuenta actualizado');
 
             // 9. Cambiar estado del pedido a "Facturado"
@@ -568,19 +461,26 @@ const facturarPedido = async (req, res) => {
                 WHERE id = ?
             `;
 
-            await queryPromise(actualizarPedidoQuery, [pedidoId]);
+            await queryPromiseWithConnection(connection, actualizarPedidoQuery, [pedidoId]);
             console.log('📋 Estado del pedido actualizado a "Facturado"');
 
-            // 10. Confirmar transacción
-            db.commit(async (err) => {
-                if (err) {
-                    console.error('Error confirmando transacción:', err);
-                    return db.rollback(() => {
-                        res.status(500).json({ success: false, message: 'Error confirmando transacción' });
-                    });
-                }
+            // ✅ 10. CONFIRMAR TRANSACCIÓN - USAR CONNECTION CORRECTAMENTE
+            console.log('✅ Todos los procesos completados, confirmando transacción...');
+            
+            await new Promise((resolve, reject) => {
+                connection.commit((err) => {
+                    if (err) {
+                        console.error('❌ Error confirmando transacción:', err);
+                        return reject(err);
+                    }
+                    console.log('✅ Transacción confirmada exitosamente');
+                    connection.release(); // ✅ LIBERAR CONEXIÓN
+                    resolve();
+                });
+            });
 
-                // Auditar facturación exitosa
+            // 11. Auditar facturación exitosa (después del commit)
+            try {
                 await auditarOperacion(req, {
                     accion: 'INSERT',
                     tabla: 'ventas',
@@ -610,47 +510,70 @@ const facturarPedido = async (req, res) => {
                     },
                     detallesAdicionales: `Remito #${remitoId} generado automáticamente desde facturación - Venta #${ventaId} - Cliente: ${pedido.cliente_nombre}`
                 });
+            } catch (auditError) {
+                console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
+            }
 
-                console.log('✅ Facturación y remito completados exitosamente');
-                res.json({ 
-                    success: true, 
-                    message: 'Facturación y remito completados exitosamente',
-                    data: {
-                        ventaId,
-                        remitoId, // ✅ INCLUIR ID DEL REMITO EN LA RESPUESTA
-                        pedidoId,
-                        total: totalConIva,
-                        productosCount: productos.length
-                    }
-                });
+            console.log('✅ Facturación y remito completados exitosamente');
+            res.json({ 
+                success: true, 
+                message: 'Facturación y remito completados exitosamente',
+                data: {
+                    ventaId,
+                    remitoId,
+                    pedidoId,
+                    total: totalConIva,
+                    productosCount: productos.length
+                }
             });
 
         } catch (error) {
             console.error('❌ Error en facturación:', error);
             
-            // Auditar error en facturación
-            await auditarOperacion(req, {
-                accion: 'INSERT',
-                tabla: 'ventas',
-                detallesAdicionales: `Error en facturación del pedido ${pedidoId}: ${error.message}`,
-                datosNuevos: req.body
-            });
-            
-            db.rollback(() => {
-                res.status(500).json({ 
-                    success: false, 
-                    message: error.message || 'Error en el proceso de facturación' 
+            // ✅ ROLLBACK CON CONNECTION CORRECTAMENTE
+            try {
+                await new Promise((resolve, reject) => {
+                    connection.rollback((rollbackErr) => {
+                        if (rollbackErr) {
+                            console.error('❌ Error adicional en rollback:', rollbackErr);
+                        } else {
+                            console.log('🔄 Rollback ejecutado correctamente');
+                        }
+                        connection.release(); // ✅ LIBERAR CONEXIÓN
+                        resolve();
+                    });
                 });
+            } catch (rollbackError) {
+                console.error('❌ Error crítico en rollback:', rollbackError);
+            }
+            
+            // Auditar error en facturación
+            try {
+                await auditarOperacion(req, {
+                    accion: 'INSERT',
+                    tabla: 'ventas',
+                    detallesAdicionales: `Error en facturación del pedido ${pedidoId}: ${error.message}`,
+                    datosNuevos: req.body
+                });
+            } catch (auditError) {
+                console.warn('⚠️ Error en auditoría de error (no crítico):', auditError.message);
+            }
+            
+            res.status(500).json({ 
+                success: false, 
+                message: error.message || 'Error en el proceso de facturación' 
             });
         }
     });
 };
 
-// Función helper para promisificar queries de MySQL
-const queryPromise = (query, params) => {
+const queryPromiseWithConnection = (connection, query, params) => {
     return new Promise((resolve, reject) => {
-        db.query(query, params, (err, results) => {
+        connection.query(query, params, (err, results) => {
             if (err) {
+                console.error('❌ Error en query:', err.message);
+                console.error('📄 Query:', query);
+                console.error('📋 Parámetros:', params);
                 reject(err);
             } else {
                 resolve(results);
@@ -659,8 +582,155 @@ const queryPromise = (query, params) => {
     });
 };
 
+// ✅ FUNCIÓN PARA REMITO CON CONNECTION
+const registrarRemitoPromiseWithConnection = (connection, pedidoData) => {
+    return new Promise((resolve, reject) => {
+        const { 
+            venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
+            cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
+            estado, observaciones, empleado_id, empleado_nombre 
+        } = pedidoData;
 
-// Obtener historial de movimientos de una cuenta
+        const registrarRemitoQuery = `
+            INSERT INTO remitos
+            (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
+             cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
+             estado, observaciones, empleado_id, empleado_nombre)
+            VALUES 
+            (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        const remitoValues = [
+            venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
+            cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
+            estado, observaciones, empleado_id, empleado_nombre
+        ];
+
+        connection.query(registrarRemitoQuery, remitoValues, (err, result) => {
+            if (err) {
+                console.error('❌ Error al insertar el remito:', err);
+                return reject(err);
+            }
+            console.log('✅ Remito registrado con ID:', result.insertId, '- Empleado:', empleado_nombre);
+            resolve(result.insertId);
+        });
+    });
+};
+
+// ✅ FUNCIÓN PARA PRODUCTOS REMITO CON CONNECTION
+const insertarProductosRemitoPromiseWithConnection = async (connection, remitoId, productos) => {
+    const insertProductoQuery = `
+        INSERT INTO detalle_remitos (remito_id, producto_id, producto_nombre, producto_um, cantidad) 
+        VALUES (?, ?, ?, ?, ?)
+    `;
+
+    try {
+        const promesasInsert = productos.map(producto => {
+            const { producto_id, producto_nombre, producto_um, cantidad } = producto;
+            const productoValues = [remitoId, producto_id, producto_nombre, producto_um, cantidad];
+
+            return new Promise((resolve, reject) => {
+                connection.query(insertProductoQuery, productoValues, (err, result) => {
+                    if (err) {
+                        console.error('❌ Error al insertar producto del remito:', err);
+                        return reject(err);
+                    }
+                    console.log(`✅ Producto ${producto_nombre} insertado en remito`);
+                    resolve(result);
+                });
+            });
+        });
+
+        await Promise.all(promesasInsert);
+        console.log('✅ Todos los productos del remito insertados correctamente');
+        return null;
+    } catch (error) {
+        console.error('❌ Error general insertando productos del remito:', error);
+        return error;
+    }
+};
+
+// ✅ MANTENER FUNCIONES ORIGINALES PARA COMPATIBILIDAD
+const queryPromise = (query, params) => {
+    return new Promise((resolve, reject) => {
+        db.query(query, params, (err, results) => {
+            if (err) {
+                console.error('❌ Error en query:', err.message);
+                reject(err);
+            } else {
+                resolve(results);
+            }
+        });
+    });
+};
+
+const registrarRemitoPromise = (pedidoData) => {
+    return new Promise((resolve, reject) => {
+        const { 
+            venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
+            cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
+            estado, observaciones, empleado_id, empleado_nombre 
+        } = pedidoData;
+
+        const registrarRemitoQuery = `
+            INSERT INTO remitos
+            (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
+             cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
+             estado, observaciones, empleado_id, empleado_nombre)
+            VALUES 
+            (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        const remitoValues = [
+            venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
+            cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
+            estado, observaciones, empleado_id, empleado_nombre
+        ];
+
+        db.query(registrarRemitoQuery, remitoValues, (err, result) => {
+            if (err) {
+                console.error('❌ Error al insertar el remito:', err);
+                return reject(err);
+            }
+            console.log('✅ Remito registrado con ID:', result.insertId, '- Empleado:', empleado_nombre);
+            resolve(result.insertId);
+        });
+    });
+};
+
+const insertarProductosRemitoPromise = async (remitoId, productos) => {
+    const insertProductoQuery = `
+        INSERT INTO detalle_remitos (remito_id, producto_id, producto_nombre, producto_um, cantidad) 
+        VALUES (?, ?, ?, ?, ?)
+    `;
+
+    try {
+        const promesasInsert = productos.map(producto => {
+            const { producto_id, producto_nombre, producto_um, cantidad } = producto;
+            const productoValues = [remitoId, producto_id, producto_nombre, producto_um, cantidad];
+
+            return new Promise((resolve, reject) => {
+                db.query(insertProductoQuery, productoValues, (err, result) => {
+                    if (err) {
+                        console.error('❌ Error al insertar producto del remito:', err);
+                        return reject(err);
+                    }
+                    console.log(`✅ Producto ${producto_nombre} insertado en remito`);
+                    resolve(result);
+                });
+            });
+        });
+
+        await Promise.all(promesasInsert);
+        console.log('✅ Todos los productos del remito insertados correctamente');
+        return null;
+    } catch (error) {
+        console.error('❌ Error general insertando productos del remito:', error);
+        return error;
+    }
+};
+
+// Obtener historial de movimientos de una cuenta (sin cambios)
 const obtenerMovimientosCuenta = (req, res) => {
     const cuentaId = req.params.cuentaId;
     
@@ -688,58 +758,6 @@ const obtenerMovimientosCuenta = (req, res) => {
         res.json({ success: true, data: results });
     });
 };
-
-
-const registrarRemitoPromise = (pedidoData) => {
-    return new Promise((resolve, reject) => {
-        const { venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones} = pedidoData;
-
-        const registrarRemitoQuery = `
-            INSERT INTO remitos
-            (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones)
-            VALUES 
-            (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-
-        const remitoValues = [venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones];
-
-        db.query(registrarRemitoQuery, remitoValues, (err, result) => {
-            if (err) {
-                console.error('Error al insertar el remito:', err);
-                return reject(err);
-            }
-            resolve(result.insertId); // Devuelve el ID del remito recién insertado
-        });
-    });
-};
-
-const insertarProductosRemitoPromise = async (remitoId, productos) => {
-    const insertProductoQuery = `
-        INSERT INTO detalle_remitos (remito_id, producto_id, producto_nombre, producto_um, cantidad) 
-        VALUES (?, ?, ?, ?, ?)
-    `;
-
-    try {
-        await Promise.all(productos.map(producto => {
-            const { producto_id, producto_nombre, producto_um, cantidad } = producto;
-            const productoValues = [remitoId, producto_id, producto_nombre, producto_um, cantidad];
-
-            return new Promise((resolve, reject) => {
-                db.query(insertProductoQuery, productoValues, (err, result) => {
-                    if (err) {
-                        console.error('Error al insertar el producto del remito:', err);
-                        return reject(err);
-                    }
-                    resolve(result);
-                });
-            });
-        }));
-        return null;
-    } catch (error) {
-        return error;
-    }
-};
-
 
 
 

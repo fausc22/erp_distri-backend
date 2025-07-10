@@ -6,6 +6,7 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 const puppeteerManager = require('../utils/puppeteerConfig');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
+const pdfGenerator = require('../utils/pdfGenerator');
 
 const formatearFecha = (fechaBD) => {
     if (!fechaBD) return 'Fecha no disponible';
@@ -190,16 +191,16 @@ const actualizarProducto = async (req, res) => {
 };
 
 const registrarRemito = (pedidoData, callback) => {
-    const { venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones} = pedidoData;
+    const { venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones, empleado_id, empleado_nombre} = pedidoData;
 
     const registrarVentaQuery = `
         INSERT INTO remitos
-        (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones)
+        (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones, empleado_id, empleado_nombre)
         VALUES 
-        (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    const ventaValues = [venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones];
+    const ventaValues = [venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, estado, observaciones, empleado_id, empleado_nombre];
 
     db.query(registrarVentaQuery, ventaValues, (err, result) => {
         if (err) {
@@ -418,70 +419,28 @@ const generarPdfRemito = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    // ✅ Ruta de la plantilla HTML existente
-    const templatePath = path.join(__dirname, "../resources/documents/remito.html");
-
-    if (!fs.existsSync(templatePath)) {
-        console.error('❌ Plantilla HTML no encontrada en:', templatePath);
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
-    }
-
     try {
-        console.log('📄 Iniciando generación de PDF de remito con plantilla...');
+        console.log('📄 Generando PDF de remito optimizado...');
+        const startTime = Date.now();
 
-        // ✅ Leer y reemplazar la plantilla HTML existente
-        let htmlTemplate = fs.readFileSync(templatePath, "utf8");
+        // ✅ USAR PLANTILLA HTML EXACTA
+        const pdfBuffer = await pdfGenerator.generarRemito(remito, productos);
 
-        htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", formatearFecha(remito.fecha))
-            .replace("{{cliente_nombre}}", remito.cliente_nombre || "No informado")
-            .replace("{{cliente_cuit}}", remito.cliente_cuit || "No informado")
-            .replace("{{cliente_cativa}}", remito.cliente_condicion || "No informado")
-            .replace("{{cliente_direccion}}", remito.cliente_direccion || "No informado")
-            .replace("{{cliente_provincia}}", remito.cliente_provincia || "No informado")
-            .replace("{{cliente_telefono}}", remito.cliente_telefono || "No informado")
-            .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado")
-            .replace("{{observacion}}", remito.observaciones || "Sin Observaciones");
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ PDF de remito generado en ${generationTime}ms`);
 
-        const itemsHTML = productos
-            .map(producto => `
-                <tr>
-                    <td>${producto.producto_id}</td>
-                    <td>${producto.producto_nombre}</td>
-                    <td>${producto.producto_um}</td>
-                    <td>${producto.cantidad}</td>
-                </tr>`)
-            .join("");
-
-        htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-
-        // ✅ Usar puppeteerManager con la nueva configuración
-        const pdfBuffer = await puppeteerManager.generatePDF(htmlTemplate, {
-            format: 'A4',
-            margin: {
-                top: '10mm',
-                right: '10mm',
-                bottom: '10mm',
-                left: '10mm'
-            }
-        });
-
-        // ✅ Auditar generación de PDF
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
             registroId: remito.id,
-            detallesAdicionales: `PDF de remito generado para cliente: ${remito.cliente_nombre}`
+            detallesAdicionales: `PDF de remito generado optimizado en ${generationTime}ms - Cliente: ${remito.cliente_nombre}`
         });
 
-        // ✅ Configurar la respuesta
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="REMITO_${remito.cliente_nombre}.pdf"`);
+        res.setHeader("Content-Disposition", `attachment; filename="REMITO_${remito.cliente_nombre.replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);
         
         res.end(pdfBuffer);
         
-        console.log('✅ PDF de remito generado exitosamente con plantilla');
-
     } catch (error) {
         console.error("❌ Error generando PDF:", error);
         
@@ -489,7 +448,7 @@ const generarPdfRemito = async (req, res) => {
             accion: 'EXPORT',
             tabla: 'remitos',
             registroId: remito.id,
-            detallesAdicionales: `Error generando PDF de remito: ${error.message}`
+            detallesAdicionales: `Error generando PDF de remito optimizado: ${error.message}`
         });
         
         res.status(500).json({ 
@@ -499,7 +458,6 @@ const generarPdfRemito = async (req, res) => {
     }
 };
 
-// ✅ GENERAR PDFs MÚLTIPLES DE REMITOS
 const generarPdfRemitosMultiples = async (req, res) => {
     const { remitosIds } = req.body;
     
@@ -507,16 +465,11 @@ const generarPdfRemitosMultiples = async (req, res) => {
         return res.status(400).json({ error: "Debe proporcionar al menos un ID de remito válido" });
     }
 
-    const templatePath = path.join(__dirname, "../resources/documents/remito.html");
-
-    if (!fs.existsSync(templatePath)) {
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
-    }
-
     try {
-        console.log(`📄 Iniciando generación de ${remitosIds.length} remitos múltiples con plantilla...`);
+        console.log(`📄 Generando ${remitosIds.length} remitos múltiples optimizados...`);
+        const startTime = Date.now();
 
-        const htmlSections = [];
+        const documentos = [];
 
         for (let i = 0; i < remitosIds.length; i++) {
             let remitoId;
@@ -559,70 +512,35 @@ const generarPdfRemitosMultiples = async (req, res) => {
                     continue;
                 }
                 
-                const remito = remitoRows[0];
-                
-                // ✅ Leer plantilla para cada remito
-                let htmlTemplate = fs.readFileSync(templatePath, "utf8");
-
-                htmlTemplate = htmlTemplate
-                    .replace("{{fecha}}", formatearFecha(remito.fecha))
-                    .replace("{{cliente_nombre}}", remito.cliente_nombre)
-                    .replace("{{cliente_cuit}}", remito.cliente_cuit || "No informado")
-                    .replace("{{cliente_cativa}}", remito.cliente_condicion || "No informado")
-                    .replace("{{cliente_direccion}}", remito.cliente_direccion || "No informado")
-                    .replace("{{cliente_provincia}}", remito.cliente_provincia || "No informado")
-                    .replace("{{cliente_telefono}}", remito.cliente_telefono || "No informado")
-                    .replace("{{cliente_ciudad}}", remito.cliente_ciudad || "No informado")
-                    .replace("{{observacion}}", remito.observaciones || "Sin Observaciones");
-
-                const itemsHTML = productos
-                    .map(producto => `
-                        <tr>
-                            <td>${producto.producto_id}</td>
-                            <td>${producto.producto_nombre}</td>
-                            <td>${producto.producto_um}</td>
-                            <td>${producto.cantidad}</td>
-                        </tr>`)
-                    .join("");
-
-                htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-                
-                htmlSections.push(htmlTemplate);
+                documentos.push({
+                    remito: remitoRows[0],
+                    productos: productos
+                });
                 
             } catch (error) {
                 console.error(`Error procesando remito ID ${remitoId}:`, error);
             }
         }
         
-        if (htmlSections.length === 0) {
-            return res.status(404).json({ error: "No se pudieron generar PDFs para los remitos seleccionados" });
+        if (documentos.length === 0) {
+            return res.status(404).json({ error: "No se pudieron obtener datos para los remitos seleccionados" });
         }
 
-        // ✅ Combinar todos los remitos con salto de página
-        const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
+        // ✅ USAR EL NUEVO GENERADOR OPTIMIZADO
+        const pdfBuffer = await pdfGenerator.generarPDFsMultiples(documentos, 'remitos');
 
-        // ✅ Usar puppeteerManager para generar PDF combinado
-        const pdfBuffer = await puppeteerManager.generatePDF(combinedHTML, {
-            format: 'A4',
-            margin: {
-                top: '10mm',
-                right: '10mm',
-                bottom: '10mm',
-                left: '10mm'
-            }
-        });
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ ${documentos.length} remitos múltiples generados en ${generationTime}ms`);
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
-            detallesAdicionales: `PDFs múltiples de remitos generados - ${remitosIds.length} remitos solicitados, ${htmlSections.length} generados`
+            detallesAdicionales: `PDFs múltiples de remitos generados optimizados en ${generationTime}ms - ${remitosIds.length} remitos solicitados, ${documentos.length} generados`
         });
 
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="Remitos_Multiples.pdf"`);
+        res.setHeader("Content-Disposition", `attachment; filename="Remitos_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
         res.end(pdfBuffer);
-        
-        console.log(`✅ ${htmlSections.length} remitos múltiples generados exitosamente`);
         
     } catch (error) {
         console.error("❌ Error generando PDFs múltiples:", error);
@@ -630,7 +548,7 @@ const generarPdfRemitosMultiples = async (req, res) => {
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'remitos',
-            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
+            detallesAdicionales: `Error generando PDFs múltiples de remitos optimizados: ${error.message}`
         });
         
         res.status(500).json({ 

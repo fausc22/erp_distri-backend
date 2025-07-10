@@ -7,7 +7,7 @@ const puppeteer = require("puppeteer");
 const multer = require('multer');
 const puppeteerManager = require('../utils/puppeteerConfig');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
-
+const pdfGenerator = require('../utils/pdfGenerator');
 
 
 
@@ -1044,72 +1044,28 @@ const generarPdfNotaPedido = async (req, res) => {
         return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
     }
 
-    // ✅ Ruta de la plantilla HTML existente
-    const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
-
-    if (!fs.existsSync(templatePath)) {
-        console.error('❌ Plantilla HTML no encontrada en:', templatePath);
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
-    }
-
     try {
-        console.log('📄 Iniciando generación de PDF de nota de pedido con plantilla...');
+        console.log('📄 Generando PDF de nota de pedido optimizado...');
+        const startTime = Date.now();
 
-        // ✅ Leer y reemplazar la plantilla HTML existente
-        let htmlTemplate = fs.readFileSync(templatePath, "utf8");
+        // ✅ USAR PLANTILLA HTML EXACTA
+        const pdfBuffer = await pdfGenerator.generarNotaPedido(pedido, productos);
 
-        const fechaFormateada = formatearFecha(pedido.fecha);
-        htmlTemplate = htmlTemplate
-            .replace("{{fecha}}", fechaFormateada)
-            .replace("{{id}}", pedido.id)
-            .replace("{{cliente_nombre}}", pedido.cliente_nombre)
-            .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
-            .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
-            .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado")
-            .replace("{{pedido_observacion}}", pedido.observaciones || "No informado");
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ PDF de nota de pedido generado en ${generationTime}ms`);
 
-        const itemsHTML = productos.map(p => `
-            <tr>
-                <td>${p.producto_id || ''}</td>
-                <td>${p.producto_nombre || ''}</td>
-                <td>${p.producto_descripcion || ""}</td>
-                <td>${p.producto_um || ''}</td>
-                <td class="text-right">${p.cantidad || 0}</td>
-            </tr>
-        `).join("\n");
-
-        htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-
-        // ✅ Usar puppeteerManager con configuración dinámica de altura
-        const pdfBuffer = await puppeteerManager.generatePDF(htmlTemplate, {
-            width: '210mm',
-            margin: {
-                top: '8mm',
-                right: '8mm',
-                bottom: '8mm',
-                left: '8mm'
-            },
-            printBackground: true,
-            preferCSSPageSize: false,
-            displayHeaderFooter: false,
-            scale: 0.95
-        });
-
-        // ✅ Auditar generación de PDF
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
             registroId: pedido.id,
-            detallesAdicionales: `PDF de nota de pedido generado para cliente: ${pedido.cliente_nombre}`
+            detallesAdicionales: `PDF de nota de pedido generado optimizado en ${generationTime}ms - Cliente: ${pedido.cliente_nombre}`
         });
 
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="NotaPedido_${pedido.cliente_nombre}.pdf"`);
+        res.setHeader("Content-Disposition", `attachment; filename="NotaPedido_${pedido.cliente_nombre.replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);
 
         res.end(pdfBuffer);
         
-        console.log('✅ PDF de nota de pedido generado exitosamente con plantilla');
-
     } catch (error) {
         console.error("❌ Error generando PDF:", error);
 
@@ -1117,7 +1073,7 @@ const generarPdfNotaPedido = async (req, res) => {
             accion: 'EXPORT',
             tabla: 'pedidos',
             registroId: pedido.id,
-            detallesAdicionales: `Error generando PDF de nota de pedido: ${error.message}`
+            detallesAdicionales: `Error generando PDF de nota de pedido optimizado: ${error.message}`
         });
 
         res.status(500).json({ 
@@ -1142,7 +1098,7 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
     }
 
     try {
-        console.log(`📄 Iniciando generación de ${pedidosIds.length} notas de pedido múltiples con plantilla...`);
+        console.log(`📄 Iniciando generación de ${pedidosIds.length} notas de pedido múltiples optimizadas...`);
 
         const htmlSections = [];
 
@@ -1176,7 +1132,6 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
                 
                 const pedido = pedidoRows[0];
                 
-                // ✅ Leer plantilla para cada pedido
                 let htmlTemplate = fs.readFileSync(templatePath, "utf8");
                 
                 const fechaFormateada = formatearFecha(pedido.fecha);
@@ -1196,7 +1151,7 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
                             <td>${p.producto_nombre || ''}</td>
                             <td>${p.producto_descripcion || ""}</td>
                             <td>${p.producto_um || ''}</td>
-                            <td class="text-right">${p.cantidad || 0}</td>
+                            <td style="text-align: right;">${p.cantidad || 0}</td>
                         </tr>
                     `)
                     .join("");
@@ -1218,34 +1173,35 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
             });
         }
 
-        // ✅ Combinar todas las notas de pedido con salto de página
-        const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
+        // ✅ COMBINAR CON SALTO DE PÁGINA OPTIMIZADO
+        const combinedHTML = htmlSections.join('<div style="page-break-before: always; height: 0; margin: 0; padding: 0;"></div>');
 
-        // ✅ Usar puppeteerManager para generar PDF combinado
+        // ✅ CONFIGURACIÓN OPTIMIZADA PARA MÚLTIPLES PÁGINAS
         const pdfBuffer = await puppeteerManager.generatePDF(combinedHTML, {
-            width: '210mm',
+            format: 'A4',
             margin: {
-                top: '6mm',
+                top: '8mm',
                 right: '6mm', 
-                bottom: '6mm',
+                bottom: '8mm',
                 left: '6mm'
             },
             printBackground: true,
-            preferCSSPageSize: false,
+            preferCSSPageSize: true,
+            displayHeaderFooter: false,
             scale: 0.9
         });
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
-            detallesAdicionales: `PDFs múltiples generados: ${htmlSections.length} notas de pedido combinadas`
+            detallesAdicionales: `PDFs múltiples optimizados generados: ${htmlSections.length} notas de pedido combinadas`
         });
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Notas_Pedidos_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
         res.end(pdfBuffer);
         
-        console.log(`🎉 ${htmlSections.length} notas de pedido generadas y combinadas exitosamente`);
+        console.log(`🎉 ${htmlSections.length} notas de pedido optimizadas generadas y combinadas exitosamente`);
         
     } catch (error) {
         console.error("❌ Error generando PDFs múltiples:", error);
@@ -1253,7 +1209,7 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
-            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
+            detallesAdicionales: `Error generando PDFs múltiples optimizados: ${error.message}`
         });
         
         res.status(500).json({ 

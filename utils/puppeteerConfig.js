@@ -276,151 +276,246 @@ class PuppeteerManager {
 
     // Generar PDF optimizado para VPS y compatible con versiones antiguas
     async generatePDF(htmlContent, options = {}) {
-        const maxAttempts = 3; // Más intentos para VPS
-        let attempt = 0;
+    const maxAttempts = 3;
+    let attempt = 0;
 
-        while (attempt < maxAttempts) {
-            let page = null;
+    while (attempt < maxAttempts) {
+        let page = null;
+        
+        try {
+            console.log(`📄 Generando PDF optimizado en VPS (intento ${attempt + 1}/${maxAttempts})...`);
             
+            const browser = await this.initBrowser();
+            
+            if (!browser || !browser.connected) {
+                throw new Error('Browser no disponible o desconectado en VPS');
+            }
+
+            page = await Promise.race([
+                browser.newPage(),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Timeout creando página en VPS')), 20000)
+                )
+            ]);
+
+            // ✅ CONFIGURACIÓN OPTIMIZADA PARA UNA SOLA PÁGINA
             try {
-                console.log(`📄 Generando PDF en VPS (intento ${attempt + 1}/${maxAttempts})...`);
-                
-                const browser = await this.initBrowser();
-                
-                if (!browser || !browser.connected) {
-                    throw new Error('Browser no disponible o desconectado en VPS');
-                }
+                await page.setDefaultTimeout(90000);
+            } catch (e) {
+                console.log('⚠️ setDefaultTimeout no soportado en esta versión');
+            }
 
-                // Crear página con timeout generoso para VPS
-                page = await Promise.race([
-                    browser.newPage(),
-                    new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('Timeout creando página en VPS')), 20000)
-                    )
-                ]);
+            try {
+                await page.setDefaultNavigationTimeout(90000);
+            } catch (e) {
+                console.log('⚠️ setDefaultNavigationTimeout no soportado en esta versión');
+            }
+            
+            // ✅ VIEWPORT OPTIMIZADO PARA A4
+            await page.setViewport({ 
+                width: 794,  // Ancho A4 en píxeles (210mm)
+                height: 1123, // Alto A4 en píxeles (297mm)
+                deviceScaleFactor: 1,
+                isMobile: false,
+                hasTouch: false
+            });
 
-                // Configurar timeouts (compatible con versiones antiguas)
+            // Deshabilitar imágenes para acelerar en VPS si es necesario
+            if (process.env.NODE_ENV === 'production') {
                 try {
-                    await page.setDefaultTimeout(90000); // Más tiempo para VPS
+                    await page.setRequestInterception(true);
+                    page.on('request', (req) => {
+                        if (req.resourceType() === 'image') {
+                            req.abort();
+                        } else {
+                            req.continue();
+                        }
+                    });
                 } catch (e) {
-                    console.log('⚠️ setDefaultTimeout no soportado en esta versión');
+                    console.log('⚠️ setRequestInterception no soportado, continuando sin optimización de imágenes');
                 }
+            }
 
+            // ✅ INYECTAR CSS ADICIONAL PARA CONTROL DE PÁGINAS
+            const optimizedHtmlContent = `
+                <style>
+                    @page {
+                        size: A4;
+                        margin: 8mm 6mm 8mm 6mm;
+                    }
+                    
+                    body {
+                        margin: 0;
+                        padding: 0;
+                        font-size: 13px;
+                        line-height: 1.3;
+                        -webkit-print-color-adjust: exact;
+                        color-adjust: exact;
+                    }
+                    
+                    .container {
+                        width: 100%;
+                        max-width: none;
+                        margin: 0;
+                        padding: 8px;
+                        box-sizing: border-box;
+                        page-break-inside: avoid;
+                    }
+                    
+                    .header {
+                        font-size: 20px;
+                        margin-bottom: 8px;
+                    }
+                    
+                    .info, .info2 {
+                        margin-bottom: 6px;
+                        padding-bottom: 6px;
+                        font-size: 12px;
+                        line-height: 1.2;
+                    }
+                    
+                    .table {
+                        margin-top: 8px;
+                        font-size: 11px;
+                    }
+                    
+                    .table th, .table td {
+                        padding: 4px 6px;
+                        line-height: 1.2;
+                    }
+                    
+                    .footer {
+                        margin-top: 8px;
+                        font-size: 10px;
+                    }
+                    
+                    /* Evitar saltos de página innecesarios */
+                    h1, h2, h3, .header {
+                        page-break-after: avoid;
+                    }
+                    
+                    .table {
+                        page-break-inside: auto;
+                    }
+                    
+                    .table tr {
+                        page-break-inside: avoid;
+                        page-break-after: auto;
+                    }
+                    
+                    /* Para documentos con Tailwind (nota de pedido) */
+                    .page-container {
+                        max-width: none !important;
+                        min-height: auto !important;
+                        margin: 0 !important;
+                        padding: 8px !important;
+                        box-shadow: none !important;
+                    }
+                    
+                    .text-4xl, .text-5xl {
+                        font-size: 1.5rem !important;
+                    }
+                    
+                    .text-6xl {
+                        font-size: 2rem !important;
+                    }
+                    
+                    .mb-8, .mb-6, .mb-4 {
+                        margin-bottom: 0.5rem !important;
+                    }
+                    
+                    .mt-8, .mt-6, .mt-4 {
+                        margin-top: 0.5rem !important;
+                    }
+                    
+                    .p-4, .p-6, .p-8 {
+                        padding: 0.25rem !important;
+                    }
+                </style>
+                ${htmlContent}
+            `;
+
+            const waitUntilOptions = ['load', 'domcontentloaded'];
+            
+            await page.setContent(optimizedHtmlContent, { 
+                waitUntil: waitUntilOptions,
+                timeout: 45000 
+            });
+
+            // Esperar renderizado completo
+            await this.waitFor(page, 1500);
+
+            // ✅ CONFIGURACIÓN DE PDF OPTIMIZADA PARA UNA PÁGINA
+            const pdfOptions = {
+                format: 'A4',
+                printBackground: true,
+                preferCSSPageSize: true, // ✅ Respetar CSS @page
+                displayHeaderFooter: false,
+                margin: {
+                    top: '8mm',    // Márgenes mínimos pero seguros
+                    right: '6mm',
+                    bottom: '8mm', 
+                    left: '6mm'
+                },
+                // ✅ CONFIGURACIONES PARA EVITAR PÁGINAS MÚLTIPLES
+                width: '210mm',
+                height: '297mm',
+                scale: 0.9, // ✅ Reducir ligeramente para que quepa mejor
+                ...options
+            };
+
+            console.log('📋 Generando PDF optimizado en VPS con opciones:', pdfOptions);
+
+            const pdfBuffer = await Promise.race([
+                page.pdf(pdfOptions),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Timeout generando PDF en VPS')), 60000)
+                )
+            ]);
+
+            console.log(`✅ PDF optimizado generado exitosamente en VPS (${pdfBuffer.length} bytes)`);
+            return pdfBuffer;
+
+        } catch (error) {
+            console.error(`❌ Error en intento ${attempt + 1} en VPS:`, error.message);
+            
+            if (error.message.includes('Protocol error') || 
+                error.message.includes('Target closed') ||
+                error.message.includes('Session closed') ||
+                error.message.includes('Browser closed')) {
+                console.log('🔄 Invalidando browser por error crítico en VPS...');
+                if (this.browser) {
+                    try {
+                        await this.browser.close();
+                    } catch (e) {
+                        console.log('⚠️ Error cerrando browser:', e.message);
+                    }
+                    this.browser = null;
+                }
+            }
+
+            attempt++;
+            if (attempt >= maxAttempts) {
+                throw new Error(`Error generando PDF en VPS después de ${maxAttempts} intentos: ${error.message}`);
+            }
+
+            const waitTime = attempt * 2000;
+            console.log(`⏳ Esperando ${waitTime/1000}s antes del siguiente intento...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            
+        } finally {
+            if (page) {
                 try {
-                    await page.setDefaultNavigationTimeout(90000);
+                    if (!page.isClosed()) {
+                        await page.close();
+                    }
                 } catch (e) {
-                    console.log('⚠️ setDefaultNavigationTimeout no soportado en esta versión');
-                }
-                
-                // Configurar viewport sin emulación problemática
-                await page.setViewport({ 
-                    width: 1200, 
-                    height: 800,
-                    deviceScaleFactor: 1,
-                    isMobile: false,
-                    hasTouch: false
-                });
-
-                // Deshabilitar imágenes para acelerar en VPS si es necesario
-                if (process.env.NODE_ENV === 'production') {
-                    try {
-                        await page.setRequestInterception(true);
-                        page.on('request', (req) => {
-                            if (req.resourceType() === 'image') {
-                                req.abort();
-                            } else {
-                                req.continue();
-                            }
-                        });
-                    } catch (e) {
-                        console.log('⚠️ setRequestInterception no soportado, continuando sin optimización de imágenes');
-                    }
-                }
-
-                // Cargar HTML content con opciones compatibles
-                const waitUntilOptions = ['load', 'domcontentloaded']; // Menos estricto para VPS
-                
-                await page.setContent(htmlContent, { 
-                    waitUntil: waitUntilOptions,
-                    timeout: 45000 
-                });
-
-                // Esperar renderizado completo (compatible con versiones antiguas)
-                await this.waitFor(page, 2000);
-
-                // Configuración de PDF optimizada para VPS y una sola página
-                const pdfOptions = {
-                    format: 'A4',
-                    printBackground: true,
-                    preferCSSPageSize: false,
-                    margin: {
-                        top: '5mm',    // Márgenes reducidos
-                        right: '5mm',
-                        bottom: '5mm',
-                        left: '5mm'
-                    },
-                    // Configuraciones adicionales para evitar páginas múltiples
-                    width: '210mm',
-                    height: '297mm',
-                    ...options
-                };
-
-                console.log('📋 Generando PDF en VPS con opciones:', pdfOptions);
-
-                // Generar PDF con timeout adecuado para VPS
-                const pdfBuffer = await Promise.race([
-                    page.pdf(pdfOptions),
-                    new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('Timeout generando PDF en VPS')), 60000)
-                    )
-                ]);
-
-                console.log(`✅ PDF generado exitosamente en VPS (${pdfBuffer.length} bytes)`);
-                return pdfBuffer;
-
-            } catch (error) {
-                console.error(`❌ Error en intento ${attempt + 1} en VPS:`, error.message);
-                
-                // Invalidar browser si hay error crítico
-                if (error.message.includes('Protocol error') || 
-                    error.message.includes('Target closed') ||
-                    error.message.includes('Session closed') ||
-                    error.message.includes('Browser closed')) {
-                    console.log('🔄 Invalidando browser por error crítico en VPS...');
-                    if (this.browser) {
-                        try {
-                            await this.browser.close();
-                        } catch (e) {
-                            console.log('⚠️ Error cerrando browser:', e.message);
-                        }
-                        this.browser = null;
-                    }
-                }
-
-                attempt++;
-                if (attempt >= maxAttempts) {
-                    throw new Error(`Error generando PDF en VPS después de ${maxAttempts} intentos: ${error.message}`);
-                }
-
-                // Esperar más tiempo entre reintentos en VPS
-                const waitTime = attempt * 2000;
-                console.log(`⏳ Esperando ${waitTime/1000}s antes del siguiente intento...`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-                
-            } finally {
-                // Cerrar página de forma segura
-                if (page) {
-                    try {
-                        if (!page.isClosed()) {
-                            await page.close();
-                        }
-                    } catch (e) {
-                        console.log('⚠️ Error cerrando página:', e.message);
-                    }
+                    console.log('⚠️ Error cerrando página:', e.message);
                 }
             }
         }
     }
+}   
 
     // Diagnostics específicos para VPS
     async diagnostics() {

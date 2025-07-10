@@ -187,62 +187,9 @@ app.use((error, req, res, next) => {
     });
 });
 
-// Diagnóstico de Puppeteer optimizado para VPS
-app.get('/puppeteer-status', async (req, res) => {
-    try {
-        const puppeteerManager = require('./utils/puppeteerConfig');
-        const diagnostics = await puppeteerManager.diagnostics();
-        
-        res.json({
-            status: '🔍 Puppeteer Diagnostics - VPS',
-            timestamp: new Date().toISOString(),
-            ...diagnostics
-        });
-    } catch (error) {
-        res.status(500).json({
-            status: '❌ Puppeteer Error - VPS',
-            timestamp: new Date().toISOString(),
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-        });
-    }
-});
 
-// Endpoint para test rápido de PDF
-app.get('/test-pdf', async (req, res) => {
-    try {
-        const puppeteerManager = require('./utils/puppeteerConfig');
-        const testHtml = `
-            <html>
-                <head>
-                    <style>
-                        body { font-family: Arial, sans-serif; padding: 20px; }
-                        h1 { color: #333; }
-                    </style>
-                </head>
-                <body>
-                    <h1>Test PDF - VPS Hostinger</h1>
-                    <p>Fecha: ${new Date().toLocaleString()}</p>
-                    <p>Servidor: VPS Hostinger</p>
-                    <p>Estado: ✅ Funcionando correctamente</p>
-                </body>
-            </html>
-        `;
-        
-        const pdfBuffer = await puppeteerManager.generatePDF(testHtml);
-        
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', 'attachment; filename="test-vps.pdf"');
-        res.end(pdfBuffer);
-        
-    } catch (error) {
-        res.status(500).json({
-            error: 'Error generando PDF de prueba',
-            message: error.message,
-            server: 'VPS Hostinger'
-        });
-    }
-});
+
+
 
 // Función para graceful shutdown en VPS
 const gracefulShutdown = async (signal) => {
