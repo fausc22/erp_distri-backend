@@ -576,7 +576,7 @@ const obtenerProductosPedido = (req, res) => {
 
     const query = `
         SELECT id, pedido_id, producto_id, producto_nombre, producto_um, 
-               cantidad, precio, iva, subtotal 
+               cantidad, precio, iva, subtotal, descuento_porcentaje
         FROM pedidos_cont
         WHERE pedido_id = ?
     `;
@@ -755,18 +755,43 @@ const agregarProductoPedidoExistente = async (req, res) => {
 
 // Actualizar producto de un pedido
 const actualizarProductoPedido = async (req, res) => {
-    const { cantidad, precio, iva, subtotal } = req.body;
+    const { cantidad, precio, iva, subtotal, descuento_porcentaje } = req.body;
     const productId = req.params.productId;
 
     if (!cantidad || cantidad <= 0) {
         return res.status(400).json({ 
-            success: false, 
-            message: "La cantidad debe ser mayor a 0" 
+            success: false,
+            message: "La cantidad debe ser mayor a 0"
+        });
+    }
+
+    if (!precio || precio <= 0) {
+        return res.status(400).json({ 
+            success: false,
+            message: "El precio debe ser mayor a 0"
+        });
+    }
+
+    // ✅ VALIDAR DESCUENTO (opcional para todos, solo gerentes pueden aplicarlo)
+    const descuentoFinal = descuento_porcentaje || 0;
+    if (descuentoFinal < 0 || descuentoFinal > 100) {
+        return res.status(400).json({ 
+            success: false,
+            message: "El descuento debe estar entre 0 y 100%"
+        });
+    }
+
+    // ✅ SI HAY DESCUENTO, VERIFICAR QUE SEA GERENTE
+    const usuarioRol = req.user?.rol;
+    if (descuentoFinal > 0 && usuarioRol !== 'GERENTE') {
+        return res.status(403).json({
+            success: false,
+            message: "Solo los gerentes pueden aplicar descuentos"
         });
     }
 
     try {
-        // 1. Obtener datos anteriores del producto en el pedido
+        // 3. Obtener datos anteriores del producto en el pedido
         const obtenerDatosAnterioresPromise = () => {
             return new Promise((resolve, reject) => {
                 db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
@@ -786,13 +811,28 @@ const actualizarProductoPedido = async (req, res) => {
         const pedidoId = datosAnteriores.pedido_id;
         const diferenciaCantidad = cantidad - cantidadAnterior;
 
-        // 2. Actualizar el producto en pedidos_cont
+        // ✅ 4. RECALCULAR SUBTOTAL CON DESCUENTO (Verificación)
+        const subtotalBase = precio * cantidad;
+        const montoDescuento = (subtotalBase * descuentoFinal) / 100;
+        const subtotalConDescuento = subtotalBase - montoDescuento;
+        
+        // Verificar que el subtotal enviado coincida con el calculado
+        if (Math.abs(subtotal - subtotalConDescuento) > 0.01) {
+            return res.status(400).json({
+                success: false,
+                message: `Error en cálculo: Subtotal esperado $${subtotalConDescuento.toFixed(2)}, recibido $${subtotal}`
+            });
+        }
+
+        // ✅ 5. ACTUALIZAR EL PRODUCTO CON DESCUENTO
         const queryActualizar = `
-            UPDATE pedidos_cont SET cantidad = ?, precio = ?, IVA = ?, subtotal = ? WHERE id = ?
+            UPDATE pedidos_cont 
+            SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?
+            WHERE id = ?
         `;
 
         await new Promise((resolve, reject) => {
-            db.query(queryActualizar, [cantidad, precio, iva, subtotal, productId], (err, result) => {
+            db.query(queryActualizar, [cantidad, precio, iva, subtotal, descuentoFinal, productId], (err, result) => {
                 if (err) {
                     console.error('Error al actualizar el producto:', err);
                     return reject(err);
@@ -804,29 +844,44 @@ const actualizarProductoPedido = async (req, res) => {
             });
         });
 
-        // 3. Ajustar stock si hay diferencia en cantidad
+        // 6. Ajustar stock si hay diferencia en cantidad
         if (diferenciaCantidad !== 0) {
             await actualizarStockProducto(productoId, -diferenciaCantidad, 'actualizar_cantidad_pedido');
         }
 
-        // 4. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
+        // ✅ 7. RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
         const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
 
-        // 5. Auditar actualización del producto
+        // ✅ AUDITAR CON INFORMACIÓN ESPECÍFICA
+        const tipoOperacion = descuentoFinal > 0 ? 'GERENTE' : 'EMPLEADO';
         await auditarOperacion(req, {
             accion: 'UPDATE',
             tabla: 'pedidos_cont',
             registroId: productId,
             datosAnteriores,
-            datosNuevos: { ...datosAnteriores, cantidad, precio, iva, subtotal },
-            detallesAdicionales: `Producto actualizado en pedido ${pedidoId}: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad} - Nuevos totales: $${totalesActualizados.total}`
+            datosNuevos: { 
+                ...datosAnteriores, 
+                cantidad, 
+                precio, 
+                iva, 
+                subtotal, 
+                descuento_porcentaje: descuentoFinal 
+            },
+            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}`
         });
 
-        res.json({ 
-            success: true, 
-            message: 'Producto actualizado correctamente, stock y totales ajustados',
+        // ✅ 9. RESPUESTA CON INFORMACIÓN DETALLADA
+        res.json({
+            success: true,
+            message: `Producto actualizado correctamente${descuentoFinal > 0 ? ` con ${descuentoFinal}% de descuento` : ''}, stock y totales ajustados`,
             data: {
-                totales: totalesActualizados
+                totales: totalesActualizados,
+                descuento: {
+                    porcentaje: descuentoFinal,
+                    monto: montoDescuento,
+                    subtotalBase: subtotalBase,
+                    subtotalConDescuento: subtotalConDescuento
+                }
             }
         });
 
@@ -842,14 +897,14 @@ const actualizarProductoPedido = async (req, res) => {
         
         if (error.message.includes('Stock insuficiente')) {
             return res.status(400).json({ 
-                success: false, 
-                message: error.message 
+                success: false,
+                message: error.message
             });
         }
         
-        res.status(500).json({ 
-            success: false, 
-            message: 'Error al actualizar el producto' 
+        res.status(500).json({
+            success: false,
+            message: 'Error al actualizar el producto'
         });
     }
 };

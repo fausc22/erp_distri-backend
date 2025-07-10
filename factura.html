@@ -80,7 +80,8 @@
         <div class="info">
             <p><strong>DESTINATARIO</strong></p>
             <p><strong>Señor/es:</strong> {{cliente_nombre}}</p>
-            
+            <p><strong>CUIT:</strong> {{cliente_cuit}}</p>
+            <p><strong>Categoría IVA:</strong> {{cliente_cativa}}</p>
         </div>
 
         <h2 style="text-align: center;">DETALLE DE FACTURA</h2>
@@ -91,14 +92,15 @@
                 <th style="width: 10%;">Unidad</th>
                 <th style="width: 8%;">Cantidad</th>
                 <th style="width: 15%;">Precio ($)</th>
+                <th style="width: 10%;">IVA ($)</th>
                 <th style="width: 15%;">Subtotal ($)</th>
             </tr>
             {{items}}
         </table>
 
         <div class="info2">
-            
-            
+            <p style="margin-top: 50px;"><strong>Subtotal:</strong> ${{subtotal}}</p>
+            <p><strong>IVA:</strong> ${{iva}}</p>
             <p style="font-size: 18px; font-weight: bold;"><strong>Total:</strong> ${{total}}</p>
         </div>
 

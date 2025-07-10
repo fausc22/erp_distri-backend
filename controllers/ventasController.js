@@ -110,8 +110,7 @@ const generarPdfFactura = async (req, res) => {
         htmlTemplate = htmlTemplate
             .replace("{{fecha}}", formatearFecha(venta.fecha))
             .replace("{{cliente_nombre}}", venta.cliente_nombre)
-            .replace("{{cliente_cuit}}", venta.cliente_cuit || "No informado")
-            .replace("{{cliente_cativa}}", venta.cliente_condicion || "No informado");
+            
 
         // ✅ Generar HTML de productos
         const itemsHTML = productos
@@ -122,7 +121,7 @@ const generarPdfFactura = async (req, res) => {
                     <td>${producto.producto_um}</td>
                     <td>${producto.cantidad}</td>
                     <td style="text-align: right;">$${producto.precio}</td>
-                    <td style="text-align: right;">$${producto.iva}</td>
+                    
                     <td style="text-align: right;">$${producto.subtotal}</td>
                 </tr>`)
             .join("");
@@ -134,8 +133,8 @@ const generarPdfFactura = async (req, res) => {
         const ivaPdf = productos.reduce((acc, item) => acc + (parseFloat(item.iva) || 0), 0).toFixed(2);
         const totalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0) + (parseFloat(item.iva) || 0), 0).toFixed(2);
 
-        htmlTemplate = htmlTemplate.replace("{{subtotal}}", subtotalPdf);
-        htmlTemplate = htmlTemplate.replace("{{iva}}", ivaPdf);
+        // htmlTemplate = htmlTemplate.replace("{{subtotal}}", subtotalPdf);
+        // htmlTemplate = htmlTemplate.replace("{{iva}}", ivaPdf);
         htmlTemplate = htmlTemplate.replace("{{total}}", totalPdf);
 
         // ✅ Usar puppeteerManager con la nueva configuración
@@ -238,8 +237,7 @@ const generarPdfFacturasMultiples = async (req, res) => {
                 htmlTemplate = htmlTemplate
                     .replace("{{fecha}}", fechaFormateada)
                     .replace("{{cliente_nombre}}", venta.cliente_nombre)
-                    .replace("{{cliente_cuit}}", venta.cliente_cuit || "No informado")
-                    .replace("{{cliente_cativa}}", venta.cliente_condicion || "No informado");
+                    
 
                 const itemsHTML = productos
                     .map(producto => `
@@ -249,7 +247,7 @@ const generarPdfFacturasMultiples = async (req, res) => {
                             <td>${producto.producto_um}</td>
                             <td>${producto.cantidad}</td>
                             <td style="text-align: right;">$${producto.precio}</td>
-                            <td style="text-align: right;">$${producto.IVA}</td>
+                            
                             <td style="text-align: right;">$${producto.subtotal}</td>
                         </tr>`)
                     .join("");
@@ -260,8 +258,8 @@ const generarPdfFacturasMultiples = async (req, res) => {
                 const ivaPdf = productos.reduce((acc, item) => acc + (parseFloat(item.IVA) || 0), 0).toFixed(2);
                 const totalPdf = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0) + (parseFloat(item.iva) || 0), 0).toFixed(2);
 
-                htmlTemplate = htmlTemplate.replace("{{subtotal}}", venta.subtotal || subtotalPdf);
-                htmlTemplate = htmlTemplate.replace("{{iva}}", venta.ivatotal || ivaPdf);
+                // htmlTemplate = htmlTemplate.replace("{{subtotal}}", venta.subtotal || subtotalPdf);
+                // htmlTemplate = htmlTemplate.replace("{{iva}}", venta.ivatotal || ivaPdf);
                 htmlTemplate = htmlTemplate.replace("{{total}}", venta.total || totalPdf);
 
                 htmlSections.push(htmlTemplate);
@@ -340,8 +338,8 @@ const generarPdfListaPrecio = async (req, res) => {
         htmlTemplate = htmlTemplate
             .replace("{{fecha}}", formatearFecha(new Date().toLocaleDateString()))
             .replace("{{cliente_nombre}}", cliente.nombre)
-            .replace("{{cliente_cuit}}", cliente.cuit || "No informado")
-            .replace("{{cliente_cativa}}", cliente.condicion_iva || "No informado");
+            // .replace("{{cliente_cuit}}", cliente.cuit || "No informado")
+            // .replace("{{cliente_cativa}}", cliente.condicion_iva || "No informado");
 
         const itemsHTML = productos
             .map(producto => `
@@ -351,7 +349,7 @@ const generarPdfListaPrecio = async (req, res) => {
                     <td>${producto.unidad_medida}</td>
                     <td>${producto.cantidad}</td>
                     <td style="text-align: right;">$${producto.precio}</td>
-                    <td style="text-align: right;">$${producto.iva}</td>
+                    
                     <td style="text-align: right;">$${producto.subtotal}</td>
                 </tr>`)
             .join("");
