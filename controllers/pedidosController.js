@@ -1098,7 +1098,7 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
     }
 
     try {
-        console.log(`📄 Iniciando generación de ${pedidosIds.length} notas de pedido múltiples optimizadas...`);
+        console.log(`📄 Iniciando generación de ${pedidosIds.length} notas de pedido múltiples...`);
 
         const htmlSections = [];
 
@@ -1173,35 +1173,34 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
             });
         }
 
-        // ✅ COMBINAR CON SALTO DE PÁGINA OPTIMIZADO
-        const combinedHTML = htmlSections.join('<div style="page-break-before: always; height: 0; margin: 0; padding: 0;"></div>');
+        // ✅ COMBINAR CON SALTO DE PÁGINA PARA html-pdf
+        const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
 
-        // ✅ CONFIGURACIÓN OPTIMIZADA PARA MÚLTIPLES PÁGINAS
-        const pdfBuffer = await puppeteerManager.generatePDF(combinedHTML, {
+        // ✅ USAR pdfGenerator con html-pdf
+        const pdfBuffer = await pdfGenerator.generatePdfFromHtml(combinedHTML, {
             format: 'A4',
-            margin: {
+            border: {
                 top: '8mm',
                 right: '6mm', 
                 bottom: '8mm',
                 left: '6mm'
             },
-            printBackground: true,
-            preferCSSPageSize: true,
-            displayHeaderFooter: false,
-            scale: 0.9
+            quality: "75",
+            type: "pdf",
+            timeout: 30000
         });
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
-            detallesAdicionales: `PDFs múltiples optimizados generados: ${htmlSections.length} notas de pedido combinadas`
+            detallesAdicionales: `PDFs múltiples generados: ${htmlSections.length} notas de pedido combinadas`
         });
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Notas_Pedidos_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
         res.end(pdfBuffer);
         
-        console.log(`🎉 ${htmlSections.length} notas de pedido optimizadas generadas y combinadas exitosamente`);
+        console.log(`🎉 ${htmlSections.length} notas de pedido generadas y combinadas exitosamente`);
         
     } catch (error) {
         console.error("❌ Error generando PDFs múltiples:", error);
@@ -1209,7 +1208,7 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
-            detallesAdicionales: `Error generando PDFs múltiples optimizados: ${error.message}`
+            detallesAdicionales: `Error generando PDFs múltiples: ${error.message}`
         });
         
         res.status(500).json({ 
