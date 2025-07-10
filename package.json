@@ -4,9 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
-    "postinstall": "npx puppeteer browsers install chrome || echo 'Chrome installation failed but continuing...'",
-    "install-deps": "apt-get update && apt-get install -y chromium-browser || echo 'Chromium installation failed'"
+    "dev": "nodemon server.js"
   },
   "keywords": [
     "api",
@@ -29,16 +27,12 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
-    "html-pdf-node": "^1.0.8",
+    "html-pdf-node": "^1.0.7",
     "jsonwebtoken": "^9.0.2",
-    "jspdf": "^3.0.1",
-    "jspdf-autotable": "^5.0.2",
     "multer": "^1.4.5-lts.2",
     "mysql2": "^3.14.1",
     "pdf-lib": "^1.17.1",
-    "pdf-parse": "^1.1.1",
-    "puppeteer": "^24.6.1",
-    "xlsx": "^0.18.5"
+    "pdf-parse": "^1.1.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"

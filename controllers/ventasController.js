@@ -1,11 +1,11 @@
 const db = require('./db');
-const puppeteer = require("puppeteer");
+
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const multer = require('multer');
-const puppeteerManager = require('../utils/puppeteerConfig');
+
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 

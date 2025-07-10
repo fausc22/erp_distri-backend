@@ -3,9 +3,9 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
-const puppeteer = require("puppeteer");
+
 const multer = require('multer');
-const puppeteerManager = require('../utils/puppeteerConfig');
+
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 

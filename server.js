@@ -80,9 +80,7 @@ app.get('/health', async (req, res) => {
         await db.execute('SELECT 1');
         const dbResponseTime = Date.now() - startTime;
         
-        // Test de Puppeteer
-        const puppeteerManager = require('./utils/puppeteerConfig');
-        const puppeteerHealth = await puppeteerManager.healthCheck();
+        
         
         res.json({
             status: '✅ VPS Healthy',
@@ -99,7 +97,7 @@ app.get('/health', async (req, res) => {
                 status: '✅ Connected',
                 responseTime: `${dbResponseTime}ms`
             },
-            puppeteer: puppeteerHealth
+            
         });
     } catch (error) {
         res.status(500).json({
@@ -136,7 +134,7 @@ app.get('/', (req, res) => {
             auditoria: '/auditoria',
             comprobantes: '/comprobantes',
             health: '/health',
-            'puppeteer-status': '/puppeteer-status'
+            
         }
     });
 });
@@ -196,9 +194,7 @@ const gracefulShutdown = async (signal) => {
     console.log(`🛑 Recibida señal ${signal}, cerrando servidor VPS...`);
     
     try {
-        // Cerrar Puppeteer primero
-        const puppeteerManager = require('./utils/puppeteerConfig');
-        await puppeteerManager.cleanup();
+        
         
         // Cerrar conexiones de base de datos
         const db = require('./controllers/dbPromise');
