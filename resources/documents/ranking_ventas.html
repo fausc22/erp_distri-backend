@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RANKING DE VENTAS - DISTRIBUIDORA VERTI-MAR</title>
+    <style>
+        @page {
+            size: A4 landscape; /* Orientación horizontal para más ancho */
+            margin: 15mm 10mm 15mm 10mm;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #ffffff;
+            font-size: 11px;
+            line-height: 1.2;
+        }
+        
+        .container {
+            width: 100%;
+            max-width: none;
+            margin: 0;
+            padding: 0;
+        }
+        
+        .header {
+            text-align: center;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 8px;
+        }
+        
+        .fecha {
+            text-align: center;
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #7f8c8d;
+        }
+        
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 14px; /* Aumentado de 12px a 14px para las filas */
+        }
+        
+        .table th {
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: white;
+            font-weight: bold;
+            padding: 10px 6px; /* Aumentado padding para headers */
+            text-align: center;
+            border: 1px solid #2980b9;
+            font-size: 12px; /* Aumentado de 10px a 12px para headers */
+            word-wrap: break-word;
+        }
+        
+        .table td {
+            border: 1px solid #bdc3c7;
+            padding: 10px 8px; /* Aumentado padding de 8px 6px a 10px 8px */
+            vertical-align: middle; /* Cambiado de top a middle para mejor alineación */
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            font-size: 15px; /* Aumentado de 11px a 13px para el contenido de las celdas */
+            line-height: 1.4; /* Mejorado line-height para mejor legibilidad */
+        }
+        
+        .table tbody tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        
+        .table tbody tr:nth-child(odd) {
+            background-color: #ffffff;
+        }
+        
+        .table tbody tr:hover {
+            background-color: #e3f2fd;
+        }
+        
+        /* Anchos específicos para cada columna */
+        .col-persona { width: 30%; }
+        .col-direccion { width: 12%; }
+        .col-telefono { width: 12%; }
+        .col-email { width: 12%; }
+        .col-dni { width: 12%; }
+        .col-neto { width: 12%; text-align: center; }
+        .col-exento { width: 3%; text-align: center; }
+        .col-iva { width: 8%; text-align: center; }
+        .col-percep { width: 3%; text-align: center; }
+        .col-reten { width: 3%; text-align: center; }
+        .col-total { width: 12%; text-align: center; }
+
+        
+        /* Estilos para datos monetarios */
+        .money {
+            font-weight: bold;
+            color: #27ae60;
+            font-size: 14px; /* Aumentado de 12px a 14px para cantidades monetarias */
+        }
+        
+        .money.negative {
+            color: #e74c3c;
+        }
+        
+        /* Estilo para texto largo */
+        .text-wrap {
+            word-break: break-word;
+            hyphens: auto;
+            line-height: 1.4;
+        }
+        
+        /* Mejora visual para DNI/CUIT */
+        .dni {
+            font-family: 'Courier New', monospace;
+            font-size: 12px; /* Aumentado de 10px a 12px */
+        }
+        
+        /* Estilo para nombres de clientes */
+        .cliente-nombre {
+            font-weight: bold;
+            font-size: 14px; /* Aumentado de 12px a 14px para nombres */
+            color: #2c3e50;
+        }
+        
+        /* Footer con totales */
+        .footer-totals {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #ecf0f1;
+            border: 1px solid #bdc3c7;
+            border-radius: 4px;
+        }
+        
+        .total-row {
+            display: flex;
+            justify-content: space-between;
+            font-weight: bold;
+            font-size: 12px;
+            color: #2c3e50;
+        }
+        
+        .logo-empresa {
+            font-size: 16px;
+            color: #3498db;
+            margin-bottom: 5px;
+        }
+
+        /* Estilos para información de contacto */
+        .contacto-info {
+            font-size: 12px; /* Aumentado de 10px a 12px */
+            line-height: 1.3;
+        }
+
+        /* Filas de totales con fuente más grande */
+        .totales-row td {
+            font-size: 15px !important; /* Aumentado de 13px a 15px */
+            font-weight: bold;
+            padding: 12px 8px; /* Aumentado padding */
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo-empresa">📊 DISTRIBUIDORA VERTI-MAR SRL</div>
+            RANKING DE VENTAS
+        </div>
+        
+        <div class="fecha">{{fecha}}</div>
+        
+        <table class="table">
+            <thead>
+                <tr>
+                    <th class="col-persona">CLIENTE</th>
+                    <th class="col-direccion">DIRECCIÓN</th>
+                    <th class="col-telefono">TELÉFONO</th>
+                    <th class="col-email">EMAIL</th>
+                    <th class="col-dni">DNI/CUIT</th>
+                    <th class="col-neto">NETO</th>
+                    <th class="col-exento">EXENTO</th>
+                    <th class="col-iva">IVA</th>
+                    <th class="col-percep">PERCEP.</th>
+                    <th class="col-reten">RETENCIÓN</th>
+                    <th class="col-total">TOTAL</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{items}}
+            </tbody>
+        </table>
+        
+        <!-- Footer con totales será agregado dinámicamente por el backend -->
+    </div>
+</body>
+</html>

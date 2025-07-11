@@ -142,14 +142,15 @@ class PdfGenerator {
             const subtotal = parseFloat(producto.subtotal) || 0;
             const iva = parseFloat(producto.iva || producto.IVA) || 0;
             const total = subtotal + iva;
+            const productoPrecioIva = (total  / producto.cantidad) ;
 
             return `
                 <tr>
                     <td>${producto.producto_id}</td>
                     <td>${producto.producto_nombre}</td>
                     <td>${producto.producto_um}</td>
-                    <td>${producto.cantidad}</td>
-                    <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
+                    <td style="text-align: center;">${producto.cantidad}</td>
+                    <td style="text-align: right;">$${productoPrecioIva.toFixed(2)}</td>
                     <td style="text-align: right;">$${total.toFixed(2)}</td>
                 </tr>
             `;
@@ -164,6 +165,47 @@ class PdfGenerator {
         }, 0);
 
         htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
+    async generarRankingVentas(fecha, ventas) {
+        const templatePath = path.join(this.templatesPath, 'ranking_ventas.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla ranking_ventas.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        htmlTemplate = htmlTemplate.replace(/{{fecha}}/g, this.formatearFecha(fecha));
+
+        const itemsHTML = ventas.map(venta => {
+
+            const clienteNombre = venta.cliente_nombre || '';
+            const direccion = venta.direccion || '';
+            const telefono = venta.telefono || '';
+            const email = venta.email || '';
+            const dni = venta.dni || '';
+
+            return `
+                <tr>
+                    <td>${clienteNombre}</td>
+                    <td>${direccion}</td>
+                    <td>${telefono}</td>
+                    <td>${email}</td>
+                    <td>${dni}</td>
+                    <td style="text-align: right;">${venta.subtotal.toFixed(2)}</td>
+                    <td style="text-align: right;">0.00</td>
+                    <td style="text-align: right;">${venta.iva_total.toFixed(2)}</td>
+                    <td style="text-align: right;">0.00</td>
+                    <td style="text-align: right;">0.00</td>
+                    <td style="text-align: right;">${venta.total.toFixed(2)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }
@@ -192,9 +234,8 @@ class PdfGenerator {
             <tr>
                 <td>${producto.producto_id || ''}</td>
                 <td>${producto.producto_nombre || ''}</td>
-                <td>${producto.producto_descripcion || ''}</td>
                 <td>${producto.producto_um || ''}</td>
-                <td style="text-align: right;">${producto.cantidad || 0}</td>
+                <td style="text-align: center;">${producto.cantidad || 0}</td>
             </tr>
         `).join('');
 
@@ -262,14 +303,14 @@ class PdfGenerator {
             .replace(/{{cliente_ciudad}}/g, remito.cliente_ciudad || 'No informado')
             .replace(/{{cliente_provincia}}/g, remito.cliente_provincia || 'No informado')
             .replace(/{{cliente_telefono}}/g, remito.cliente_telefono || 'No informado')
-            .replace(/{{observacion}}/g, remito.observaciones || 'Sin observaciones');
+            
 
         const itemsHTML = productos.map(producto => `
             <tr>
                 <td>${producto.producto_id}</td>
                 <td>${producto.producto_nombre}</td>
                 <td>${producto.producto_um}</td>
-                <td>${producto.cantidad}</td>
+                <td style="text-align: center;">${producto.cantidad}</td>
             </tr>
         `).join('');
 
@@ -334,20 +375,23 @@ class PdfGenerator {
         const fechaFormateada = this.formatearFecha(venta.fecha);
         htmlTemplate = htmlTemplate
             .replace(/{{fecha}}/g, fechaFormateada)
+            
             .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado');
+
 
         const itemsHTML = productos.map(producto => {
             const subtotal = parseFloat(producto.subtotal) || 0;
             const iva = parseFloat(producto.iva || producto.IVA) || 0;
             const total = subtotal + iva;
+            const productoPrecioIva = (total  / producto.cantidad) ;
 
             return `
                 <tr>
                     <td>${producto.producto_id}</td>
                     <td>${producto.producto_nombre}</td>
                     <td>${producto.producto_um}</td>
-                    <td>${producto.cantidad}</td>
-                    <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
+                    <td style="text-align: center;">${producto.cantidad}</td>
+                    <td style="text-align: right;">$${productoPrecioIva.toFixed(2)}</td>
                     <td style="text-align: right;">$${total.toFixed(2)}</td>
                 </tr>
             `;
@@ -380,14 +424,14 @@ class PdfGenerator {
             .replace(/{{cliente_ciudad}}/g, remito.cliente_ciudad || 'No informado')
             .replace(/{{cliente_provincia}}/g, remito.cliente_provincia || 'No informado')
             .replace(/{{cliente_telefono}}/g, remito.cliente_telefono || 'No informado')
-            .replace(/{{observacion}}/g, remito.observaciones || 'Sin observaciones');
+            
 
         const itemsHTML = productos.map(producto => `
             <tr>
                 <td>${producto.producto_id}</td>
                 <td>${producto.producto_nombre}</td>
                 <td>${producto.producto_um}</td>
-                <td>${producto.cantidad}</td>
+                <td style="text-align: center;">${producto.cantidad}</td>
             </tr>
         `).join('');
 
@@ -414,9 +458,8 @@ class PdfGenerator {
             <tr>
                 <td>${producto.producto_id || ''}</td>
                 <td>${producto.producto_nombre || ''}</td>
-                <td>${producto.producto_descripcion || ''}</td>
                 <td>${producto.producto_um || ''}</td>
-                <td style="text-align: right;">${producto.cantidad || 0}</td>
+                <td style="text-align: center;">${producto.cantidad || 0}</td>
             </tr>
         `).join('');
 

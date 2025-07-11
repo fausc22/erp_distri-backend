@@ -1149,9 +1149,8 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
                         <tr>
                             <td>${p.producto_id || ''}</td>
                             <td>${p.producto_nombre || ''}</td>
-                            <td>${p.producto_descripcion || ""}</td>
                             <td>${p.producto_um || ''}</td>
-                            <td style="text-align: right;">${p.cantidad || 0}</td>
+                            <td style="text-align: center;">${p.cantidad || 0}</td>
                         </tr>
                     `)
                     .join("");

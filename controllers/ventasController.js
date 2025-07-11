@@ -136,6 +136,54 @@ const generarPdfFactura = async (req, res) => {
     }
 };
 
+const generarPdfRankingVentas = async (req, res) => {
+    const { fecha, ventas } = req.body; // Expecting 'fecha' and an array of 'ventas'
+
+    if (!fecha || !ventas || !Array.isArray(ventas) || ventas.length === 0) {
+        return res.status(400).json({ error: "Datos insuficientes para generar el ranking de ventas en PDF. Se requiere una fecha y un array de ventas." });
+    }
+
+    try {
+        console.log(`📄 Generando PDF de Ranking de Ventas para la fecha ${fecha} (${ventas.length} ventas)...`);
+        const startTime = Date.now();
+
+        // Call the pdfGenerator's function
+        const pdfBuffer = await pdfGenerator.generarRankingVentas(fecha, ventas);
+
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ PDF de Ranking de Ventas generado en ${generationTime}ms`);
+
+        // Auditar generación de PDF
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ranking_ventas', // Or a more appropriate table/context
+            detallesAdicionales: `PDF de Ranking de Ventas generado optimizado en ${generationTime}ms para ${ventas.length} ventas.`
+        });
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="Ranking_Ventas_${new Date(fecha).toISOString().split('T')[0]}.pdf"`);
+        res.end(pdfBuffer);
+
+        console.log('✅ PDF de Ranking de Ventas enviado exitosamente');
+
+    } catch (error) {
+        console.error("❌ Error generando PDF de Ranking de Ventas:", error);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ranking_ventas',
+            detallesAdicionales: `Error generando PDF de Ranking de Ventas: ${error.message}`
+        });
+
+        res.status(500).json({
+            error: "Error al generar el PDF de Ranking de Ventas",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+
+
 // ✅ NUEVA FUNCIÓN - Generar PDFs múltiples de facturas
 const generarPdfFacturasMultiples = async (req, res) => {
     const { ventasIds } = req.body;
@@ -185,16 +233,23 @@ const generarPdfFacturasMultiples = async (req, res) => {
                     .replace('{{fecha}}', pdfGenerator.formatearFecha(ventaRows[0].fecha))
                     .replace('{{cliente_nombre}}', ventaRows[0].cliente_nombre);
                 
-                const itemsHTML = productos.map(producto => `
-                    <tr>
-                        <td>${producto.producto_id}</td>
-                        <td>${producto.producto_nombre}</td>
-                        <td>${producto.producto_um}</td>
-                        <td>${producto.cantidad}</td>
-                        <td style="text-align: right;">$${parseFloat(producto.precio).toFixed(2)}</td>
-                        <td style="text-align: right;">$${(parseFloat(producto.subtotal || 0) + parseFloat(producto.iva || producto.IVA || 0)).toFixed(2)}</td>
-                    </tr>
-                `).join('');
+                const itemsHTML = productos.map(producto => {
+                    const subtotal = parseFloat(producto.subtotal) || 0;
+                    const iva = parseFloat(producto.iva || producto.IVA) || 0;
+                    const total = subtotal + iva;
+                    const productoPrecioIva = (total  / producto.cantidad) ;
+
+                    return `
+                        <tr>
+                            <td>${producto.producto_id}</td>
+                            <td>${producto.producto_nombre}</td>
+                            <td>${producto.producto_um}</td>
+                            <td style="text-align: center;">${producto.cantidad}</td>
+                            <td style="text-align: right;">$${productoPrecioIva.toFixed(2)}</td>
+                            <td style="text-align: right;">$${total.toFixed(2)}</td>
+                        </tr>
+                    `;
+                }).join('');
                 
                 htmlTemplate = htmlTemplate.replace('{{items}}', itemsHTML);
                 
@@ -770,5 +825,6 @@ module.exports = {
     generarPdfFacturasMultiples,
     obtenerCuentasFondos,
     facturarPedido,
-    obtenerMovimientosCuenta
+    obtenerMovimientosCuenta,
+    generarPdfRankingVentas
 };

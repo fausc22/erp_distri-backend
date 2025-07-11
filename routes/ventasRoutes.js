@@ -40,6 +40,12 @@ router.post('/generarpdf-facturas-multiples',
     ventasController.generarPdfFacturasMultiples
 );
 
+router.post('/generarpdf-ranking-ventas', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
+    ventasController.generarPdfRankingVentas
+);
+
 router.get('/cuentas-fondos', 
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'cuenta_fondos' }),

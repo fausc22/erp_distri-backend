@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nota de Pedido</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 8mm 6mm 8mm 6mm;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #ffffff;
+            font-size: 13px;
+            line-height: 1.3;
+            -webkit-print-color-adjust: exact;
+            color-adjust: exact;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        .page-container {
+            width: 100%;
+            margin: 0;
+            padding: 8px;
+            box-sizing: border-box;
+            background-color: white;
+            page-break-inside: avoid;
+        }
+
+        .header-section {
+            border-bottom: 1px solid #e5e7eb;
+            padding-bottom: 8px;
+            margin-bottom: 10px;
+        }
+        
+        .main-title {
+            text-align: center;
+            font-size: 22px;
+            font-weight: bold;
+            color: #1f2937;
+            margin-bottom: 6px;
+        }
+
+        .company-info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            font-size: 11px;
+            color: #4b5563;
+            margin-top: 8px;
+        }
+
+        .main-content {
+            margin-bottom: 10px;
+        }
+
+        .np-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+
+        .np-logo {
+            font-size: 36px;
+            font-weight: 900;
+            color: #2563eb;
+            margin: 0;
+        }
+
+        .np-details {
+            text-align: right;
+            font-size: 14px;
+        }
+
+        .np-details p {
+            margin: 2px 0;
+        }
+
+        .details-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            color: #374151;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+
+        .details-grid p {
+            margin: 3px 0;
+        }
+
+        .product-table {
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .product-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+
+        .product-table th {
+            font-weight: bold;
+            background-color: #f3f4f6;
+            border-top: 2px solid #e5e7eb;
+            border-bottom: 2px solid #e5e7eb;
+            color: #374151;
+            padding: 6px 8px;
+            text-align: left;
+        }
+
+        .product-table td {
+            padding: 5px 8px;
+            text-align: left;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+
+        .product-table td:last-child {
+            text-align: right;
+        }
+
+        .footer-section {
+            text-align: center;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+
+        .observations {
+            margin-top: 8px;
+            font-size: 12px;
+        }
+
+        .thanks {
+            color: #6b7280;
+            margin-top: 8px;
+        }
+
+        /* Utilidades compactas */
+        .font-bold { font-weight: bold; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+    </style>
+</head>
+<body>
+    <div class="page-container">
+        <!-- Encabezado de la Distribuidora -->
+        <div class="header-section">
+            <h1 class="main-title">DISTRIBUIDORA VERTI-MAR SRL</h1>
+            <div class="company-info">
+                <p><strong>Dirección:</strong> 31 1555</p>
+                <p><strong>E-mail:</strong> vertimar@hotmail.com</p>
+                <p><strong>CUIT:</strong> 30714525030</p>
+                <p><strong>Ing. Brutos:</strong> 251491/4</p>
+                <p><strong>Inicio actividades:</strong> 01/02/2016</p>
+                <p><strong>IVA:</strong> Responsable Inscripto</p>
+            </div>
+        </div>
+
+        <!-- Sección de Nota de Pedido -->
+        <div class="main-content">
+            <div class="np-header">
+                <h2 class="np-logo">NP</h2>
+                <div class="np-details">
+                    <p class="font-bold">Nota de Pedido</p>
+                    <p><strong>Fecha:</strong> {{fecha}}</p>
+                    <p><strong>N:</strong> {{id}}</p>
+                </div>
+            </div>
+
+            <!-- Datos del Cliente y Vendedor -->
+            <div class="details-grid">
+                <p><strong>Persona:</strong> {{cliente_nombre}}</p>
+                <p><strong>Dirección:</strong> {{cliente_direccion}}</p>
+                <p><strong>Teléfonos:</strong> {{cliente_telefono}}</p>
+                <p><strong>Vendedor:</strong> {{empleado_nombre}}</p>
+            </div>
+
+            <!-- Tabla de Productos -->
+            <div class="product-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 8%;">Código</th>
+                            <th style="width: 33%;">Producto</th>
+                            <th style="width: 25%;">Descripción</th>
+                            <th style="width: 17%;">Unidad</th>
+                            <th style="width: 17%;">Cantidad</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{items}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="footer-section">
+            <div class="observations">
+                <p><strong>OBSERVACIONES:</strong> {{pedido_observacion}}</p>
+            </div>
+            <div class="thanks">
+                <p>Gracias por su preferencia.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
