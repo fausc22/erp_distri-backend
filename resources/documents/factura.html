@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FACTURA- DISTRIBUIDORA VERTI-MAR</title>
+    <title>FACTURA - DISTRIBUIDORA VERTI-MAR</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -66,21 +66,15 @@
 </head>
 <body>
     <div class="container">
-        <div class="header">DISTRIBUIDORA VERTI-MAR SRL</div>
-        <div class="header">X </div>
-
-        <div class="info2">
-            <h3><strong>Fecha:</strong> {{fecha}}</h3>
-            <p><strong>DISTRIBUIDORA VERTI-MAR SRL</strong></p>
-            <p><strong>Dirección:</strong> Calle 31 N 1555</p>
-            <p><strong>Teléfono:</strong> +54-2302-651250</p>
-            <p><strong>Condición frente al IVA:</strong> RESPONSABLE INSCRIPTO</p>
-        </div>
+        
+        <div class="header">X</div>
+        <h3><strong>Fecha:</strong> {{fecha}}</h3>
+        
 
         <div class="info">
             <p><strong>DESTINATARIO</strong></p>
             <p><strong>Señor/es:</strong> {{cliente_nombre}}</p>
-            
+            <p><strong>Direccion:</strong> {{cliente_direccion}}</p>
         </div>
 
         <h2 style="text-align: center;">DETALLE</h2>
@@ -91,15 +85,14 @@
                 <th style="width: 10%;">Unidad</th>
                 <th style="width: 8%;">Cantidad</th>
                 <th style="width: 15%;">Precio ($)</th>
-                
                 <th style="width: 15%;">Subtotal ($)</th>
             </tr>
             {{items}}
         </table>
 
         <div class="info2">
-            <hr style="border-top: 1px solid #000; margin-top: 10px; margin-top: 70px;">
-            <p style="font-size: 18px; font-weight: bold; "><strong>Total:</strong> ${{total}}</p>
+            <hr style="border-top: 1px solid #000; margin-top: 70px;">
+            <p style="font-size: 18px; font-weight: bold;"><strong>Total:</strong> ${{total}}</p>
         </div>
 
         <div class="footer">

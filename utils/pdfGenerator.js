@@ -9,31 +9,31 @@ class PdfGenerator {
 
     // ✅ FORMATEAR FECHA
     formatearFecha(fechaBD) {
-        if (!fechaBD) return 'Fecha no disponible';
-        
-        try {
-            const fecha = new Date(fechaBD);
-            
-            if (isNaN(fecha.getTime())) {
-                console.warn('Fecha inválida recibida:', fechaBD);
-                return 'Fecha inválida';
-            }
-            
-            const dia = String(fecha.getDate()).padStart(2, '0');
-            const mes = String(fecha.getMonth() + 1).padStart(2, '0');
-            const año = fecha.getFullYear();
-            
-            const horas = String(fecha.getHours()).padStart(2, '0');
-            const minutos = String(fecha.getMinutes()).padStart(2, '0');
-            const segundos = String(fecha.getSeconds()).padStart(2, '0');
-            
-            return `${dia}/${mes}/${año} - ${horas}:${minutos}:${segundos}`;
-            
-        } catch (error) {
-            console.error('Error formateando fecha:', error, 'Fecha original:', fechaBD);
-            return 'Error en fecha';
+    if (!fechaBD) return 'Fecha no disponible';
+
+    try {
+        const fecha = new Date(fechaBD);
+
+        if (isNaN(fecha.getTime())) {
+            console.warn('Fecha inválida recibida:', fechaBD);
+            return 'Fecha inválida';
         }
+
+        const opciones = {
+            timeZone: 'America/Argentina/Buenos_Aires',
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric'
+        };
+
+        return fecha.toLocaleDateString('es-AR', opciones); // Solo devuelve la parte de la fecha
+    } catch (error) {
+        console.error('Error formateando fecha:', error, 'Fecha original:', fechaBD);
+        return 'Error en fecha';
     }
+}
+
+
 
     // ✅ CONFIGURACIÓN INTELIGENTE (DESARROLLO vs PRODUCCIÓN)
     getOptions(customOptions = {}) {
@@ -136,7 +136,9 @@ class PdfGenerator {
         const fechaFormateada = this.formatearFecha(venta.fecha);
         htmlTemplate = htmlTemplate
             .replace(/{{fecha}}/g, fechaFormateada)
-            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado');
+            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
+            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
+
 
         const itemsHTML = productos.map(producto => {
             const subtotal = parseFloat(producto.subtotal) || 0;
@@ -375,8 +377,8 @@ class PdfGenerator {
         const fechaFormateada = this.formatearFecha(venta.fecha);
         htmlTemplate = htmlTemplate
             .replace(/{{fecha}}/g, fechaFormateada)
-            
-            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado');
+            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
+            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
 
 
         const itemsHTML = productos.map(producto => {

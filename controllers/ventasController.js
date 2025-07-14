@@ -231,7 +231,9 @@ const generarPdfFacturasMultiples = async (req, res) => {
                 
                 htmlTemplate = htmlTemplate
                     .replace('{{fecha}}', pdfGenerator.formatearFecha(ventaRows[0].fecha))
-                    .replace('{{cliente_nombre}}', ventaRows[0].cliente_nombre);
+                    .replace('{{cliente_nombre}}', ventaRows[0].cliente_nombre)
+                    .replace('{{cliente_direccion}}', ventaRows[0].cliente_direccion);
+
                 
                 const itemsHTML = productos.map(producto => {
                     const subtotal = parseFloat(producto.subtotal) || 0;
