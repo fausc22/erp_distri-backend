@@ -45,13 +45,31 @@ const formatearFecha = (fechaBD) => {
 
 const buscarCliente = (req, res) => {
     const rawSearch = req.query.q || req.query.search || '';
+    
+    // ✅ SI NO HAY BÚSQUEDA, DEVOLVER TODOS (para PWA)
+    if (!rawSearch || rawSearch.trim() === '') {
+        const queryTodos = `
+            SELECT * FROM clientes
+            ORDER BY nombre ASC
+        `;
+        
+        db.query(queryTodos, (err, results) => {
+            if (err) {
+                console.error('Error al obtener todos los clientes:', err);
+                return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
+            }
+            console.log(`📦 Enviando TODOS los clientes: ${results.length}`);
+            res.json({ success: true, data: results });
+        });
+        return;
+    }
+    
+    // ✅ CON BÚSQUEDA, FILTRAR PERO SIN LÍMITE DE 10
     const searchTerm = `%${rawSearch}%`;
-
     const query = `
         SELECT * FROM clientes
         WHERE nombre LIKE ?
         ORDER BY nombre ASC
-        LIMIT 10;
     `;
 
     db.query(query, [searchTerm], (err, results) => {
@@ -59,19 +77,41 @@ const buscarCliente = (req, res) => {
             console.error('Error al obtener los clientes:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
         }
+        console.log(`🔍 Búsqueda clientes "${rawSearch}": ${results.length} resultados`);
         res.json({ success: true, data: results });
     });
 };
 
+
+
 const buscarProducto = (req, res) => {
     const rawSearch = req.query.q || req.query.search || '';
+    
+    // ✅ SI NO HAY BÚSQUEDA, DEVOLVER TODOS (para PWA)
+    if (!rawSearch || rawSearch.trim() === '') {
+        const queryTodos = `
+            SELECT * FROM productos
+            WHERE stock_actual >= 0
+            ORDER BY nombre ASC
+        `;
+        
+        db.query(queryTodos, (err, results) => {
+            if (err) {
+                console.error('Error al obtener todos los productos:', err);
+                return res.status(500).json({ success: false, message: "Error al obtener los productos" });
+            }
+            console.log(`📦 Enviando TODOS los productos: ${results.length}`);
+            res.json({ success: true, data: results });
+        });
+        return;
+    }
+    
+    // ✅ CON BÚSQUEDA, FILTRAR PERO SIN LÍMITE DE 10
     const searchTerm = `%${rawSearch}%`;
-
     const query = `
         SELECT * FROM productos
         WHERE nombre LIKE ?
         ORDER BY nombre ASC
-        LIMIT 10;
     `;
 
     db.query(query, [searchTerm], (err, results) => {
@@ -79,9 +119,13 @@ const buscarProducto = (req, res) => {
             console.error('Error al obtener los productos:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los productos" });
         }
+        console.log(`🔍 Búsqueda productos "${rawSearch}": ${results.length} resultados`);
         res.json({ success: true, data: results });
     });
 };
+
+
+
 
 /**
  * Función genérica para actualizar stock de productos
@@ -1346,6 +1390,141 @@ const recalcularYActualizarTotalesPedido = async (pedidoId) => {
     });
 };
 
+
+const obtenerCatalogoCompleto = async (req, res) => {
+    try {
+        console.log('📦 Solicitando catálogo completo para PWA...');
+        const startTime = Date.now();
+
+        // ✅ CONSULTAR TODOS LOS CLIENTES ACTIVOS
+        const queryClientes = `
+            SELECT id, nombre, nombre_alternativo, condicion_iva, cuit, dni, 
+                   direccion, ciudad, provincia, telefono, email
+            FROM clientes 
+            ORDER BY nombre ASC
+        `;
+
+        // ✅ CONSULTAR TODOS LOS PRODUCTOS CON STOCK > 0
+        const queryProductos = `
+            SELECT id, nombre, unidad_medida, precio, iva, stock_actual
+            FROM productos 
+            WHERE stock_actual >= 0
+            ORDER BY nombre ASC
+        `;
+
+        // ✅ EJECUTAR CONSULTAS EN PARALELO
+        const [clientesResults, productosResults] = await Promise.all([
+            new Promise((resolve, reject) => {
+                db.query(queryClientes, (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results);
+                });
+            }),
+            new Promise((resolve, reject) => {
+                db.query(queryProductos, (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results);
+                });
+            })
+        ]);
+
+        const processingTime = Date.now() - startTime;
+
+        // ✅ PREPARAR RESPUESTA OPTIMIZADA
+        const catalogoCompleto = {
+            clientes: clientesResults,
+            productos: productosResults,
+            metadata: {
+                version: Date.now().toString(), // Timestamp como versión
+                totalClientes: clientesResults.length,
+                totalProductos: productosResults.length,
+                generadoEn: new Date().toISOString(),
+                tiempoProcesamiento: `${processingTime}ms`
+            }
+        };
+
+        // ✅ AUDITAR DESCARGA DE CATÁLOGO
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'catalogo_completo',
+            detallesAdicionales: `Catálogo completo descargado: ${clientesResults.length} clientes, ${productosResults.length} productos en ${processingTime}ms`
+        });
+
+        console.log(`✅ Catálogo completo enviado: ${clientesResults.length} clientes, ${productosResults.length} productos (${processingTime}ms)`);
+
+        res.json({
+            success: true,
+            data: catalogoCompleto,
+            message: `Catálogo completo: ${clientesResults.length} clientes, ${productosResults.length} productos`
+        });
+
+    } catch (error) {
+        console.error('❌ Error obteniendo catálogo completo:', error);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'catalogo_completo',
+            detallesAdicionales: `Error obteniendo catálogo completo: ${error.message}`
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Error al obtener catálogo completo',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+
+const verificarVersionCatalogo = async (req, res) => {
+    try {
+        const { version: versionCliente } = req.query;
+
+        // ✅ OBTENER METADATA RÁPIDA SIN TRAER TODOS LOS DATOS
+        const queryCounts = `
+            SELECT 
+                (SELECT COUNT(*) FROM clientes) as total_clientes,
+                (SELECT COUNT(*) FROM productos WHERE stock_actual >= 0) as total_productos,
+                (SELECT MAX(id) FROM clientes) as max_cliente_id,
+                (SELECT MAX(id) FROM productos) as max_producto_id
+        `;
+
+        const [results] = await new Promise((resolve, reject) => {
+            db.query(queryCounts, (err, results) => {
+                if (err) return reject(err);
+                resolve([results]);
+            });
+        });
+
+        const counts = results[0];
+        
+        // ✅ GENERAR VERSIÓN BASADA EN DATOS ACTUALES
+        const versionServidor = `${counts.total_clientes}_${counts.total_productos}_${counts.max_cliente_id}_${counts.max_producto_id}`;
+        const necesitaActualizacion = versionCliente !== versionServidor;
+
+        res.json({
+            success: true,
+            data: {
+                versionServidor,
+                versionCliente: versionCliente || 'sin_version',
+                necesitaActualizacion,
+                metadata: {
+                    totalClientes: counts.total_clientes,
+                    totalProductos: counts.total_productos,
+                    verificadoEn: new Date().toISOString()
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error verificando versión del catálogo:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error al verificar versión del catálogo'
+        });
+    }
+};
+
 module.exports = {
      // Funciones de búsqueda
     buscarCliente,
@@ -1374,5 +1553,8 @@ module.exports = {
     
     generarPdfNotaPedido,
     generarPdfNotasPedidoMultiples,
-    obtenerDatosFiltros
+    obtenerDatosFiltros,
+
+    obtenerCatalogoCompleto,
+    verificarVersionCatalogo
 };

@@ -109,4 +109,16 @@ router.get('/datos-filtros',
     pedidosController.obtenerDatosFiltros
 );
 
+router.get('/catalogo-completo', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'catalogo_completo' }),
+    pedidosController.obtenerCatalogoCompleto
+);
+
+router.get('/verificar-version-catalogo', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'catalogo_version', incluirQuery: true }),
+    pedidosController.verificarVersionCatalogo
+);
+
 module.exports = router;
