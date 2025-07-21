@@ -156,4 +156,41 @@ router.get('/ventas-productos',
     finanzasController.obtenerProductosMasVendidos
 );
 
+
+router.get('/ganancias-detalladas', 
+    requireManager,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),
+    finanzasController.obtenerGananciasDetalladas
+);
+
+router.get('/ganancias-por-producto', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),
+    finanzasController.obtenerGananciasPorProducto
+);
+
+router.get('/ganancias-por-empleado', 
+    requireManager,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),
+    finanzasController.obtenerGananciasPorEmpleado
+);
+
+router.get('/ganancias-por-ciudad', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),
+    finanzasController.obtenerGananciasPorCiudad
+);
+
+router.get('/resumen-financiero', 
+    requireManager,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),
+    finanzasController.obtenerResumenFinanciero
+);
+
+router.get('/productos-mas-rentables', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),
+    finanzasController.obtenerProductosMasRentables
+);
+
 module.exports = router;
