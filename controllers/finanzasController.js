@@ -1081,7 +1081,7 @@ const obtenerGastosPorCategoria = (req, res) => {
     ${filtroFecha ? 'AND ' + filtroFecha.substring(6) : ''}
     GROUP BY origen
     ORDER BY total DESC
-    LIMIT ${parseInt(limite)}
+    
   `;
   
   db.query(queryGastos, params, (err, results) => {
@@ -1278,10 +1278,10 @@ const obtenerProductosMasVendidos = (req, res) => {
     ${filtroFecha}
     GROUP BY dv.producto_nombre
     ORDER BY total_vendida DESC
-    LIMIT ?
+    
   `;
 
-  params.push(parseInt(limite));
+  
 
   db.query(query, params, (err, results) => {
     if (err) {
@@ -1303,27 +1303,145 @@ const obtenerProductosMasVendidos = (req, res) => {
 
 const obtenerGananciasDetalladas = async (req, res) => {
   try {
-    const { desde, hasta, periodo = 'mensual' } = req.query;
+    let { desde, hasta, periodo = 'mensual' } = req.query;
     
-    let dateFormat, groupBy;
-    switch(periodo) {
-      case 'diario':
-        dateFormat = '%Y-%m-%d';
-        groupBy = 'DATE(v.fecha)';
-        break;
-      case 'mensual':
-        dateFormat = '%Y-%m';
-        groupBy = 'DATE_FORMAT(v.fecha, \'%Y-%m\')';
-        break;
-      case 'anual':
-        dateFormat = '%Y';
-        groupBy = 'YEAR(v.fecha)';
-        break;
-      default:
-        dateFormat = '%Y-%m';
-        groupBy = 'DATE_FORMAT(v.fecha, \'%Y-%m\')';
+    // ✅ AUTOCOMPLETAR FECHAS SI FALTAN
+    if (!desde || !hasta) {
+      const ahora = new Date();
+      const primerDiaDelMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
+      
+      desde = desde || primerDiaDelMes.toISOString().split('T')[0];
+      hasta = hasta || ahora.toISOString().split('T')[0];
+    }
+    
+    console.log('🔍 Obteniendo ganancias detalladas:', { desde, hasta, periodo });
+    
+    // ✅ VALIDACIÓN DE FECHAS
+    const fechaDesde = new Date(desde);
+    const fechaHasta = new Date(hasta);
+    
+    if (isNaN(fechaDesde.getTime()) || isNaN(fechaHasta.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Formato de fecha inválido'
+      });
     }
 
+    if (fechaDesde > fechaHasta) {
+      return res.status(400).json({
+        success: false,
+        message: 'La fecha desde no puede ser mayor que hasta'
+      });
+    }
+
+    // ✅ CONFIGURACIÓN MEJORADA PARA PERÍODO
+    let dateFormat, groupBy;
+    const diasEnPeriodo = Math.ceil((fechaHasta - fechaDesde) / (1000 * 60 * 60 * 24));
+    
+    // ✅ LÓGICA INTELIGENTE PARA PERÍODO
+    if (periodo === 'anual' || diasEnPeriodo > 365) {
+      // Para períodos muy largos, agrupar por año
+      dateFormat = '%Y';
+      groupBy = 'YEAR(v.fecha)';
+    } else if (periodo === 'mensual' || diasEnPeriodo > 60) {
+      // Para períodos medianos, agrupar por mes
+      dateFormat = '%Y-%m';
+      groupBy = 'DATE_FORMAT(v.fecha, \'%Y-%m\')';
+    } else {
+      // Para períodos cortos, agrupar por día
+      dateFormat = '%Y-%m-%d';
+      groupBy = 'DATE(v.fecha)';
+    }
+
+    // ✅ FILTRO DE FECHA CORREGIDO
+    const filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
+
+    const query = `
+      SELECT 
+        DATE_FORMAT(v.fecha, '${dateFormat}') as periodo,
+        COUNT(v.id) as total_ventas,
+        COALESCE(SUM(v.total), 0) as ingresos_totales,
+        COALESCE(SUM(
+          CASE 
+            WHEN p.costo > 0 AND p.costo IS NOT NULL 
+            THEN (vc.precio - p.costo) * vc.cantidad
+            ELSE vc.precio * vc.cantidad * 0.25
+          END
+        ), 0) as ganancia_estimada,
+        COALESCE(AVG(v.total), 0) as factura_promedio,
+        COUNT(CASE WHEN p.costo > 0 THEN 1 END) as productos_con_costo,
+        COUNT(CASE WHEN p.costo IS NULL OR p.costo = 0 THEN 1 END) as productos_sin_costo
+      FROM ventas v
+      JOIN ventas_cont vc ON v.id = vc.venta_id
+      LEFT JOIN productos p ON vc.producto_id = p.id
+      ${filtroFecha}
+      GROUP BY DATE_FORMAT(v.fecha, '${dateFormat}')
+      ORDER BY DATE_FORMAT(v.fecha, '${dateFormat}') ASC
+    `;
+
+    // ✅ PARÁMETROS CORREGIDOS (SIN LÍMITE)
+    const params = [desde, hasta];
+
+    console.log('📊 Ejecutando query con período:', periodo, 'Días:', diasEnPeriodo);
+
+    db.query(query, params, (err, results) => {
+      if (err) {
+        console.error('❌ Error obteniendo ganancias detalladas:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Error al obtener ganancias detalladas: ' + err.message
+        });
+      }
+
+      console.log(`✅ Resultados obtenidos: ${results.length} registros`);
+
+      if (results.length === 0) {
+        return res.json({
+          success: true,
+          data: [],
+          totales: {
+            total_ventas: 0,
+            ingresos_totales: 0,
+            ganancia_estimada: 0
+          },
+          periodo,
+          message: 'No se encontraron datos para el período seleccionado'
+        });
+      }
+
+      // ✅ CÁLCULO DE TOTALES
+      const totales = {
+        total_ventas: results.reduce((acc, row) => acc + parseInt(row.total_ventas || 0), 0),
+        ingresos_totales: results.reduce((acc, row) => acc + parseFloat(row.ingresos_totales || 0), 0),
+        ganancia_estimada: results.reduce((acc, row) => acc + parseFloat(row.ganancia_estimada || 0), 0),
+        productos_con_costo: results.reduce((acc, row) => acc + parseInt(row.productos_con_costo || 0), 0),
+        productos_sin_costo: results.reduce((acc, row) => acc + parseInt(row.productos_sin_costo || 0), 0)
+      };
+
+      res.json({
+        success: true,
+        data: results,
+        totales,
+        periodo: diasEnPeriodo > 365 ? 'anual' : diasEnPeriodo > 60 ? 'mensual' : 'diario',
+        filtros_aplicados: { desde, hasta, periodo }
+      });
+    });
+
+  } catch (error) {
+    console.error('💥 Error en obtenerGananciasDetalladas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor: ' + error.message
+    });
+  }
+};
+
+
+
+const obtenerTopProductosTabla = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    
     let filtroFecha = '';
     const params = [];
     
@@ -1340,55 +1458,60 @@ const obtenerGananciasDetalladas = async (req, res) => {
 
     const query = `
       SELECT 
-        DATE_FORMAT(v.fecha, '${dateFormat}') as periodo,
-        COUNT(v.id) as total_ventas,
-        SUM(v.total) as ingresos_totales,
+        vc.producto_id,
+        vc.producto_nombre,
+        c.nombre as categoria,
+        p.costo,
+        AVG(vc.precio) as precio_promedio,
+        SUM(vc.cantidad) as cantidad_vendida,
+        SUM(vc.precio * vc.cantidad) as ingresos_producto,
         SUM(
           CASE 
-            WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.3
+            WHEN p.costo > 0 AND p.costo IS NOT NULL 
+            THEN (vc.precio - p.costo) * vc.cantidad
+            ELSE vc.precio * vc.cantidad * 0.25
           END
-        ) as ganancia_estimada,
-        AVG(v.total) as ticket_promedio
-      FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
+        ) as ganancia_total,
+        (
+          CASE 
+            WHEN p.costo > 0 AND p.costo IS NOT NULL 
+            THEN 'Con costo'
+            ELSE 'Estimado'
+          END
+        ) as tipo_calculo
+      FROM ventas_cont vc
+      JOIN ventas v ON vc.venta_id = v.id
       LEFT JOIN productos p ON vc.producto_id = p.id
+      LEFT JOIN categorias c ON p.categoria_id = c.id
       ${filtroFecha}
-      GROUP BY ${groupBy}
-      ORDER BY ${groupBy} ASC
+      GROUP BY vc.producto_id, vc.producto_nombre, c.nombre, p.costo
+      ORDER BY ganancia_total DESC
     `;
 
     db.query(query, params, (err, results) => {
       if (err) {
-        console.error('Error obteniendo ganancias detalladas:', err);
+        console.error('Error obteniendo top productos tabla:', err);
         return res.status(500).json({
           success: false,
-          message: 'Error al obtener ganancias detalladas'
+          message: 'Error al obtener top productos tabla'
         });
       }
 
-      const totales = {
-        total_ventas: results.reduce((acc, row) => acc + parseInt(row.total_ventas), 0),
-        ingresos_totales: results.reduce((acc, row) => acc + parseFloat(row.ingresos_totales), 0),
-        ganancia_estimada: results.reduce((acc, row) => acc + parseFloat(row.ganancia_estimada), 0)
-      };
-
       res.json({
         success: true,
-        data: results,
-        totales,
-        periodo
+        data: results
       });
     });
 
   } catch (error) {
-    console.error('Error obteniendo ganancias detalladas:', error);
+    console.error('Error obteniendo top productos tabla:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener ganancias detalladas'
+      message: 'Error al obtener top productos tabla'
     });
   }
 };
+
 
 // ✅ OBTENER GANANCIAS POR PRODUCTO - Compatible con tu BD
 const obtenerGananciasPorProducto = async (req, res) => {
@@ -1438,10 +1561,10 @@ const obtenerGananciasPorProducto = async (req, res) => {
       ${filtroFecha}
       GROUP BY vc.producto_id, vc.producto_nombre, p.costo
       ORDER BY ganancia_estimada DESC
-      LIMIT ?
+      
     `;
 
-    params.push(parseInt(limite));
+    
 
     db.query(query, params, (err, results) => {
       if (err) {
@@ -1470,69 +1593,87 @@ const obtenerGananciasPorProducto = async (req, res) => {
 // ✅ OBTENER GANANCIAS POR CIUDAD - Compatible con tu BD
 const obtenerGananciasPorCiudad = async (req, res) => {
   try {
-    const { desde, hasta, limite = 15 } = req.query;
+    let { desde, hasta, limite = 10 } = req.query;
     
-    let filtroFecha = '';
-    const params = [];
-    
-    if (desde && hasta) {
-      filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
-      params.push(desde, hasta);
-    } else if (desde) {
-      filtroFecha = 'WHERE v.fecha >= ?';
-      params.push(desde);
-    } else if (hasta) {
-      filtroFecha = 'WHERE v.fecha <= ?';
-      params.push(hasta);
+    if (!desde || !hasta) {
+      const ahora = new Date();
+      const hace30Dias = new Date();
+      hace30Dias.setDate(ahora.getDate() - 30);
+      
+      desde = desde || hace30Dias.toISOString().split('T')[0];
+      hasta = hasta || ahora.toISOString().split('T')[0];
     }
 
     const query = `
       SELECT 
-        v.cliente_ciudad as ciudad,
-        v.cliente_provincia as provincia,
+        COALESCE(v.cliente_ciudad, 'Sin ciudad') as ciudad,
+        COALESCE(v.cliente_provincia, 'Sin provincia') as provincia,
         COUNT(v.id) as total_ventas,
         COUNT(DISTINCT v.cliente_id) as clientes_unicos,
         SUM(v.total) as ingresos_totales,
         SUM(
           CASE 
-            WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.3
+            WHEN p.costo > 0 AND p.costo IS NOT NULL 
+            THEN (vc.precio - p.costo) * vc.cantidad
+            ELSE vc.precio * vc.cantidad * 0.25
           END
         ) as ganancia_estimada,
-        AVG(v.total) as ticket_promedio
+        AVG(v.total) as factura_promedio,
+        ROUND(
+          (SUM(
+            CASE 
+              WHEN p.costo > 0 AND p.costo IS NOT NULL 
+              THEN (vc.precio - p.costo) * vc.cantidad
+              ELSE vc.precio * vc.cantidad * 0.25
+            END
+          ) / SUM(v.total) * 100), 2
+        ) as margen_promedio
       FROM ventas v
       JOIN ventas_cont vc ON v.id = vc.venta_id
       LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha}
-      ${filtroFecha ? 'AND' : 'WHERE'} v.cliente_ciudad IS NOT NULL 
-      AND v.cliente_ciudad != ''
-      GROUP BY v.cliente_ciudad, v.cliente_provincia
+      WHERE v.fecha BETWEEN ? AND ?
+      GROUP BY COALESCE(v.cliente_ciudad, 'Sin ciudad'), COALESCE(v.cliente_provincia, 'Sin provincia')
       ORDER BY ganancia_estimada DESC
-      LIMIT ?
+      
     `;
 
-    params.push(parseInt(limite));
+    const params = [desde, hasta];
 
     db.query(query, params, (err, results) => {
       if (err) {
-        console.error('Error obteniendo ganancias por ciudad:', err);
+        console.error('❌ Error obteniendo ganancias por ciudad:', err);
         return res.status(500).json({
           success: false,
           message: 'Error al obtener ganancias por ciudad'
         });
       }
 
+      // Calcular totales para porcentajes
+      const totalIngresos = results.reduce((acc, item) => acc + parseFloat(item.ingresos_totales), 0);
+      
+      // Agregar porcentajes
+      const dataConPorcentaje = results.map(item => ({
+        ...item,
+        porcentaje_ingresos: totalIngresos > 0 ? 
+          (parseFloat(item.ingresos_totales) / totalIngresos * 100).toFixed(1) : 0
+      }));
+
       res.json({
         success: true,
-        data: results
+        data: dataConPorcentaje,
+        info: {
+          total_ciudades: results.length,
+          ciudad_top: results[0]?.ciudad || 'N/A',
+          ingresos_totales: totalIngresos
+        }
       });
     });
 
   } catch (error) {
-    console.error('Error obteniendo ganancias por ciudad:', error);
+    console.error('💥 Error en obtenerGananciasPorCiudad:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener ganancias por ciudad'
+      message: 'Error interno del servidor: ' + error.message
     });
   }
 };
@@ -1540,12 +1681,24 @@ const obtenerGananciasPorCiudad = async (req, res) => {
 // ✅ OBTENER RESUMEN FINANCIERO - Adaptado a tu estructura BD
 const obtenerResumenFinanciero = async (req, res) => {
   try {
-    const { desde, hasta } = req.query;
+    let { desde, hasta } = req.query;
+    
+    console.log('🔍 Obteniendo resumen financiero:', { desde, hasta });
     
     let filtroFecha = '';
     const params = [];
     
     if (desde && hasta) {
+      const fechaDesde = new Date(desde);
+      const fechaHasta = new Date(hasta);
+      
+      if (isNaN(fechaDesde.getTime()) || isNaN(fechaHasta.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Formato de fecha inválido. Use YYYY-MM-DD'
+        });
+      }
+      
       filtroFecha = 'WHERE fecha BETWEEN ? AND ?';
       params.push(desde, hasta);
     } else if (desde) {
@@ -1556,88 +1709,111 @@ const obtenerResumenFinanciero = async (req, res) => {
       params.push(hasta);
     }
 
-    // Obtener datos de ventas
+    // ✅ QUERY DE VENTAS SIN DUPLICACIÓN
     const queryVentas = `
       SELECT 
         COUNT(*) as total_ventas,
-        SUM(total) as ingresos_ventas,
-        AVG(total) as ticket_promedio
+        COALESCE(SUM(total), 0) as ingresos_ventas,
+        COALESCE(AVG(total), 0) as ticket_promedio
       FROM ventas 
       ${filtroFecha}
     `;
 
-    // Obtener ganancias estimadas
+    // ✅ QUERY DE GANANCIAS CORREGIDA - Evitar duplicación
     const queryGanancias = `
       SELECT 
-        SUM(
-          CASE 
-            WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.3
-          END
-        ) as ganancia_total_estimada
-      FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
-      LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha ? filtroFecha.replace('fecha', 'v.fecha') : ''}
+        COALESCE(SUM(ganancia_por_venta), 0) as ganancia_total_estimada
+      FROM (
+        SELECT 
+          v.id,
+          SUM(
+            CASE 
+              WHEN p.costo > 0 AND p.costo IS NOT NULL 
+              THEN (vc.precio - p.costo) * vc.cantidad
+              ELSE vc.precio * vc.cantidad * 0.25
+            END
+          ) as ganancia_por_venta
+        FROM ventas v
+        JOIN ventas_cont vc ON v.id = vc.venta_id
+        LEFT JOIN productos p ON vc.producto_id = p.id
+        ${filtroFecha ? filtroFecha.replace('fecha', 'v.fecha') : ''}
+        GROUP BY v.id
+      ) as ganancias_agrupadas
     `;
 
-    // ✅ CORREGIDO: Obtener egresos (solo movimientos, gastos están separados)
     const queryEgresos = `
       SELECT 
-        SUM(monto) as total_egresos
+        COALESCE(SUM(monto), 0) as total_egresos
       FROM movimiento_fondos 
       WHERE tipo = 'EGRESO'
       ${filtroFecha ? `AND ${filtroFecha.replace('WHERE ', '')}` : ''}
     `;
 
-    // ✅ Obtener gastos directos (tabla gastos de tu BD)
     const queryGastos = `
       SELECT 
         COUNT(*) as total_gastos,
-        SUM(monto) as total_gastos_monto
+        COALESCE(SUM(monto), 0) as total_gastos_monto
       FROM gastos 
       ${filtroFecha}
     `;
 
-    // ✅ Obtener compras (usando tu estructura)
     const queryCompras = `
       SELECT 
         COUNT(*) as total_compras,
-        SUM(total) as total_compras_monto
+        COALESCE(SUM(total), 0) as total_compras_monto
       FROM compras 
       ${filtroFecha}
     `;
 
-    // Ejecutar queries en paralelo
     const queryPromises = [
-      new Promise((resolve, reject) => {
+      new Promise((resolve) => {
         db.query(queryVentas, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results[0]);
+          if (err) {
+            console.warn('⚠️ Error en query ventas:', err.message);
+            resolve({ total_ventas: 0, ingresos_ventas: 0, ticket_promedio: 0 });
+          } else {
+            resolve(results[0] || { total_ventas: 0, ingresos_ventas: 0, ticket_promedio: 0 });
+          }
         });
       }),
-      new Promise((resolve, reject) => {
+      new Promise((resolve) => {
         db.query(queryGanancias, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results[0]);
+          if (err) {
+            console.warn('⚠️ Error en query ganancias:', err.message);
+            resolve({ ganancia_total_estimada: 0 });
+          } else {
+            resolve(results[0] || { ganancia_total_estimada: 0 });
+          }
         });
       }),
-      new Promise((resolve, reject) => {
+      new Promise((resolve) => {
         db.query(queryEgresos, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results[0]);
+          if (err) {
+            console.warn('⚠️ Error en query egresos:', err.message);
+            resolve({ total_egresos: 0 });
+          } else {
+            resolve(results[0] || { total_egresos: 0 });
+          }
         });
       }),
-      new Promise((resolve, reject) => {
+      new Promise((resolve) => {
         db.query(queryGastos, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results[0]);
+          if (err) {
+            console.warn('⚠️ Error en query gastos:', err.message);
+            resolve({ total_gastos: 0, total_gastos_monto: 0 });
+          } else {
+            resolve(results[0] || { total_gastos: 0, total_gastos_monto: 0 });
+          }
         });
       }),
-      new Promise((resolve, reject) => {
+      new Promise((resolve) => {
         db.query(queryCompras, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results[0]);
+          if (err) {
+            console.warn('⚠️ Error en query compras:', err.message);
+            resolve({ total_compras: 0, total_compras_monto: 0 });
+          } else {
+            resolve(results[0] || { total_compras: 0, total_compras_monto: 0 });
+          }
         });
       })
     ];
@@ -1655,7 +1831,7 @@ const obtenerResumenFinanciero = async (req, res) => {
       ventas: {
         total_ventas: parseInt(ventasResults.total_ventas) || 0,
         ingresos_totales: ingresos,
-        ticket_promedio: parseFloat(ventasResults.ticket_promedio) || 0
+        factura_promedio: parseFloat(ventasResults.ticket_promedio) || 0
       },
       ganancias: {
         ganancia_estimada: ganancias,
@@ -1675,71 +1851,74 @@ const obtenerResumenFinanciero = async (req, res) => {
       }
     };
 
+    console.log('✅ Resumen financiero calculado exitosamente');
+
     res.json({
       success: true,
       data: resumen
     });
 
   } catch (error) {
-    console.error('Error obteniendo resumen financiero:', error);
+    console.error('💥 Error obteniendo resumen financiero:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener resumen financiero'
+      message: 'Error al obtener resumen financiero: ' + error.message
     });
   }
 };
 
+
 // ✅ OBTENER GANANCIAS POR EMPLEADO - Compatible con tu BD
 const obtenerGananciasPorEmpleado = async (req, res) => {
   try {
-    const { desde, hasta } = req.query;
+    let { desde, hasta } = req.query;
     
-    let filtroFecha = '';
-    const params = [];
-    
-    if (desde && hasta) {
-      filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
-      params.push(desde, hasta);
-    } else if (desde) {
-      filtroFecha = 'WHERE v.fecha >= ?';
-      params.push(desde);
-    } else if (hasta) {
-      filtroFecha = 'WHERE v.fecha <= ?';
-      params.push(hasta);
+    if (!desde || !hasta) {
+      const ahora = new Date();
+      const primerDiaDelMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
+      
+      desde = desde || primerDiaDelMes.toISOString().split('T')[0];
+      hasta = hasta || ahora.toISOString().split('T')[0];
     }
 
+    // ✅ QUERY CORREGIDA SIN DUPLICACIÓN
     const query = `
       SELECT 
         v.empleado_id,
         v.empleado_nombre,
         COUNT(v.id) as total_ventas,
         SUM(v.total) as ingresos_generados,
-        SUM(
-          CASE 
-            WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.3
-          END
-        ) as ganancia_generada,
-        AVG(v.total) as ticket_promedio,
-        (
+        SUM(ganancias_por_venta.ganancia_venta) as ganancia_generada,
+        AVG(v.total) as factura_promedio,
+        MIN(v.fecha) as primera_venta,
+        MAX(v.fecha) as ultima_venta,
+        COUNT(DISTINCT v.cliente_id) as clientes_atendidos,
+        (SUM(ganancias_por_venta.ganancia_venta) / SUM(v.total) * 100) as margen_promedio
+      FROM ventas v
+      JOIN (
+        SELECT 
+          vc.venta_id,
           SUM(
             CASE 
-              WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-              ELSE vc.precio * vc.cantidad * 0.3
+              WHEN p.costo > 0 AND p.costo IS NOT NULL 
+              THEN (vc.precio - p.costo) * vc.cantidad
+              ELSE vc.precio * vc.cantidad * 0.25
             END
-          ) / SUM(v.total) * 100
-        ) as margen_promedio
-      FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
-      LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha}
+          ) as ganancia_venta
+        FROM ventas_cont vc
+        LEFT JOIN productos p ON vc.producto_id = p.id
+        GROUP BY vc.venta_id
+      ) as ganancias_por_venta ON v.id = ganancias_por_venta.venta_id
+      WHERE v.fecha BETWEEN ? AND ?
       GROUP BY v.empleado_id, v.empleado_nombre
       ORDER BY ganancia_generada DESC
     `;
 
+    const params = [desde, hasta];
+
     db.query(query, params, (err, results) => {
       if (err) {
-        console.error('Error obteniendo ganancias por empleado:', err);
+        console.error('❌ Error obteniendo ganancias por empleado:', err);
         return res.status(500).json({
           success: false,
           message: 'Error al obtener ganancias por empleado'
@@ -1748,15 +1927,19 @@ const obtenerGananciasPorEmpleado = async (req, res) => {
 
       res.json({
         success: true,
-        data: results
+        data: results,
+        info: {
+          total_empleados: results.length,
+          empleado_top: results[0]?.empleado_nombre || 'N/A'
+        }
       });
     });
 
   } catch (error) {
-    console.error('Error obteniendo ganancias por empleado:', error);
+    console.error('💥 Error en obtenerGananciasPorEmpleado:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener ganancias por empleado'
+      message: 'Error interno del servidor: ' + error.message
     });
   }
 };
@@ -1807,10 +1990,9 @@ const obtenerProductosMasRentables = async (req, res) => {
       GROUP BY vc.producto_id, vc.producto_nombre, p.costo
       HAVING cantidad_vendida >= 2
       ORDER BY margen_porcentaje DESC, ganancia_total DESC
-      LIMIT ?
     `;
 
-    params.push(parseInt(limite));
+    
 
     db.query(query, params, (err, results) => {
       if (err) {
@@ -1836,6 +2018,81 @@ const obtenerProductosMasRentables = async (req, res) => {
   }
 };
 
+
+const verificarDisponibilidadDatos = async (req, res) => {
+  try {
+    const queryEstadisticas = `
+      SELECT 
+        'ventas' as tabla,
+        COUNT(*) as total_registros,
+        MIN(fecha) as fecha_minima,
+        MAX(fecha) as fecha_maxima
+      FROM ventas
+      UNION ALL
+      SELECT 
+        'gastos' as tabla,
+        COUNT(*) as total_registros,
+        MIN(fecha) as fecha_minima,
+        MAX(fecha) as fecha_maxima
+      FROM gastos
+      UNION ALL
+      SELECT 
+        'compras' as tabla,
+        COUNT(*) as total_registros,
+        MIN(fecha) as fecha_minima,
+        MAX(fecha) as fecha_maxima
+      FROM compras
+      UNION ALL
+      SELECT 
+        'movimientos' as tabla,
+        COUNT(*) as total_registros,
+        MIN(fecha) as fecha_minima,
+        MAX(fecha) as fecha_maxima
+      FROM movimiento_fondos
+    `;
+
+    db.query(queryEstadisticas, (err, results) => {
+      if (err) {
+        console.error('❌ Error verificando disponibilidad de datos:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Error al verificar disponibilidad de datos'
+        });
+      }
+
+      const estadisticas = {};
+      results.forEach(row => {
+        estadisticas[row.tabla] = {
+          total_registros: row.total_registros,
+          fecha_minima: row.fecha_minima,
+          fecha_maxima: row.fecha_maxima,
+          tiene_datos: row.total_registros > 0
+        };
+      });
+
+      res.json({
+        success: true,
+        data: estadisticas,
+        recomendaciones: {
+          periodo_sugerido: estadisticas.ventas.tiene_datos ? {
+            desde: estadisticas.ventas.fecha_minima,
+            hasta: estadisticas.ventas.fecha_maxima
+          } : null,
+          mensaje: estadisticas.ventas.total_registros === 0 
+            ? 'No hay datos de ventas registrados. Registra algunas ventas para ver estadísticas.'
+            : `Tienes ${estadisticas.ventas.total_registros} ventas registradas desde ${estadisticas.ventas.fecha_minima}`
+        }
+      });
+    });
+
+  } catch (error) {
+    console.error('💥 Error en verificarDisponibilidadDatos:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al verificar disponibilidad de datos'
+    });
+  }
+};
 
 
 // IMPORTANTE: Exportar todas las funciones
@@ -1876,5 +2133,7 @@ module.exports = {
   obtenerGananciasPorEmpleado,
   obtenerGananciasPorCiudad,
   obtenerResumenFinanciero,
-  obtenerProductosMasRentables
+  obtenerProductosMasRentables,
+  verificarDisponibilidadDatos,
+  obtenerTopProductosTabla
 };

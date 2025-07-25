@@ -1,63 +1,83 @@
-
+// routes/auditoriaRoutes.js - VERSIÓN FINAL
 const express = require('express');
 const router = express.Router();
 const auditoriaController = require('../controllers/auditoriaController');
-
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
+const { authenticateToken, authorizeRole } = require('../middlewares/authMiddleware');
 
+// ✅ Middleware para solo gerentes
+const soloGerentes = authorizeRole(['GERENTE']);
 
+// ✅ RUTA DE PRUEBA ULTRA SIMPLE (para testing)
+router.get('/test-simple', 
+    authenticateToken,
+    soloGerentes,
+    auditoriaController.obtenerAuditoriaSimple
+);
 
+// ✅ RUTAS PRINCIPALES
 
- //Obtener registros de auditoría con filtros
+// Obtener registros de auditoría con filtros y paginación
 router.get('/', 
-    
-    middlewareAuditoria({ accion: 'VIEW', tabla: 'auditoria' }),
+    authenticateToken,
+    soloGerentes,
+    middlewareAuditoria({ accion: 'VIEW_AUDITORIA', tabla: 'auditoria' }),
     auditoriaController.obtenerAuditoria
 );
 
-// Obtener detalle de un registro específico
+// Obtener detalle completo de un registro específico
 router.get('/detalle/:id',
-    
-    middlewareAuditoria({ accion: 'VIEW', tabla: 'auditoria' }),
+    authenticateToken,
+    soloGerentes,
+    middlewareAuditoria({ accion: 'VIEW_AUDITORIA_DETALLE', tabla: 'auditoria' }),
     auditoriaController.obtenerDetalleAuditoria
 );
 
-// Obtener estadísticas de auditoría
+// Obtener datos únicos para filtros
+router.get('/datos-filtros',
+    authenticateToken,
+    soloGerentes,
+    middlewareAuditoria({ accion: 'VIEW_AUDITORIA_FILTROS', tabla: 'auditoria' }),
+    auditoriaController.obtenerDatosFiltros
+);
+
+// Obtener estadísticas simples
 router.get('/estadisticas',
-    
-    middlewareAuditoria({ accion: 'VIEW', tabla: 'auditoria' }),
-    auditoriaController.obtenerEstadisticasAuditoria
+    authenticateToken,
+    soloGerentes,
+    middlewareAuditoria({ accion: 'VIEW_AUDITORIA_STATS', tabla: 'auditoria' }),
+    auditoriaController.obtenerEstadisticasSimples
 );
 
-// Exportar registros (JSON o CSV)
-router.get('/exportar',
-    
-    middlewareAuditoria({ accion: 'EXPORT', tabla: 'auditoria' }),
-    auditoriaController.exportarAuditoria
-);
-
-// Limpiar registros antiguos (solo gerentes)
-router.delete('/limpiar',
-    
-    middlewareAuditoria({ accion: 'DELETE', tabla: 'auditoria' }),
-    auditoriaController.limpiarAuditoriaAntigua
-);
-
-// Ver actividad del usuario actual
-router.get('/mi-actividad',
-    
-    middlewareAuditoria({ accion: 'VIEW', tabla: 'auditoria' }),
-    async (req, res) => {
-        // Filtrar solo por el usuario actual
-        req.query.usuario_id = req.user.id;
-        return auditoriaController.obtenerAuditoria(req, res);
-    }
-);
+// ✅ RUTA DE DEBUG (solo en desarrollo)
+if (process.env.NODE_ENV === 'development') {
+    router.get('/debug',
+        authenticateToken,
+        soloGerentes,
+        async (req, res) => {
+            try {
+                const dbStatus = require('../controllers/dbPromise').getStatus();
+                const poolStats = await require('../controllers/dbPromise').getPoolStats();
+                
+                res.json({
+                    success: true,
+                    message: 'Debug de auditoría',
+                    user: req.user,
+                    database: {
+                        status: dbStatus,
+                        poolStats: poolStats
+                    },
+                    timestamp: new Date().toISOString()
+                });
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    message: 'Error en debug',
+                    error: error.message
+                });
+            }
+        }
+    );
+}
 
 module.exports = router;
-
-
-
-
-
-

@@ -1,146 +1,192 @@
+// controllers/auditoriaController.js - VERSIÓN SIN PARÁMETROS PREPARADOS
 const db = require('./dbPromise');
 
 /**
- * Obtener registros de auditoría con filtros
+ * Función para escapar valores SQL manualmente
+ */
+const escapeSQL = (value) => {
+    if (value === null || value === undefined) return 'NULL';
+    if (typeof value === 'number') return value;
+    if (typeof value === 'boolean') return value ? 1 : 0;
+    
+    // Para strings, escapar comillas
+    return "'" + value.toString().replace(/'/g, "''") + "'";
+};
+
+/**
+ * Obtener registros de auditoría - SIN PARÁMETROS PREPARADOS
  */
 const obtenerAuditoria = async (req, res) => {
     try {
+        console.log('🔍 Obteniendo registros de auditoría...');
+        console.log('📊 Query params recibidos:', req.query);
+
         const {
             fecha_desde,
             fecha_hasta,
-            usuario_id,
+            usuario_nombre,
             accion,
-            tabla,
+            metodo_http,
             estado,
-            limite = 100,
+            limite = 50,
             pagina = 1
         } = req.query;
 
+        // ✅ Query base sin parámetros
         let query = `
             SELECT 
-                id, fecha_hora, usuario_id, usuario_nombre, accion, 
-                tabla_afectada, registro_id, ip_address, endpoint, 
-                metodo_http, estado, tiempo_procesamiento, detalles_adicionales
+                id, 
+                fecha_hora, 
+                usuario_id, 
+                usuario_nombre, 
+                accion, 
+                tabla_afectada, 
+                registro_id, 
+                ip_address, 
+                endpoint, 
+                metodo_http, 
+                estado, 
+                tiempo_procesamiento,
+                detalles_adicionales
             FROM auditoria 
             WHERE 1=1
         `;
+
+        // ✅ Aplicar filtros directamente en SQL (sin parámetros)
+        if (fecha_desde && fecha_desde.trim() !== '') {
+            query += ` AND DATE(fecha_hora) >= ${escapeSQL(fecha_desde.trim())}`;
+        }
+
+        if (fecha_hasta && fecha_hasta.trim() !== '') {
+            query += ` AND DATE(fecha_hora) <= ${escapeSQL(fecha_hasta.trim())}`;
+        }
+
+        if (usuario_nombre && usuario_nombre.trim() !== '') {
+            query += ` AND usuario_nombre = ${escapeSQL(usuario_nombre.trim())}`;
+        }
+
+        if (accion && accion.trim() !== '') {
+            query += ` AND accion = ${escapeSQL(accion.trim())}`;
+        }
+
+        if (metodo_http && metodo_http.trim() !== '') {
+            query += ` AND metodo_http = ${escapeSQL(metodo_http.trim())}`;
+        }
+
+        if (estado && estado.trim() !== '') {
+            query += ` AND estado = ${escapeSQL(estado.trim())}`;
+        }
+
+        // ✅ Ordenar y paginar SIN parámetros
+        query += ` ORDER BY fecha_hora DESC`;
         
-        const params = [];
+        const limiteNum = Math.min(parseInt(limite) || 50, 100);
+        const paginaNum = Math.max(parseInt(pagina) || 1, 1);
+        const offset = (paginaNum - 1) * limiteNum;
 
-        // Aplicar filtros
-        if (fecha_desde) {
-            query += ` AND DATE(fecha_hora) >= ?`;
-            params.push(fecha_desde);
+        query += ` LIMIT ${limiteNum}`;
+        if (offset > 0) {
+            query += ` OFFSET ${offset}`;
         }
 
-        if (fecha_hasta) {
-            query += ` AND DATE(fecha_hora) <= ?`;
-            params.push(fecha_hasta);
+        console.log('🔍 Query final SIN parámetros:', query);
+
+        // ✅ Ejecutar SIN parámetros
+        const [resultados] = await db.execute(query, []);
+
+        // ✅ Query de conteo SIN parámetros
+        let queryCount = `SELECT COUNT(*) as total FROM auditoria WHERE 1=1`;
+
+        if (fecha_desde && fecha_desde.trim() !== '') {
+            queryCount += ` AND DATE(fecha_hora) >= ${escapeSQL(fecha_desde.trim())}`;
         }
 
-        if (usuario_id) {
-            query += ` AND usuario_id = ?`;
-            params.push(usuario_id);
+        if (fecha_hasta && fecha_hasta.trim() !== '') {
+            queryCount += ` AND DATE(fecha_hora) <= ${escapeSQL(fecha_hasta.trim())}`;
         }
 
-        if (accion) {
-            query += ` AND accion = ?`;
-            params.push(accion);
+        if (usuario_nombre && usuario_nombre.trim() !== '') {
+            queryCount += ` AND usuario_nombre = ${escapeSQL(usuario_nombre.trim())}`;
         }
 
-        if (tabla) {
-            query += ` AND tabla_afectada = ?`;
-            params.push(tabla);
+        if (accion && accion.trim() !== '') {
+            queryCount += ` AND accion = ${escapeSQL(accion.trim())}`;
         }
 
-        if (estado) {
-            query += ` AND estado = ?`;
-            params.push(estado);
+        if (metodo_http && metodo_http.trim() !== '') {
+            queryCount += ` AND metodo_http = ${escapeSQL(metodo_http.trim())}`;
         }
 
-        // Calcular offset para paginación
-        const offset = (parseInt(pagina) - 1) * parseInt(limite);
-        
-        // Añadir ORDER BY y LIMIT
-        query += ` ORDER BY fecha_hora DESC LIMIT ? OFFSET ?`;
-        params.push(parseInt(limite), offset);
-
-        const [resultados] = await db.execute(query, params);
-
-        // Obtener total de registros para paginación
-        let queryCount = `
-            SELECT COUNT(*) as total 
-            FROM auditoria 
-            WHERE 1=1
-        `;
-        
-        const paramsCount = [];
-        
-        if (fecha_desde) {
-            queryCount += ` AND DATE(fecha_hora) >= ?`;
-            paramsCount.push(fecha_desde);
+        if (estado && estado.trim() !== '') {
+            queryCount += ` AND estado = ${escapeSQL(estado.trim())}`;
         }
 
-        if (fecha_hasta) {
-            queryCount += ` AND DATE(fecha_hora) <= ?`;
-            paramsCount.push(fecha_hasta);
-        }
-
-        if (usuario_id) {
-            queryCount += ` AND usuario_id = ?`;
-            paramsCount.push(usuario_id);
-        }
-
-        if (accion) {
-            queryCount += ` AND accion = ?`;
-            paramsCount.push(accion);
-        }
-
-        if (tabla) {
-            queryCount += ` AND tabla_afectada = ?`;
-            paramsCount.push(tabla);
-        }
-
-        if (estado) {
-            queryCount += ` AND estado = ?`;
-            paramsCount.push(estado);
-        }
-
-        const [countResult] = await db.execute(queryCount, paramsCount);
+        const [countResult] = await db.execute(queryCount, []);
         const total = countResult[0].total;
+
+        console.log(`✅ Registros encontrados: ${resultados.length}, Total: ${total}`);
 
         res.json({
             success: true,
             data: resultados,
-            paginacion: {
-                pagina_actual: parseInt(pagina),
+            meta: {
+                pagina_actual: paginaNum,
                 total_registros: total,
-                total_paginas: Math.ceil(total / parseInt(limite)),
-                registros_por_pagina: parseInt(limite)
+                total_paginas: Math.ceil(total / limiteNum),
+                registros_por_pagina: limiteNum,
+                hay_mas: (paginaNum * limiteNum) < total
             }
         });
 
     } catch (error) {
-        console.error('Error obteniendo registros de auditoría:', error);
+        console.error('❌ Error obteniendo registros de auditoría:', error);
         res.status(500).json({
             success: false,
-            message: 'Error al obtener registros de auditoría'
+            message: 'Error al obtener registros de auditoría',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
 /**
- * Obtener detalle completo de un registro de auditoría
+ * Obtener detalle completo de un registro específico
  */
 const obtenerDetalleAuditoria = async (req, res) => {
     try {
         const { id } = req.params;
+        console.log('🔍 Obteniendo detalle de auditoría ID:', id);
 
+        if (!id || isNaN(parseInt(id))) {
+            return res.status(400).json({
+                success: false,
+                message: 'ID de registro inválido'
+            });
+        }
+
+        const idNum = parseInt(id);
         const query = `
-            SELECT * FROM auditoria WHERE id = ?
+            SELECT 
+                id, 
+                fecha_hora, 
+                usuario_id, 
+                usuario_nombre, 
+                accion, 
+                tabla_afectada, 
+                registro_id, 
+                ip_address, 
+                user_agent,
+                endpoint, 
+                metodo_http, 
+                detalles_adicionales,
+                estado, 
+                tiempo_procesamiento
+            FROM auditoria 
+            WHERE id = ${idNum}
         `;
 
-        const [resultados] = await db.execute(query, [id]);
+        console.log('🔍 Query detalle:', query);
+
+        const [resultados] = await db.execute(query, []);
 
         if (resultados.length === 0) {
             return res.status(404).json({
@@ -149,239 +195,172 @@ const obtenerDetalleAuditoria = async (req, res) => {
             });
         }
 
-        const registro = resultados[0];
-
-        // Parsear JSON si existe
-        if (registro.datos_anteriores) {
-            try {
-                registro.datos_anteriores = JSON.parse(registro.datos_anteriores);
-            } catch (e) {
-                // Mantener como string si no se puede parsear
-            }
-        }
-
-        if (registro.datos_nuevos) {
-            try {
-                registro.datos_nuevos = JSON.parse(registro.datos_nuevos);
-            } catch (e) {
-                // Mantener como string si no se puede parsear
-            }
-        }
+        console.log('✅ Detalle de auditoría obtenido para ID:', id);
 
         res.json({
             success: true,
-            data: registro
+            data: resultados[0]
         });
 
     } catch (error) {
-        console.error('Error obteniendo detalle de auditoría:', error);
+        console.error('❌ Error obteniendo detalle de auditoría:', error);
         res.status(500).json({
             success: false,
-            message: 'Error al obtener detalle de auditoría'
+            message: 'Error al obtener detalle de auditoría',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
 /**
- * Obtener estadísticas de auditoría
+ * Obtener datos únicos para filtros
  */
-const obtenerEstadisticasAuditoria = async (req, res) => {
+const obtenerDatosFiltros = async (req, res) => {
     try {
-        const { fecha_desde, fecha_hasta } = req.query;
+        console.log('🔍 Obteniendo datos únicos para filtros...');
 
-        let condicionFecha = '';
-        const params = [];
-
-        if (fecha_desde && fecha_hasta) {
-            condicionFecha = 'WHERE DATE(fecha_hora) BETWEEN ? AND ?';
-            params.push(fecha_desde, fecha_hasta);
-        } else if (fecha_desde) {
-            condicionFecha = 'WHERE DATE(fecha_hora) >= ?';
-            params.push(fecha_desde);
-        } else if (fecha_hasta) {
-            condicionFecha = 'WHERE DATE(fecha_hora) <= ?';
-            params.push(fecha_hasta);
-        }
-
-        // Estadísticas por acción
-        const queryAcciones = `
-            SELECT accion, COUNT(*) as cantidad
-            FROM auditoria 
-            ${condicionFecha}
-            GROUP BY accion
-            ORDER BY cantidad DESC
-        `;
-
-        // Estadísticas por tabla
-        const queryTablas = `
-            SELECT tabla_afectada, COUNT(*) as cantidad
-            FROM auditoria 
-            ${condicionFecha}
-            AND tabla_afectada IS NOT NULL
-            GROUP BY tabla_afectada
-            ORDER BY cantidad DESC
-        `;
-
-        // Estadísticas por usuario
         const queryUsuarios = `
-            SELECT usuario_nombre, COUNT(*) as cantidad
+            SELECT DISTINCT usuario_nombre
             FROM auditoria 
-            ${condicionFecha}
-            AND usuario_nombre IS NOT NULL
-            GROUP BY usuario_nombre
-            ORDER BY cantidad DESC
-            LIMIT 10
+            WHERE usuario_nombre IS NOT NULL 
+            AND usuario_nombre != ''
+            ORDER BY usuario_nombre ASC
+            LIMIT 100
         `;
 
-        // Estadísticas por estado
-        const queryEstados = `
-            SELECT estado, COUNT(*) as cantidad
+        const queryAcciones = `
+            SELECT DISTINCT accion
             FROM auditoria 
-            ${condicionFecha}
-            GROUP BY estado
+            WHERE accion IS NOT NULL 
+            AND accion != ''
+            ORDER BY accion ASC
+            LIMIT 50
         `;
 
-        // Total de registros
-        const queryTotal = `
-            SELECT COUNT(*) as total
+        const queryMetodos = `
+            SELECT DISTINCT metodo_http
             FROM auditoria 
-            ${condicionFecha}
+            WHERE metodo_http IS NOT NULL 
+            AND metodo_http != ''
+            ORDER BY metodo_http ASC
         `;
 
-        const [resultadosAcciones] = await db.execute(queryAcciones, params);
-        const [resultadosTablas] = await db.execute(queryTablas, params);
-        const [resultadosUsuarios] = await db.execute(queryUsuarios, params);
-        const [resultadosEstados] = await db.execute(queryEstados, params);
-        const [resultadosTotal] = await db.execute(queryTotal, params);
+        const [usuarios] = await db.execute(queryUsuarios, []);
+        const [acciones] = await db.execute(queryAcciones, []);
+        const [metodos] = await db.execute(queryMetodos, []);
+
+        const usuariosLimpios = usuarios.map(u => u.usuario_nombre).filter(Boolean);
+        const accionesLimpias = acciones.map(a => a.accion).filter(Boolean);
+        const metodosLimpios = metodos.map(m => m.metodo_http).filter(Boolean);
+
+        console.log('✅ Datos de filtros obtenidos:', {
+            usuarios: usuariosLimpios.length,
+            acciones: accionesLimpias.length,
+            metodos: metodosLimpios.length
+        });
 
         res.json({
             success: true,
             data: {
-                total_registros: resultadosTotal[0].total,
-                por_accion: resultadosAcciones,
-                por_tabla: resultadosTablas,
-                por_usuario: resultadosUsuarios,
-                por_estado: resultadosEstados
+                usuarios: usuariosLimpios,
+                acciones: accionesLimpias,
+                metodos_http: metodosLimpios
             }
         });
 
     } catch (error) {
-        console.error('Error obteniendo estadísticas de auditoría:', error);
+        console.error('❌ Error obteniendo datos para filtros:', error);
         res.status(500).json({
             success: false,
-            message: 'Error al obtener estadísticas de auditoría'
+            message: 'Error al obtener datos para filtros',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
 /**
- * Limpiar registros antiguos de auditoría - CORREGIDO
+ * NUEVA FUNCIÓN: Testing ultra simple
  */
-const limpiarAuditoriaAntigua = async (req, res) => {
+const obtenerAuditoriaSimple = async (req, res) => {
     try {
-        const { dias = 90 } = req.body;
-        
-        // ✅ CORREGIDO: Variable diasInt correctamente definida
-        const diasInt = parseInt(dias);
-
-        if (diasInt < 30) {
-            return res.status(400).json({
-                success: false,
-                message: 'No se pueden eliminar registros con menos de 30 días de antigüedad'
-            });
-        }
+        console.log('🔍 TEST: Obteniendo registros simples...');
 
         const query = `
-            DELETE FROM auditoria 
-            WHERE fecha_hora < DATE_SUB(NOW(), INTERVAL ? DAY)
+            SELECT 
+                id, 
+                fecha_hora, 
+                usuario_nombre, 
+                accion, 
+                tabla_afectada, 
+                endpoint, 
+                metodo_http, 
+                estado
+            FROM auditoria 
+            ORDER BY fecha_hora DESC 
+            LIMIT 10
         `;
 
-        const [resultado] = await db.execute(query, [diasInt]);
+        console.log('🔍 Query simple:', query);
+
+        const [resultados] = await db.execute(query, []);
+
+        console.log(`✅ TEST: ${resultados.length} registros encontrados`);
 
         res.json({
             success: true,
-            message: `Se eliminaron ${resultado.affectedRows} registros de auditoría`,
-            registros_eliminados: resultado.affectedRows
+            data: resultados,
+            message: `TEST exitoso: ${resultados.length} registros`,
+            debug: {
+                queryUsada: query,
+                parametros: 'NINGUNO'
+            }
         });
 
     } catch (error) {
-        console.error('Error limpiando auditoría antigua:', error);
+        console.error('❌ TEST: Error en consulta simple:', error);
         res.status(500).json({
             success: false,
-            message: 'Error al limpiar registros antiguos'
+            message: 'TEST falló',
+            error: error.message,
+            debug: {
+                errorCode: error.code,
+                sqlState: error.sqlState
+            }
         });
     }
 };
 
 /**
- * Exportar registros de auditoría
+ * Obtener estadísticas básicas
  */
-const exportarAuditoria = async (req, res) => {
+const obtenerEstadisticasSimples = async (req, res) => {
     try {
-        const {
-            fecha_desde,
-            fecha_hasta,
-            formato = 'json'
-        } = req.query;
+        console.log('📊 Obteniendo estadísticas simples...');
 
-        let query = `
-            SELECT * FROM auditoria 
-            WHERE 1=1
+        const query = `
+            SELECT 
+                COUNT(*) as total,
+                COUNT(CASE WHEN estado = 'EXITOSO' THEN 1 END) as exitosos,
+                COUNT(CASE WHEN estado = 'FALLIDO' THEN 1 END) as fallidos,
+                COUNT(DISTINCT usuario_nombre) as usuarios_unicos
+            FROM auditoria
         `;
-        
-        const params = [];
 
-        if (fecha_desde) {
-            query += ` AND DATE(fecha_hora) >= ?`;
-            params.push(fecha_desde);
-        }
+        const [resultado] = await db.execute(query, []);
 
-        if (fecha_hasta) {
-            query += ` AND DATE(fecha_hora) <= ?`;
-            params.push(fecha_hasta);
-        }
+        console.log('✅ Estadísticas obtenidas:', resultado[0]);
 
-        query += ` ORDER BY fecha_hora DESC LIMIT 10000`; // Límite de seguridad
-
-        const [resultados] = await db.execute(query, params);
-
-        if (formato === 'csv') {
-            // Generar CSV
-            const campos = Object.keys(resultados[0] || {});
-            let csv = campos.join(',') + '\n';
-            
-            resultados.forEach(fila => {
-                const valores = campos.map(campo => {
-                    let valor = fila[campo];
-                    if (valor === null || valor === undefined) return '';
-                    if (typeof valor === 'string' && valor.includes(',')) {
-                        return `"${valor.replace(/"/g, '""')}"`;
-                    }
-                    return valor;
-                });
-                csv += valores.join(',') + '\n';
-            });
-
-            res.setHeader('Content-Type', 'text/csv');
-            res.setHeader('Content-Disposition', 'attachment; filename="auditoria.csv"');
-            res.send(csv);
-        } else {
-            // JSON por defecto
-            res.setHeader('Content-Type', 'application/json');
-            res.setHeader('Content-Disposition', 'attachment; filename="auditoria.json"');
-            res.json({
-                exportado_en: new Date().toISOString(),
-                total_registros: resultados.length,
-                filtros: { fecha_desde, fecha_hasta },
-                datos: resultados
-            });
-        }
+        res.json({
+            success: true,
+            data: resultado[0]
+        });
 
     } catch (error) {
-        console.error('Error exportando auditoría:', error);
+        console.error('❌ Error obteniendo estadísticas:', error);
         res.status(500).json({
             success: false,
-            message: 'Error al exportar registros de auditoría'
+            message: 'Error al obtener estadísticas',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
@@ -389,7 +368,7 @@ const exportarAuditoria = async (req, res) => {
 module.exports = {
     obtenerAuditoria,
     obtenerDetalleAuditoria,
-    obtenerEstadisticasAuditoria,
-    limpiarAuditoriaAntigua,
-    exportarAuditoria
+    obtenerDatosFiltros,
+    obtenerEstadisticasSimples,
+    obtenerAuditoriaSimple
 };
