@@ -57,9 +57,11 @@ const buscarCliente = (req, res) => {
     });
 };
 
+
 const actualizarCliente = async (req, res) => {
     const clienteId = req.params.id;
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
+    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email } = req.body;
+                                                           
 
     // Obtener datos anteriores para auditoría
     const obtenerDatosAnterioresPromise = () => {
@@ -90,14 +92,17 @@ const actualizarCliente = async (req, res) => {
                 return res.status(404).json({ success: false, message: "Cliente no encontrado" });
             }
 
-            // Si el cliente existe, proceder con la actualización
+            // QUERY ACTUALIZADA CON ciudad_id
             const updateQuery = `
                 UPDATE clientes 
-                SET nombre = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, provincia = ?, telefono = ?, email = ? 
+                SET nombre = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ? 
                 WHERE id = ?
             `;
+            //                                                                           
 
-            db.query(updateQuery, [nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, clienteId], async (error, updateResults) => {
+            // PARÁMETROS ACTUALIZADOS CON ciudad_id
+            db.query(updateQuery, [nombre, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email, clienteId], async (error, updateResults) => {
+                //                                                                      ^^^^^^^^^ AGREGAR AQUÍ
                 if (error) {
                     console.error('Error al actualizar el cliente:', error);
                     
