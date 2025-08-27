@@ -21,7 +21,7 @@ router.get('/test-simple',
 router.get('/', 
     authenticateToken,
     soloGerentes,
-    middlewareAuditoria({ accion: 'VIEW_AUDITORIA', tabla: 'auditoria' }),
+    
     auditoriaController.obtenerAuditoria
 );
 
@@ -29,7 +29,7 @@ router.get('/',
 router.get('/detalle/:id',
     authenticateToken,
     soloGerentes,
-    middlewareAuditoria({ accion: 'VIEW_AUDITORIA_DETALLE', tabla: 'auditoria' }),
+    
     auditoriaController.obtenerDetalleAuditoria
 );
 
@@ -37,7 +37,7 @@ router.get('/detalle/:id',
 router.get('/datos-filtros',
     authenticateToken,
     soloGerentes,
-    middlewareAuditoria({ accion: 'VIEW_AUDITORIA_FILTROS', tabla: 'auditoria' }),
+    
     auditoriaController.obtenerDatosFiltros
 );
 
@@ -45,7 +45,7 @@ router.get('/datos-filtros',
 router.get('/estadisticas',
     authenticateToken,
     soloGerentes,
-    middlewareAuditoria({ accion: 'VIEW_AUDITORIA_STATS', tabla: 'auditoria' }),
+    
     auditoriaController.obtenerEstadisticasSimples
 );
 

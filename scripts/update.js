@@ -3,14 +3,6 @@ const mysql = require('mysql2/promise');
 const XLSX = require('xlsx');
 
 // Configuración de la base de datos
-// const dbConfig = {
-//     host: '31.97.251.186',
-//     user: 'remote_user',
-//     password: 'remoteuser251199',
-//     database: 'DB_distri',
-//     charset: 'utf8mb4'
-// };
-
 const dbConfig = {
     host: 'localhost',
     user: 'root',
@@ -19,7 +11,7 @@ const dbConfig = {
     charset: 'utf8mb4'
 };
 
-// Mapeo de categorías - mismas que en tu algoritmo original
+// Mapeo de categorías
 const categoriaMapping = {
     'ACIDO': 2,
     'AGUA': 18,
@@ -45,7 +37,7 @@ const categoriaMapping = {
     'TRAPOS DE PISO-SECADORES': 23
 };
 
-class ExcelProductImporter {
+class ExcelProductUpdater {
     constructor() {
         this.connection = null;
     }
@@ -81,7 +73,6 @@ class ExcelProductImporter {
     determineCategory(productName) {
         const name = productName.toUpperCase();
         
-        // Mapeos específicos por palabras clave
         const keywordMappings = {
             'ACIDO': 2,
             'AGUA': 18,
@@ -115,32 +106,18 @@ class ExcelProductImporter {
             'SECADOR': 23
         };
 
-        // Buscar coincidencias
         for (const [keyword, categoryId] of Object.entries(keywordMappings)) {
             if (name.includes(keyword)) {
                 return categoryId;
             }
         }
 
-        // Si no se encuentra una categoría específica, usar "PRODUCTOS VARIOS"
-        return 10;
+        return 10; // PRODUCTOS VARIOS por defecto
     }
 
-    // Función para insertar producto en la base de datos
+    // Función para insertar un nuevo producto
     async insertProduct(product) {
         try {
-            // Verificar si el producto ya existe
-            const [existing] = await this.connection.execute(
-                'SELECT id FROM productos WHERE nombre = ?',
-                [product.nombre]
-            );
-
-            if (existing.length > 0) {
-                console.log(`⚠️ Producto ya existe: ${product.nombre}`);
-                return false;
-            }
-
-            // Insertar nuevo producto
             const query = `
                 INSERT INTO productos 
                 (nombre, unidad_medida, costo, precio, categoria_id, iva, ganancia, descuento, stock_actual)
@@ -155,10 +132,63 @@ class ExcelProductImporter {
                 product.categoriaId
             ]);
 
-            console.log(`✅ Insertado: ${product.nombre} - $${product.precio} (Cat: ${product.categoriaId})`);
-            return true;
+            console.log(`➕ NUEVO PRODUCTO: ${product.nombre} - ${product.precio} (Cat: ${product.categoriaId})`);
+            return 'inserted';
         } catch (error) {
             console.error(`❌ Error al insertar ${product.nombre}:`, error.message);
+            return false;
+        }
+    }
+
+    // Función para actualizar el precio de un producto existente
+    async updateProductPrice(productId, newPrice, productName, oldPrice) {
+        try {
+            const query = 'UPDATE productos SET precio = ? WHERE id = ?';
+            await this.connection.execute(query, [newPrice, productId]);
+            
+            console.log(`🔄 PRECIO ACTUALIZADO: ${productName}`);
+            console.log(`   Precio anterior: ${oldPrice} → Precio nuevo: ${newPrice}`);
+            return 'updated';
+        } catch (error) {
+            console.error(`❌ Error al actualizar precio de ${productName}:`, error.message);
+            return false;
+        }
+    }
+
+    // Función principal para procesar cada producto (insertar o actualizar)
+    async processProduct(product) {
+        try {
+            // Verificar si el producto ya existe
+            const [existing] = await this.connection.execute(
+                'SELECT id, precio, nombre FROM productos WHERE nombre = ?',
+                [product.nombre]
+            );
+
+            if (existing.length > 0) {
+                // El producto existe - verificar si necesita actualización de precio
+                const existingProduct = existing[0];
+                const currentPrice = parseFloat(existingProduct.precio);
+                const newPrice = parseFloat(product.precio);
+
+                if (Math.abs(currentPrice - newPrice) > 0.01) { // Comparar con tolerancia para decimales
+                    // El precio es diferente - actualizar
+                    return await this.updateProductPrice(
+                        existingProduct.id, 
+                        newPrice, 
+                        product.nombre, 
+                        currentPrice
+                    );
+                } else {
+                    // El precio es el mismo - no hacer nada
+                    console.log(`⚪ SIN CAMBIOS: ${product.nombre} - ${currentPrice}`);
+                    return 'no_change';
+                }
+            } else {
+                // El producto no existe - insertar nuevo
+                return await this.insertProduct(product);
+            }
+        } catch (error) {
+            console.error(`❌ Error al procesar ${product.nombre}:`, error.message);
             return false;
         }
     }
@@ -168,69 +198,76 @@ class ExcelProductImporter {
         try {
             console.log('📖 Leyendo archivo Excel...');
             
-            // Leer el archivo Excel
             const workbook = XLSX.readFile(excelPath);
-            const sheetName = workbook.SheetNames[0]; // Usar la primera hoja
+            const sheetName = workbook.SheetNames[0];
             const worksheet = workbook.Sheets[sheetName];
-            
-            // Convertir a JSON
             const data = XLSX.utils.sheet_to_json(worksheet);
             
-            console.log(`📊 Productos encontrados: ${data.length}`);
-            console.log('🔧 Procesando productos...');
+            console.log(`📊 Productos encontrados en Excel: ${data.length}`);
+            console.log('🔧 Procesando productos...\n');
 
             let productsInserted = 0;
+            let productsUpdated = 0;
+            let productsNoChange = 0;
             let productsSkipped = 0;
             let processedCount = 0;
 
             for (const row of data) {
                 processedCount++;
                 
-                // Extraer datos del Excel
                 const rawNombre = row['Producto'] || '';
                 const unidadMedida = row['Unidad'] || 'Unidades';
                 const precio = parseFloat(row['Precio Venta']) || 0;
 
-                // Validar que tengamos datos válidos
+                // Validar datos
                 if (!rawNombre || precio <= 0) {
                     console.log(`⚠️ Fila ${processedCount}: Datos incompletos - ${rawNombre}`);
                     productsSkipped++;
                     continue;
                 }
 
-                // Limpiar el nombre del producto
                 const nombreLimpio = this.cleanProductName(rawNombre);
-                
-                // Determinar la categoría
                 const categoriaId = this.determineCategory(nombreLimpio);
 
-                // Crear objeto producto
                 const product = {
                     nombre: nombreLimpio,
                     unidadMedida: unidadMedida,
-                    costo: 0, // No tenemos costo en el Excel, usar 0
+                    costo: 0,
                     precio: precio,
                     categoriaId: categoriaId
                 };
 
-                // Mostrar progreso cada 100 productos
-                if (processedCount % 100 === 0) {
-                    console.log(`📋 Procesando... ${processedCount}/${data.length}`);
+                // Mostrar progreso
+                if (processedCount % 50 === 0) {
+                    console.log(`\n📋 Progreso: ${processedCount}/${data.length} productos procesados...\n`);
                 }
 
-                // Insertar en la base de datos
-                const inserted = await this.insertProduct(product);
-                if (inserted) {
+                // Procesar el producto (insertar o actualizar)
+                const result = await this.processProduct(product);
+                
+                if (result === 'inserted') {
                     productsInserted++;
+                } else if (result === 'updated') {
+                    productsUpdated++;
+                } else if (result === 'no_change') {
+                    productsNoChange++;
                 } else {
                     productsSkipped++;
                 }
+
+                // Pequeña pausa para no sobrecargar la base de datos
+                await new Promise(resolve => setTimeout(resolve, 10));
             }
 
-            console.log('\n📊 RESUMEN DEL PROCESO:');
-            console.log(`📝 Productos procesados: ${processedCount}`);
-            console.log(`✅ Productos insertados: ${productsInserted}`);
-            console.log(`⚠️ Productos omitidos: ${productsSkipped}`);
+            console.log('\n' + '='.repeat(50));
+            console.log('📊 RESUMEN DEL PROCESO:');
+            console.log('='.repeat(50));
+            console.log(`📝 Total productos en Excel: ${data.length}`);
+            console.log(`✅ Productos nuevos agregados: ${productsInserted}`);
+            console.log(`🔄 Productos con precio actualizado: ${productsUpdated}`);
+            console.log(`⚪ Productos sin cambios: ${productsNoChange}`);
+            console.log(`⚠️ Productos omitidos (datos inválidos): ${productsSkipped}`);
+            console.log('='.repeat(50));
 
         } catch (error) {
             console.error('❌ Error al procesar Excel:', error.message);
@@ -241,11 +278,10 @@ class ExcelProductImporter {
 
 // Función principal
 async function main() {
-    const importer = new ExcelProductImporter();
+    const updater = new ExcelProductUpdater();
     
     try {
-        // Ruta al archivo Excel
-        const excelPath = './productosnuevos.xlsx'; // Cambia esta ruta por la de tu archivo
+        const excelPath = './productosnuevos.xlsx';
 
         if (!fs.existsSync(excelPath)) {
             console.error('❌ Archivo Excel no encontrado:', excelPath);
@@ -253,17 +289,18 @@ async function main() {
             return;
         }
 
-        console.log('🚀 Iniciando importación de productos desde Excel...');
+        console.log('🚀 Iniciando actualización de productos desde Excel...');
+        console.log('📌 Este script insertará productos nuevos y actualizará precios existentes\n');
         
-        await importer.connect();
-        await importer.processExcel(excelPath);
+        await updater.connect();
+        await updater.processExcel(excelPath);
         
-        console.log('🎉 Importación completada exitosamente!');
+        console.log('\n🎉 Proceso completado exitosamente!');
         
     } catch (error) {
-        console.error('💥 Error durante la importación:', error.message);
+        console.error('💥 Error durante el proceso:', error.message);
     } finally {
-        await importer.disconnect();
+        await updater.disconnect();
     }
 }
 
@@ -272,4 +309,4 @@ if (require.main === module) {
     main().catch(console.error);
 }
 
-module.exports = ExcelProductImporter;
+module.exports = ExcelProductUpdater;
