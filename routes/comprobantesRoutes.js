@@ -198,4 +198,43 @@ router.delete('/gasto/:id',
     comprobantesController.eliminarComprobante
 );
 
+
+router.post('/generar-link/venta/:id', 
+    requireEmployee,
+    middlewareAuditoria({ 
+        accion: 'GENERATE_LINK', 
+        tabla: 'ventas'
+    }),
+    comprobantesController.generarLinkPublico
+);
+
+/**
+ * Verificar token público (SIN AUTENTICACIÓN)
+ * GET /comprobantes/publico/verificar/:token
+ */
+router.get('/publico/verificar/:token', 
+    // SIN requireEmployee - es público
+    comprobantesController.verificarTokenPublico
+);
+
+/**
+ * Subir comprobante usando token público (SIN AUTENTICACIÓN) 
+ * POST /comprobantes/publico/subir/:token
+ */
+router.post('/publico/subir/:token', 
+    // SIN requireEmployee - es público
+    comprobantesController.subirComprobantePublico
+);
+
+
+router.post('/verificar-masivo/ventas', 
+    requireEmployee,
+    middlewareAuditoria({ 
+        accion: 'VERIFY_BULK', 
+        tabla: 'comprobantes',
+        incluirBody: false 
+    }),
+    comprobantesController.verificarComprobantesMasivo
+);
+
 module.exports = router;

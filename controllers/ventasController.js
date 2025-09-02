@@ -9,13 +9,23 @@ const multer = require('multer');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 
-
+const verificarArchivoExiste = (comprobantePath) => {
+  if (!comprobantePath) return false;
+  
+  try {
+    const rutaCompleta = path.join(__dirname, '..', comprobantePath);
+    return fs.existsSync(rutaCompleta);
+  } catch (error) {
+    console.error('Error verificando archivo:', error);
+    return false;
+  }
+};
 
 //
 const obtenerVentas = (req, res) => {
     const query = `
         SELECT 
-            id, fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre, cae_id, cae_fecha
+            id, fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre, cae_id, cae_fecha, comprobante_path
         FROM ventas ORDER BY fecha DESC`;
     db.query(query, (err, results) => {
         if (err) {

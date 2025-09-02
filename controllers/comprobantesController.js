@@ -5,6 +5,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
+const jwt = require('jsonwebtoken');
 
 // ===========================================
 // CONFIGURACIÓN MULTER
@@ -550,6 +551,366 @@ const obtenerEstadisticas = async (req, res) => {
     }
 };
 
+
+
+/**
+ * Generar link público para cargar comprobante
+ * POST /comprobantes/generar-link/venta/:id
+ */
+const generarLinkPublico = async (req, res) => {
+    const { id } = req.params;
+    const tipoRegistro = 'venta'; // Fijo para ventas
+    
+    try {
+        const tabla = obtenerTabla(tipoRegistro);
+        
+        // Verificar que el registro existe y no tiene comprobante
+        const checkQuery = `SELECT id, cliente_nombre, total, fecha, comprobante_path FROM ${tabla} WHERE id = ?`;
+        const result = await queryPromise(checkQuery, [id]);
+        
+        if (result.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                message: `${tipoRegistro.charAt(0).toUpperCase() + tipoRegistro.slice(1)} no encontrada` 
+            });
+        }
+        
+        const registro = result[0];
+        
+        // Verificar si ya tiene comprobante
+        if (registro.comprobante_path) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Esta venta ya tiene un comprobante cargado' 
+            });
+        }
+        
+        // Generar JWT con expiración de 24 horas
+        const payload = {
+            venta_id: parseInt(id),
+            tipo: tipoRegistro,
+            cliente_nombre: registro.cliente_nombre,
+            total: registro.total,
+            fecha: registro.fecha
+        };
+        
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '24h' });
+        
+        // Auditar generación de link
+        await auditarOperacion(req, {
+            accion: 'GENERATE_LINK',
+            tabla: tabla,
+            registroId: id,
+            detallesAdicionales: `Link público generado para ${tipoRegistro} - Cliente: ${registro.cliente_nombre}`
+        });
+        
+        // Construir URL completa
+        const baseUrl = process.env.FRONTEND_URL;
+        const linkPublico = `${baseUrl}/comprobante-publico/${token}`;
+        
+        res.json({ 
+            success: true, 
+            message: 'Link público generado exitosamente',
+            data: {
+                link: linkPublico,
+                token: token,
+                expira: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 horas
+                cliente: registro.cliente_nombre,
+                monto: registro.total
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error generando link público:', error);
+        
+        await auditarOperacion(req, {
+            accion: 'GENERATE_LINK',
+            tabla: obtenerTabla(tipoRegistro),
+            registroId: id,
+            detallesAdicionales: `Error generando link público: ${error.message}`
+        });
+        
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error interno del servidor' 
+        });
+    }
+};
+
+/**
+ * Verificar token público
+ * GET /comprobantes/publico/verificar/:token
+ */
+const verificarTokenPublico = async (req, res) => {
+    const { token } = req.params;
+    
+    try {
+        // Verificar y decodificar JWT
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const { venta_id, tipo, cliente_nombre, total, fecha } = decoded;
+        
+        // Verificar que el registro aún existe y no tiene comprobante
+        const tabla = obtenerTabla(tipo);
+        const checkQuery = `SELECT id, cliente_nombre, total, fecha, comprobante_path FROM ${tabla} WHERE id = ?`;
+        const result = await queryPromise(checkQuery, [venta_id]);
+        
+        if (result.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                valido: false,
+                message: 'La venta asociada ya no existe' 
+            });
+        }
+        
+        const registro = result[0];
+        
+        // Verificar si ya tiene comprobante (link usado)
+        if (registro.comprobante_path) {
+            return res.status(400).json({ 
+                success: false, 
+                valido: false,
+                message: 'Este enlace ya fue utilizado. El comprobante ya está cargado.' 
+            });
+        }
+        
+        res.json({ 
+            success: true, 
+            valido: true,
+            message: 'Token válido',
+            venta: {
+                id: registro.id,
+                cliente_nombre: registro.cliente_nombre,
+                total: registro.total,
+                fecha: registro.fecha
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error verificando token:', error);
+        
+        let message = 'Token no válido';
+        
+        if (error.name === 'TokenExpiredError') {
+            message = 'El enlace ha expirado. Los enlaces son válidos por 24 horas.';
+        } else if (error.name === 'JsonWebTokenError') {
+            message = 'El enlace no es válido o ha sido modificado.';
+        }
+        
+        res.status(400).json({ 
+            success: false, 
+            valido: false,
+            message: message 
+        });
+    }
+};
+
+/**
+ * Subir comprobante usando token público (SIN AUTENTICACIÓN)
+ * POST /comprobantes/publico/subir/:token
+ */
+const subirComprobantePublico = async (req, res) => {
+    const { token } = req.params;
+    
+    // Configurar multer para esta request específica
+    upload(req, res, async (err) => {
+        if (err) {
+            console.error('Error en upload público:', err);
+            return res.status(400).json({ 
+                success: false, 
+                message: err.message 
+            });
+        }
+        
+        if (!req.file) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'No se subió ningún archivo' 
+            });
+        }
+        
+        try {
+            // Verificar y decodificar JWT
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            const { venta_id, tipo } = decoded;
+            
+            const tabla = obtenerTabla(tipo);
+            
+            // Verificar que el registro existe y no tiene comprobante
+            const checkQuery = `SELECT id, comprobante_path FROM ${tabla} WHERE id = ?`;
+            const checkResult = await queryPromise(checkQuery, [venta_id]);
+            
+            if (checkResult.length === 0) {
+                await eliminarArchivo(req.file.path);
+                return res.status(404).json({ 
+                    success: false, 
+                    message: 'La venta asociada no existe' 
+                });
+            }
+            
+            // Verificar si ya tiene comprobante (doble verificación)
+            if (checkResult[0].comprobante_path) {
+                await eliminarArchivo(req.file.path);
+                return res.status(400).json({ 
+                    success: false, 
+                    message: 'Esta venta ya tiene un comprobante. El enlace ha sido desactivado.' 
+                });
+            }
+            
+            // Renombrar archivo con formato TIPO-ID
+            const nombreArchivo = obtenerNombreArchivo(tipo, venta_id);
+            const nuevaRuta = await renombrarArchivo(req.file.path, nombreArchivo);
+            const rutaRelativa = path.relative(path.join(__dirname, '..'), nuevaRuta);
+            
+            // Actualizar base de datos
+            const updateQuery = `UPDATE ${tabla} SET comprobante_path = ? WHERE id = ?`;
+            await queryPromise(updateQuery, [rutaRelativa, venta_id]);
+            
+            // Auditar (sin req.user porque es público)
+            await auditarOperacionPublica({
+                accion: 'UPLOAD_PUBLIC',
+                tabla: tabla,
+                registroId: venta_id,
+                detallesAdicionales: `Comprobante subido vía link público: ${req.file.originalname} -> ${nombreArchivo}`,
+                ip: req.ip,
+                userAgent: req.headers['user-agent']
+            });
+            
+            res.json({ 
+                success: true, 
+                message: 'Comprobante subido exitosamente',
+                data: {
+                    tipo,
+                    registroId: venta_id,
+                    nombreOriginal: req.file.originalname,
+                    nombreArchivo: nombreArchivo
+                }
+            });
+            
+        } catch (error) {
+            console.error('Error subiendo comprobante público:', error);
+            await eliminarArchivo(req.file.path);
+            
+            let message = 'Error al subir el comprobante';
+            
+            if (error.name === 'TokenExpiredError') {
+                message = 'El enlace ha expirado. Los enlaces son válidos por 24 horas.';
+            } else if (error.name === 'JsonWebTokenError') {
+                message = 'El enlace no es válido.';
+            }
+            
+            // Auditar error
+            await auditarOperacionPublica({
+                accion: 'UPLOAD_PUBLIC',
+                tabla: 'comprobantes_publicos',
+                detallesAdicionales: `Error subiendo comprobante público: ${error.message}`,
+                ip: req.ip,
+                userAgent: req.headers['user-agent']
+            });
+            
+            res.status(400).json({ 
+                success: false, 
+                message: message 
+            });
+        }
+    });
+};
+
+// Función helper para auditoría pública (sin usuario autenticado)
+const auditarOperacionPublica = async ({
+    accion,
+    tabla,
+    registroId = null,
+    detallesAdicionales = null,
+    ip = null,
+    userAgent = null
+}) => {
+    try {
+        const query = `
+            INSERT INTO auditoria (
+                usuario_id, usuario_nombre, accion, tabla_afectada, registro_id,
+                datos_anteriores, datos_nuevos, ip_address, user_agent, endpoint,
+                metodo_http, detalles_adicionales, estado
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        const valores = [
+            null, // sin usuario
+            'PÚBLICO',
+            accion,
+            tabla,
+            registroId ? registroId.toString() : null,
+            null, // sin datos anteriores
+            null, // sin datos nuevos
+            ip,
+            userAgent,
+            '/comprobantes/publico/*',
+            'POST',
+            detallesAdicionales,
+            'EXITOSO'
+        ];
+
+        await queryPromise(query, valores);
+    } catch (error) {
+        console.error('Error en auditoría pública:', error);
+    }
+};
+
+
+const verificarComprobantesMasivo = async (req, res) => {
+    const { ventasIds } = req.body;
+    
+    if (!ventasIds || !Array.isArray(ventasIds) || ventasIds.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Se requiere un array de IDs de ventas'
+        });
+    }
+    
+    try {
+        const query = `SELECT id, comprobante_path FROM ventas WHERE id IN (${ventasIds.map(() => '?').join(',')})`;
+        const ventas = await queryPromise(query, ventasIds);
+        
+        const verificaciones = ventas.map(venta => {
+            const tieneComprobanteBD = !!venta.comprobante_path;
+            const archivoExiste = tieneComprobanteBD ? verificarArchivoFisico(venta.comprobante_path) : false;
+            
+            return {
+                id: venta.id,
+                tieneComprobanteBD,
+                archivoExiste,
+                tieneComprobanteReal: archivoExiste,
+                comprobante_path: venta.comprobante_path
+            };
+        });
+        
+        res.json({
+            success: true,
+            data: verificaciones
+        });
+        
+    } catch (error) {
+        console.error('Error en verificación masiva:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error interno del servidor'
+        });
+    }
+};
+
+// Función helper para verificar archivo físico
+const verificarArchivoFisico = (comprobantePath) => {
+    if (!comprobantePath) return false;
+    
+    try {
+        const rutaCompleta = path.join(__dirname, '..', comprobantePath);
+        return fs.existsSync(rutaCompleta);
+    } catch (error) {
+        return false;
+    }
+};
+
+
+
 // ===========================================
 // EXPORTS
 // ===========================================
@@ -560,5 +921,9 @@ module.exports = {
     eliminarComprobante,
     verificarComprobante,
     listarComprobantes,
-    obtenerEstadisticas
+    obtenerEstadisticas,
+    generarLinkPublico,
+    verificarTokenPublico,
+    subirComprobantePublico,
+    verificarComprobantesMasivo
 };
