@@ -32,7 +32,7 @@ const allowedOrigins = [
 
 // En desarrollo, permitir cualquier origen localhost
 if (process.env.NODE_ENV === 'development') {
-    allowedOrigins.push(/^http:\/\/localhost:\d+$/);
+    allowedOrigins.push(/^http:\/\/localhost:\d+$/);    
     allowedOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
 }
 
@@ -140,6 +140,7 @@ app.get('/', (req, res) => {
 });
 
 // Routes
+
 app.use('/personas', personasRoutes);
 app.use('/auth', authRoutes);
 app.use('/productos', productosRoutes); 
@@ -150,6 +151,10 @@ app.use('/ventas', ventasRoutes);
 app.use('/compras', comprasRoutes);
 app.use('/auditoria', auditoriaRoutes);
 app.use('/comprobantes', comprobantesRoutes); 
+
+
+
+
 
 // Middleware para rutas no encontradas
 app.use('*', (req, res) => {

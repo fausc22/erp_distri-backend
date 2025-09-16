@@ -457,7 +457,7 @@ const facturarPedido = async (req, res) => {
                     producto.producto_id,
                     producto.producto_nombre,
                     producto.producto_um,
-                    producto.cantidad,
+                    parseFloat(producto.cantidad),
                     producto.precio,
                     producto.IVA,
                     producto.subtotal

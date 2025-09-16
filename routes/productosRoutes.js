@@ -64,4 +64,16 @@ router.get('/stock/:id',
     productosController.obtenerStock
 );
 
+router.get('/obtener-todos-productos',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
+    productosController.obtenerTodosProductos
+);
+
+router.put('/actualizar-producto-basico/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'productos', incluirBody: true }),
+    productosController.actualizarProductoBasico
+);
+
 module.exports = router;

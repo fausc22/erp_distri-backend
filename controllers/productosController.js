@@ -42,7 +42,7 @@ const formatearFecha = (fechaBD) => {
 const nuevoProducto = async (req, res) => {
     const { nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual } = req.body;
 
-    if (!nombre || !unidad_medida || !costo || !precio || !categoria_id || !iva || stock_actual === undefined) {
+    if (!nombre || !unidad_medida || !costo || !precio || !categoria_id || !iva || stock_actual === undefined || isNaN(parseFloat(stock_actual))) {
         return res.status(400).json({ success: false, message: "Todos los campos son obligatorios" });
     }
 
@@ -51,7 +51,7 @@ const nuevoProducto = async (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [nombre, unidad_medida, costo, precio, categoria_id, iva, stock_actual], async (err, results) => {
+    db.query(query, [nombre, unidad_medida, costo, precio, categoria_id, iva, parseFloat(stock_actual)], async (err, results) => {
         if (err) {
             console.error('Error al insertar el producto:', err);
             
@@ -559,6 +559,112 @@ const generarPdfRemitosMultiples = async (req, res) => {
 };
 
 
+const obtenerTodosProductos = (req, res) => {
+    const searchTerm = req.query.search ? `%${req.query.search}%` : '%';
+
+    const query = `
+        SELECT p.*, c.nombre as categoria_nombre
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE p.nombre LIKE ?
+        ORDER BY p.stock_actual ASC, p.nombre ASC
+    `;
+
+    db.query(query, [searchTerm], (err, results) => {
+        if (err) {
+            console.error('Error al obtener todos los productos:', err);
+            return res.status(500).json({ success: false, message: "Error al obtener los productos" });
+        }
+        console.log(`✅ Productos obtenidos: ${results.length}`);
+        res.json({ success: true, data: results });
+    });
+};
+
+// Función para actualizar solo nombre, categoría y stock
+const actualizarProductoBasico = async (req, res) => {
+    const productoId = req.params.id;
+    const { nombre, categoria_id, stock_actual } = req.body;
+
+    if (!nombre || !categoria_id || stock_actual === undefined) {
+        return res.status(400).json({ success: false, message: "Nombre, categoría y stock son obligatorios" });
+    }
+
+    // Validar que el stock sea un número válido
+    const stockNumerico = parseFloat(stock_actual);
+    if (isNaN(stockNumerico) || stockNumerico < 0) {
+        return res.status(400).json({ success: false, message: "El stock debe ser un número válido mayor o igual a 0" });
+    }
+
+    // Obtener datos anteriores para auditoría
+    const obtenerDatosAnterioresPromise = () => {
+        return new Promise((resolve, reject) => {
+            db.query('SELECT * FROM productos WHERE id = ?', [productoId], (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
+            });
+        });
+    };
+
+    try {
+        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        
+        if (!datosAnteriores) {
+            return res.status(404).json({ success: false, message: "Producto no encontrado" });
+        }
+
+        // Actualizar solo los campos especificados
+        const updateQuery = `
+            UPDATE productos 
+            SET nombre = ?, categoria_id = ?, stock_actual = ? 
+            WHERE id = ?
+        `;
+
+        db.query(updateQuery, [nombre, categoria_id, stockNumerico, productoId], async (error, updateResults) => {
+            if (error) {
+                console.error('Error al actualizar el producto:', error);
+                
+                // Auditar error en actualización
+                await auditarOperacion(req, {
+                    accion: 'UPDATE',
+                    tabla: 'productos',
+                    registroId: productoId,
+                    detallesAdicionales: `Error al actualizar producto básico: ${error.message}`,
+                    datosAnteriores,
+                    datosNuevos: req.body
+                });
+                
+                return res.status(500).json({ success: false, message: "Error al actualizar el producto" });
+            }
+
+            if (updateResults.affectedRows === 0) {
+                return res.status(400).json({ success: false, message: "No se realizaron cambios" });
+            }
+
+            // Calcular cambio en stock para detalles adicionales
+            const cambioStock = stockNumerico - parseFloat(datosAnteriores.stock_actual);
+            const detalleStock = cambioStock !== 0 ? ` - Cambio en stock: ${cambioStock > 0 ? '+' : ''}${cambioStock}` : '';
+
+            // Auditar actualización exitosa
+            await auditarOperacion(req, {
+                accion: 'UPDATE',
+                tabla: 'productos',
+                registroId: productoId,
+                datosAnteriores,
+                datosNuevos: { 
+                    id: productoId,
+                    ...req.body
+                },
+                detallesAdicionales: `Producto actualizado (básico): ${nombre}${detalleStock}`
+            });
+
+            res.json({ success: true, message: "Producto actualizado correctamente" });
+        });
+    } catch (error) {
+        console.error('Error al obtener datos anteriores:', error);
+        res.status(500).json({ success: false, message: "Error interno del servidor" });
+    }
+};
+
 module.exports = {
     nuevoProducto,
     buscarProducto, 
@@ -569,5 +675,7 @@ module.exports = {
     filtrarProductosRemito,
     generarPdfRemito,
     generarPdfRemitosMultiples,
-    obtenerStock
+    obtenerStock,
+    actualizarProductoBasico,  // Nueva función
+    obtenerTodosProductos,
 };

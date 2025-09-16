@@ -573,6 +573,8 @@ const actualizarStockProductos = (productos, callback) => {
                 return callback(err);
             }
             
+           const cantidadFloat = parseFloat(producto.cantidad);
+            console.log(`Stock actualizado: ${producto.id} +${cantidadFloat}`);
             productosActualizados++;
             if (productosActualizados === totalProductos) {
                 callback(null);
@@ -683,7 +685,7 @@ const registrarCompraConStock = async (req, res) => {
             producto.id,
             producto.nombre,
             producto.unidad_medida || null,
-            parseInt(producto.cantidad),
+            parseFloat(producto.cantidad),
             parseFloat(producto.precio_costo),
             parseFloat(producto.precio_venta),
             0,

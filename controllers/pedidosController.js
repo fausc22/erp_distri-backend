@@ -147,7 +147,7 @@ const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido') 
             }
             
             const stockActual = results[0].stock_actual;
-            const nuevoStock = stockActual + cantidadCambio;
+            const nuevoStock = parseFloat(stockActual) + parseFloat(cantidadCambio);
             
             // Validar que el stock no quede negativo (solo para disminuciones)
             if (cantidadCambio < 0 && nuevoStock < 0) {
@@ -802,10 +802,10 @@ const actualizarProductoPedido = async (req, res) => {
     const { cantidad, precio, iva, subtotal, descuento_porcentaje } = req.body;
     const productId = req.params.productId;
 
-    if (!cantidad || cantidad <= 0) {
+    if (!cantidad || cantidad <= 0 || isNaN(parseFloat(cantidad))) {
         return res.status(400).json({ 
             success: false,
-            message: "La cantidad debe ser mayor a 0"
+            message: "La cantidad debe ser un número válido y mayor a 0"
         });
     }
 
