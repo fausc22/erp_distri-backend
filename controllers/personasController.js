@@ -145,6 +145,92 @@ const actualizarCliente = async (req, res) => {
     }
 };
 
+
+// Obtener todos los clientes (sin filtro de búsqueda)
+const obtenerTodosClientes = (req, res) => {
+    const query = `SELECT * FROM clientes ORDER BY nombre ASC`;
+
+    db.query(query, (err, results) => {
+        if (err) {
+            console.error('Error al obtener los clientes:', err);
+            return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
+        }
+        res.json({ success: true, data: results });
+    });
+};
+
+// Obtener un cliente por ID
+const obtenerClientePorId = (req, res) => {
+    const clienteId = req.params.id;
+
+    const query = `SELECT * FROM clientes WHERE id = ?`;
+
+    db.query(query, [clienteId], (err, results) => {
+        if (err) {
+            console.error('Error al obtener el cliente:', err);
+            return res.status(500).json({ success: false, message: "Error al obtener el cliente" });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: "Cliente no encontrado" });
+        }
+
+        res.json({ success: true, data: results[0] });
+    });
+};
+
+// Eliminar cliente (soft delete si usas ese patrón, o hard delete)
+const eliminarCliente = async (req, res) => {
+    const clienteId = req.params.id;
+
+    // Primero verificar si el cliente existe
+    const checkQuery = `SELECT * FROM clientes WHERE id = ?`;
+    
+    db.query(checkQuery, [clienteId], async (err, results) => {
+        if (err) {
+            console.error('Error al verificar el cliente:', err);
+            return res.status(500).json({ success: false, message: "Error al verificar el cliente" });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: "Cliente no encontrado" });
+        }
+
+        const datosAnteriores = results[0];
+
+        // Eliminar el cliente
+        const deleteQuery = `DELETE FROM clientes WHERE id = ?`;
+        
+        db.query(deleteQuery, [clienteId], async (deleteErr, deleteResults) => {
+            if (deleteErr) {
+                console.error('Error al eliminar el cliente:', deleteErr);
+                
+                // Auditar error en eliminación
+                await auditarOperacion(req, {
+                    accion: 'DELETE',
+                    tabla: 'clientes',
+                    registroId: clienteId,
+                    detallesAdicionales: `Error al eliminar cliente: ${deleteErr.message}`,
+                    datosAnteriores
+                });
+                
+                return res.status(500).json({ success: false, message: "Error al eliminar el cliente" });
+            }
+
+            // Auditar eliminación exitosa
+            await auditarOperacion(req, {
+                accion: 'DELETE',
+                tabla: 'clientes',
+                registroId: clienteId,
+                datosAnteriores,
+                detallesAdicionales: `Cliente eliminado: ${datosAnteriores.nombre}`
+            });
+
+            res.json({ success: true, message: "Cliente eliminado correctamente" });
+        });
+    });
+};
+
 const nuevoProveedor = async (req, res) => {
     const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
 
@@ -292,11 +378,100 @@ const actualizarProveedor = async (req, res) => {
     }
 };
 
+const obtenerTodosProveedores = (req, res) => {
+    const query = `SELECT * FROM proveedores ORDER BY nombre ASC`;
+
+    db.query(query, (err, results) => {
+        if (err) {
+            console.error('Error al obtener los proveedores:', err);
+            return res.status(500).json({ success: false, message: "Error al obtener los proveedores" });
+        }
+        res.json({ success: true, data: results });
+    });
+};
+
+// Obtener un proveedor por ID
+const obtenerProveedorPorId = (req, res) => {
+    const proveedorId = req.params.id;
+
+    const query = `SELECT * FROM proveedores WHERE id = ?`;
+
+    db.query(query, [proveedorId], (err, results) => {
+        if (err) {
+            console.error('Error al obtener el proveedor:', err);
+            return res.status(500).json({ success: false, message: "Error al obtener el proveedor" });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: "Proveedor no encontrado" });
+        }
+
+        res.json({ success: true, data: results[0] });
+    });
+};
+
+// Eliminar proveedor
+const eliminarProveedor = async (req, res) => {
+    const proveedorId = req.params.id;
+
+    const checkQuery = `SELECT * FROM proveedores WHERE id = ?`;
+    
+    db.query(checkQuery, [proveedorId], async (err, results) => {
+        if (err) {
+            console.error('Error al verificar el proveedor:', err);
+            return res.status(500).json({ success: false, message: "Error al verificar el proveedor" });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: "Proveedor no encontrado" });
+        }
+
+        const datosAnteriores = results[0];
+
+        const deleteQuery = `DELETE FROM proveedores WHERE id = ?`;
+        
+        db.query(deleteQuery, [proveedorId], async (deleteErr, deleteResults) => {
+            if (deleteErr) {
+                console.error('Error al eliminar el proveedor:', deleteErr);
+                
+                await auditarOperacion(req, {
+                    accion: 'DELETE',
+                    tabla: 'proveedores',
+                    registroId: proveedorId,
+                    detallesAdicionales: `Error al eliminar proveedor: ${deleteErr.message}`,
+                    datosAnteriores
+                });
+                
+                return res.status(500).json({ success: false, message: "Error al eliminar el proveedor" });
+            }
+
+            await auditarOperacion(req, {
+                accion: 'DELETE',
+                tabla: 'proveedores',
+                registroId: proveedorId,
+                datosAnteriores,
+                detallesAdicionales: `Proveedor eliminado: ${datosAnteriores.nombre}`
+            });
+
+            res.json({ success: true, message: "Proveedor eliminado correctamente" });
+        });
+    });
+};
+
+
 module.exports = {
     nuevoCliente,
     actualizarCliente,
     buscarCliente,
+    obtenerTodosClientes,
+    obtenerClientePorId,
+    eliminarCliente,
+
+
     nuevoProveedor, 
     buscarProveedor,
-    actualizarProveedor
+    actualizarProveedor,
+    obtenerTodosProveedores,
+    obtenerProveedorPorId,
+    eliminarProveedor
 };

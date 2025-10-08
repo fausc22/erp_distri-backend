@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FACTURA ELECTRÓNICA - DISTRIBUIDORA VERTI-MAR</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            background-color: #ffffff;
+        }
+        
+        @page {
+            size: A4;
+            margin: 8mm 6mm;
+        }
+        
+        .original-header {
+            background-color: #cfe2f3;
+            text-align: center;
+            padding: 8px;
+            font-weight: bold;
+            font-size: 18px;
+            border: 1px solid #000;
+        }
+        .bill-container {
+            width: 750px;
+            margin: 0 auto;
+            border: 1px solid #000;
+            border-top: none;
+            page-break-after: avoid;
+        }
+        .bill-emitter-row {
+            display: table;
+            width: 100%;
+            position: relative;
+            border-bottom: 1px solid #000;
+            page-break-inside: avoid;
+        }
+        .bill-emitter-left {
+            width: 45%;
+            padding: 12px;
+            display: table-cell;
+            vertical-align: top;
+        }
+        .bill-type-container {
+            width: 10%;
+            display: table-cell;
+            text-align: center;
+            vertical-align: top;
+            border-left: 1px solid #000;
+            border-right: 1px solid #000;
+            padding: 10px 5px;
+        }
+        .bill-type {
+            font-size: 55px;
+            font-weight: bold;
+            line-height: 55px;
+        }
+        .bill-cod {
+            font-size: 12px;
+            margin-top: 5px;
+        }
+        .bill-emitter-right {
+            width: 45%;
+            padding: 12px;
+            display: table-cell;
+            vertical-align: top;
+        }
+        .text-lg {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .bill-row {
+            padding: 10px 12px;
+            border-bottom: 1px solid #000;
+            page-break-inside: avoid;
+        }
+        .bill-row p {
+            font-size: 13px;
+            margin: 3px 0;
+        }
+        .row-details table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 5px 0;
+        }
+        .row-details table td, .row-details table th {
+            padding: 8px;
+            border: 1px solid #666;
+            font-size: 12px;
+        }
+        .row-details table th {
+            background-color: #e0e0e0;
+            font-weight: bold;
+            text-align: center;
+            font-size: 13px;
+        }
+        .row-details table tbody tr {
+            page-break-inside: avoid;
+        }
+        .qr-footer {
+            display: table;
+            width: 100%;
+            border-top: 1px solid #000;
+            page-break-inside: avoid;
+        }
+        .qr-section {
+            display: table-cell;
+            width: 50%;
+            padding: 10px;
+            vertical-align: middle;
+        }
+        .qr-section img {
+            max-width: 90px;
+            height: auto;
+            float: left;
+            margin-right: 10px;
+        }
+        .qr-text-content {
+            display: inline-block;
+            vertical-align: middle;
+            text-align: left;
+        }
+        .qr-text-content p {
+            font-size: 12px;
+        }
+        .cae-section {
+            display: table-cell;
+            width: 50%;
+            padding: 10px;
+            border-left: 1px solid #000;
+            vertical-align: middle;
+        }
+        .cae-section p {
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        .legal-footer {
+            background-color: #f5f5f5;
+            padding: 10px;
+            font-size: 11px;
+            border-top: 1px solid #000;
+            page-break-inside: avoid;
+        }
+        p {
+            margin: 2px 0;
+        }
+        .text-right {
+            text-align: right;
+        }
+        .page-break {
+            page-break-before: always;
+        }
+    </style>
+</head>
+<body>
+    <!-- ORIGINAL -->
+    <div class="original-header">ORIGINAL</div>
+    <div class="bill-container">
+        <div class="bill-emitter-row">
+            <div class="bill-emitter-left">
+                <div class="text-lg">DISTRIBUIDORA VERTI-MAR SRL</div>
+                <p><strong>Domicilio:</strong> 31 1555 - GENERAL PICO - LA PAMPA</p>
+                <p><strong>Teléfono:</strong> {{telefono}}</p>
+                <p><strong>E-mail:</strong> {{email}}</p>
+                <p><strong>Condición frente al IVA:</strong> RESPONSABLE INSCRIPTO</p>
+            </div>
+            <div class="bill-type-container">
+                <div class="bill-type">{{tipo_comprobante}}</div>
+                <div class="bill-cod">COD. 1</div>
+            </div>
+            <div class="bill-emitter-right">
+                <div class="text-lg">FACTURA</div>
+                <p><strong>Punto de Venta:</strong> {{punto_venta}} <strong>Comp. Nro:</strong> {{numero_comprobante}}</p>
+                <p><strong>CUIT:</strong> {{cuit_emisor}}</p>
+                <p><strong>Ingresos Brutos:</strong> {{ingresos_brutos}}</p>
+                <p><strong>Fecha de Inicio de Actividades:</strong> {{fecha_inicio_actividades}}</p>
+            </div>
+        </div>
+
+        <div class="bill-row">
+            <p style="margin-bottom: 5px;"><strong>Señor/es</strong></p>
+            <p><strong>{{cliente_nombre}}</strong></p>
+            <p>{{cliente_direccion}}</p>
+            <p><strong>CUIT:</strong> {{cliente_cuit}}</p>
+            <p><strong>Categoría de IVA:</strong> {{cliente_condicion}}</p>
+        </div>
+
+        <div class="bill-row" style="display: table; width: 100%;">
+            <div style="display: table-cell; width: 50%;">
+                <p><strong>Condición de Venta</strong></p>
+                <p>CUENTA CORRIENTE</p>
+            </div>
+            <div style="display: table-cell; width: 25%; text-align: center;">
+                <p><strong>F. EMISION</strong></p>
+                <p>{{fecha}}</p>
+            </div>
+            <div style="display: table-cell; width: 25%; text-align: center;">
+                <p><strong>MONEDA</strong></p>
+                <p>PESOS</p>
+            </div>
+        </div>
+
+        <div class="row-details">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cantidad</th>
+                        <th style="width: 40%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 10%;">% IVA</th>
+                        <th style="width: 15%;">Precio</th>
+                        <th style="width: 15%;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{items}}
+                </tbody>
+            </table>
+        </div>
+
+        <div style="padding: 10px 12px; border-bottom: 1px solid #000;">
+            <div style="float: right; width: 240px; border: 1px solid #000; background-color: #fff;">
+                <div style="background-color: #cfe2f3; padding: 6px; text-align: center; border-bottom: 1px solid #000;">
+                    <strong style="font-size: 13px;">PESOS</strong>
+                </div>
+                <table style="width: 100%; font-size: 12px; padding: 8px;">
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">Neto Gravado:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>{{subtotal}}</strong></td>
+                    </tr>
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">Exento:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>0,00</strong></td>
+                    </tr>
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">IVA:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>{{iva_total}}</strong></td>
+                    </tr>
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">Percepciones:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>0,00</strong></td>
+                    </tr>
+                    <tr style="height: 26px; border-top: 1px solid #000; background-color: #cfe2f3;">
+                        <td style="padding-left: 8px;"><strong style="font-size: 13px;">TOTAL:</strong></td>
+                        <td class="text-right" style="padding-right: 8px;"><strong style="font-size: 13px;">{{total}}</strong></td>
+                    </tr>
+                </table>
+            </div>
+            <div style="clear: both;"></div>
+        </div>
+
+        <div class="legal-footer">
+            <p><strong>Observaciones:</strong> El crédito fiscal discriminado en el presente comprobante, sólo podrá ser computado a efectos del Régimen de Sostenimiento e Inclusión Fiscal para Pequeños Contribuyentes de la Ley N° 27.618.</p>
+        </div>
+
+        <div class="qr-footer">
+            <div class="qr-section">
+                <img src="{{qr_base64}}" alt="Código QR AFIP">
+                <div class="qr-text-content">
+                    <p style="font-weight: bold; margin-bottom: 5px;">Comprobante Autorizado</p>
+                    <img src="{{logo_arca}}" alt="Logo ARCA" style="width: 100px; height: 35px; object-fit: contain;">
+                </div>
+                <div style="clear: both;"></div>
+            </div>
+            <div class="cae-section">
+                <p><strong>CAE Nº:</strong> {{cae}}</p>
+                <p><strong>Fecha de Vto. de CAE:</strong> {{cae_vencimiento}}</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- DUPLICADO -->
+    <div class="page-break"></div>
+    
+    <div class="original-header">DUPLICADO</div>
+    <div class="bill-container">
+        <div class="bill-emitter-row">
+            <div class="bill-emitter-left">
+                <div class="text-lg">DISTRIBUIDORA VERTI-MAR SRL</div>
+                <p><strong>Domicilio:</strong> 31 1555 - GENERAL PICO - LA PAMPA</p>
+                <p><strong>Teléfono:</strong> {{telefono}}</p>
+                <p><strong>E-mail:</strong> {{email}}</p>
+                <p><strong>Condición frente al IVA:</strong> RESPONSABLE INSCRIPTO</p>
+            </div>
+            <div class="bill-type-container">
+                <div class="bill-type">{{tipo_comprobante}}</div>
+                <div class="bill-cod">COD. 1</div>
+            </div>
+            <div class="bill-emitter-right">
+                <div class="text-lg">FACTURA</div>
+                <p><strong>Punto de Venta:</strong> {{punto_venta}} <strong>Comp. Nro:</strong> {{numero_comprobante}}</p>
+                <p><strong>CUIT:</strong> {{cuit_emisor}}</p>
+                <p><strong>Ingresos Brutos:</strong> {{ingresos_brutos}}</p>
+                <p><strong>Fecha de Inicio de Actividades:</strong> {{fecha_inicio_actividades}}</p>
+            </div>
+        </div>
+
+        <div class="bill-row">
+            <p style="margin-bottom: 5px;"><strong>Señor/es</strong></p>
+            <p><strong>{{cliente_nombre}}</strong></p>
+            <p>{{cliente_direccion}}</p>
+            <p><strong>CUIT:</strong> {{cliente_cuit}}</p>
+            <p><strong>Categoría de IVA:</strong> {{cliente_condicion}}</p>
+        </div>
+
+        <div class="bill-row" style="display: table; width: 100%;">
+            <div style="display: table-cell; width: 50%;">
+                <p><strong>Condición de Venta</strong></p>
+                <p>CUENTA CORRIENTE</p>
+            </div>
+            <div style="display: table-cell; width: 25%; text-align: center;">
+                <p><strong>F. EMISION</strong></p>
+                <p>{{fecha}}</p>
+            </div>
+            <div style="display: table-cell; width: 25%; text-align: center;">
+                <p><strong>MONEDA</strong></p>
+                <p>PESOS</p>
+            </div>
+        </div>
+
+        <div class="row-details">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cantidad</th>
+                        <th style="width: 40%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 10%;">% IVA</th>
+                        <th style="width: 15%;">Precio</th>
+                        <th style="width: 15%;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{items}}
+                </tbody>
+            </table>
+        </div>
+
+        <div style="padding: 10px 12px; border-bottom: 1px solid #000;">
+            <div style="float: right; width: 240px; border: 1px solid #000; background-color: #fff;">
+                <div style="background-color: #cfe2f3; padding: 6px; text-align: center; border-bottom: 1px solid #000;">
+                    <strong style="font-size: 13px;">PESOS</strong>
+                </div>
+                <table style="width: 100%; font-size: 12px; padding: 8px;">
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">Neto Gravado:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>{{subtotal}}</strong></td>
+                    </tr>
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">Exento:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>0,00</strong></td>
+                    </tr>
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">IVA:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>{{iva_total}}</strong></td>
+                    </tr>
+                    <tr style="height: 22px;">
+                        <td style="padding-left: 8px;">Percepciones:</td>
+                        <td class="text-right" style="padding-right: 8px;"><strong>0,00</strong></td>
+                    </tr>
+                    <tr style="height: 26px; border-top: 1px solid #000; background-color: #cfe2f3;">
+                        <td style="padding-left: 8px;"><strong style="font-size: 13px;">TOTAL:</strong></td>
+                        <td class="text-right" style="padding-right: 8px;"><strong style="font-size: 13px;">{{total}}</strong></td>
+                    </tr>
+                </table>
+            </div>
+            <div style="clear: both;"></div>
+        </div>
+
+        <div class="legal-footer">
+            <p><strong>Observaciones:</strong> El crédito fiscal discriminado en el presente comprobante, sólo podrá ser computado a efectos del Régimen de Sostenimiento e Inclusión Fiscal para Pequeños Contribuyentes de la Ley N° 27.618.</p>
+        </div>
+
+        <div class="qr-footer">
+            <div class="qr-section">
+                <img src="{{qr_base64}}" alt="Código QR AFIP">
+                <div class="qr-text-content">
+                    <p style="font-weight: bold; margin-bottom: 5px;">Comprobante Autorizado</p>
+                    <img src="{{logo_arca}}" alt="Logo ARCA" style="width: 100px; height: 35px; object-fit: contain;">
+                </div>
+                <div style="clear: both;"></div>
+            </div>
+            <div class="cae-section">
+                <p><strong>CAE Nº:</strong> {{cae}}</p>
+                <p><strong>Fecha de Vto. de CAE:</strong> {{cae_vencimiento}}</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

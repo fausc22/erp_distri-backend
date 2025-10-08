@@ -120,6 +120,21 @@
         .table th:nth-child(4), .table td:nth-child(4) { width: 10%; }
         .table th:nth-child(5), .table td:nth-child(5) { width: 15%; }
         .table th:nth-child(6), .table td:nth-child(6) { width: 18%; }
+
+        /* Estilos para el total */
+        .total-section {
+            margin-top: 15px;
+            text-align: right;
+            padding: 10px;
+            border-top: 2px solid #000;
+            page-break-inside: avoid;
+        }
+
+        .total-section .total-row {
+            font-size: 14px;
+            font-weight: bold;
+            margin: 5px 0;
+        }
         
         .footer {
             margin-top: 15px;
@@ -164,7 +179,6 @@
         <div class="info no-page-break">
             <p><strong>DESTINATARIO</strong></p>
             <p><strong>Señor/es:</strong> {{cliente_nombre}}</p>
-            
         </div>
 
         <h2>PRESUPUESTO</h2>
@@ -175,8 +189,8 @@
                     <th>Producto</th> 
                     <th>Unidad</th>
                     <th>Cantidad</th>
-                    <th>Precio ($)</th>
-                    <th>Subtotal ($)</th>
+                    <th>Precio (IVA incl.)</th>
+                    <th>Subtotal</th>
                 </tr>
             </thead>
             <tbody>
@@ -184,8 +198,16 @@
             </tbody>
         </table>
 
+        <!-- Sección de Total -->
+        <div class="total-section">
+            <div class="total-row">
+                TOTAL (IVA incluido): ${{total}}
+            </div>
+        </div>
+
         <div class="footer no-page-break">
             <p>Lista generada electrónicamente - Distribuidora Verti-Mar SRL</p>
+            <p>Todos los precios incluyen IVA (21%)</p>
         </div>
     </div>
 </body>

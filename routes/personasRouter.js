@@ -40,4 +40,39 @@ router.put('/actualizar-proveedor/:id',
     personasController.actualizarProveedor
 );
 
+// Obtener cliente por ID
+router.get('/cliente/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'clientes' }),
+    personasController.obtenerClientePorId
+);
+
+// Eliminar cliente
+router.delete('/eliminar-cliente/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'DELETE', tabla: 'clientes' }),
+    personasController.eliminarCliente
+);
+
+
+router.get('/obtener-todos-proveedores',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'proveedores' }),
+    personasController.obtenerTodosProveedores
+);
+
+// Obtener proveedor por ID
+router.get('/proveedor/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'proveedores' }),
+    personasController.obtenerProveedorPorId
+);
+
+// Eliminar proveedor
+router.delete('/eliminar-proveedor/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'DELETE', tabla: 'proveedores' }),
+    personasController.eliminarProveedor
+);
+
 module.exports = router;

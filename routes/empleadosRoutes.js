@@ -1,3 +1,5 @@
+// routes/empleadosRoutes.js - REEMPLAZAR CON ESTO
+
 const express = require('express');
 const router = express.Router();
 const empleadosController = require('../controllers/empleadosController');
@@ -11,7 +13,7 @@ router.post('/crear-empleado',
     empleadosController.crearEmpleado
 );
 
-// 🔧 Actualizar empleado (ID en la URL)
+// Actualizar empleado (ID en la URL)
 router.put('/actualizar-empleado/:id', 
     requireManager, 
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'empleados', incluirBody: true }),
@@ -25,7 +27,14 @@ router.get('/buscar-empleado',
     empleadosController.buscarEmpleado
 );
 
-// Listar todos
+// ✅ NUEVA RUTA: Listar TODOS (activos e inactivos)
+router.get('/listar-todos', 
+    requireManager, 
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'empleados' }),
+    empleadosController.listarTodosEmpleados
+);
+
+// Listar solo activos
 router.get('/listar', 
     requireManager, 
     middlewareAuditoria({ accion: 'VIEW', tabla: 'empleados' }),
@@ -44,6 +53,12 @@ router.delete('/:id',
     requireManager, 
     middlewareAuditoria({ accion: 'DELETE', tabla: 'empleados' }),
     empleadosController.desactivarEmpleado
+);
+
+router.put('/reactivar/:id', 
+    requireManager, 
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'empleados' }),
+    empleadosController.reactivarEmpleado
 );
 
 module.exports = router;

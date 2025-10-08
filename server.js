@@ -20,6 +20,8 @@ const finanzasRoutes = require('./routes/finanzasRoutes');
 const comprasRoutes = require('./routes/comprasRoutes'); 
 const auditoriaRoutes = require('./routes/auditoriaRoutes');
 const comprobantesRoutes = require('./routes/comprobantesRoutes'); 
+const arcaRoutes = require('./routes/arcaRoutes');
+const ciudadesRoutes = require('./routes/ciudadesRoutes');
 
 // CORS configuration - Optimizado para VPS
 const allowedOrigins = [
@@ -151,7 +153,8 @@ app.use('/ventas', ventasRoutes);
 app.use('/compras', comprasRoutes);
 app.use('/auditoria', auditoriaRoutes);
 app.use('/comprobantes', comprobantesRoutes); 
-
+app.use('/arca', arcaRoutes);
+app.use('/ciudades', ciudadesRoutes);
 
 
 

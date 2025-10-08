@@ -8,3 +8,8 @@ pnpm-debug.log*
 # dotenv
 .env
 .env.*
+
+certs/
+
+package-lock.json
+yarn.lock

@@ -1,6 +1,6 @@
 const express = require('express');
 const ventasController = require('../controllers/ventasController');
-const { requireEmployee } = require('../middlewares/authMiddleware');
+const { requireEmployee, requireManager } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const router = express.Router();
 
@@ -62,6 +62,18 @@ router.get('/movimientos-cuenta/:cuentaId',
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'movimiento_fondos' }),
     ventasController.obtenerMovimientosCuenta
+);
+
+router.get('/buscar-por-cliente', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas' }),
+    ventasController.buscarVentasPorCliente
+);
+
+router.post('/venta-directa', 
+    requireManager,  // ✅ SOLO GERENTES
+    middlewareAuditoria({ accion: 'INSERT', tabla: 'venta_directa', incluirBody: true }),
+    ventasController.ventaDirecta
 );
 
 module.exports = router;

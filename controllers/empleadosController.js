@@ -392,3 +392,70 @@ exports.desactivarEmpleado = async (req, res) => {
         res.status(500).json({ message: 'Error interno del servidor' });
     }
 };
+
+exports.listarTodosEmpleados = async (req, res) => {
+    try {
+        const [empleados] = await db.execute(`
+            SELECT id, nombre, apellido, dni, telefono, email, usuario, rol, activo, fecha_creacion
+            FROM empleados 
+            ORDER BY activo DESC, nombre, apellido
+        `);
+
+        res.json(empleados);
+
+    } catch (error) {
+        console.error('Error al listar todos los empleados:', error);
+        res.status(500).json({ message: 'Error interno del servidor' });
+    }
+};
+
+exports.reactivarEmpleado = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Obtener datos anteriores para auditoría
+        const datosAnteriores = await obtenerDatosAnteriores('empleados', id);
+        if (!datosAnteriores) {
+            return res.status(404).json({ message: 'Empleado no encontrado' });
+        }
+
+        // Verificar que el empleado esté inactivo
+        if (datosAnteriores.activo === 1) {
+            return res.status(400).json({ message: 'El empleado ya está activo' });
+        }
+
+        const [result] = await db.execute(
+            'UPDATE empleados SET activo = 1 WHERE id = ?',
+            [id]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Empleado no encontrado' });
+        }
+
+        // Auditar reactivación del empleado
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'empleados',
+            registroId: id,
+            datosAnteriores: limpiarDatosSensibles(datosAnteriores),
+            datosNuevos: limpiarDatosSensibles({ ...datosAnteriores, activo: 1 }),
+            detallesAdicionales: `Empleado reactivado: ${datosAnteriores.nombre} ${datosAnteriores.apellido}`
+        });
+
+        res.json({ message: 'Empleado reactivado exitosamente' });
+
+    } catch (error) {
+        console.error('Error al reactivar empleado:', error);
+        
+        // Auditar error en reactivación
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'empleados',
+            registroId: req.params.id,
+            detallesAdicionales: `Error al reactivar empleado: ${error.message}`
+        });
+        
+        res.status(500).json({ message: 'Error interno del servidor' });
+    }
+};
