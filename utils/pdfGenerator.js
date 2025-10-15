@@ -2,6 +2,7 @@ const htmlpdf = require('html-pdf-node');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const QRCode = require('qrcode');   
 
 // URL del microservicio ARCA (desde .env)
 const ARCA_MICROSERVICE_URL = process.env.ARCA_MICROSERVICE_URL;
@@ -140,138 +141,351 @@ class PdfGenerator {
 
     async generarQRDesdeARCA(venta) {
         try {
-            console.log(`🔍 Solicitando QR al microservicio ARCA para venta ${venta.id}...`);
+            console.log(`🔍 Generando QR según especificaciones ARCA para venta ${venta.id}...`);
             
-            const tipoComprobanteMap = { 'A': 1, 'B': 6, 'C': 11 };
+            // ✅ MAPEO DE TIPOS DE COMPROBANTE SEGÚN ARCA
+            const tipoComprobanteMap = { 
+                'A': 1,   // Factura A
+                'B': 6,   // Factura B
+                'C': 11   // Factura C
+            };
             const tipoComprobante = tipoComprobanteMap[venta.tipo_f] || 6;
-            let tipoDocReceptor = 99;
+            
+            // ✅ TIPO DE DOCUMENTO RECEPTOR
+            let tipoDocReceptor = 99; // Por defecto: Sin identificar
+            let nroDocReceptor = 0;
+            
             if (venta.cliente_cuit) {
-                tipoDocReceptor = 80;
+                const cuitLimpio = venta.cliente_cuit.replace(/[^0-9]/g, '');
+                if (cuitLimpio.length === 11) {
+                    tipoDocReceptor = 80; // CUIT
+                    nroDocReceptor = parseInt(cuitLimpio);
+                } else if (cuitLimpio.length >= 7 && cuitLimpio.length <= 8) {
+                    tipoDocReceptor = 96; // DNI
+                    nroDocReceptor = parseInt(cuitLimpio);
+                }
             }
 
+            // ✅ FORMATEAR FECHA SEGÚN RFC3339 (YYYY-MM-DD)
+            const fechaEmision = new Date(venta.fecha);
+            const fechaFormateada = fechaEmision.toISOString().split('T')[0]; // "2025-01-15"
+
+            // ✅ VALIDAR CAE
+            const cae = venta.cae_id;
+            if (!cae) {
+                console.warn('⚠️ Venta sin CAE, no se puede generar QR válido');
+                return this.generarQRPlaceholder();
+            }
+
+            // ✅ CONSTRUIR JSON SEGÚN ESPECIFICACIÓN ARCA v1
+            const datosQR = {
+                ver: 1,                                          // Versión del formato
+                fecha: fechaFormateada,                          // Fecha emisión (YYYY-MM-DD)
+                cuit: parseInt(process.env.AFIP_CUIT || '30714525030'), // CUIT emisor (sin guiones)
+                ptoVta: 1,                                       // Punto de venta
+                tipoCmp: tipoComprobante,                        // Tipo comprobante
+                nroCmp: parseInt(venta.id),                      // Número de comprobante
+                importe: parseFloat(venta.total),                // Importe total
+                moneda: "PES",                                   // Moneda (PES = Pesos)
+                ctz: 1,                                          // Cotización (1 para pesos)
+                tipoDocRec: tipoDocReceptor,                     // Tipo doc receptor
+                nroDocRec: nroDocReceptor,                       // Nro doc receptor
+                tipoCodAut: "E",                                 // Tipo autorización (E = CAE)
+                codAut: parseInt(cae)                            // CAE
+            };
+
+            console.log('📋 Datos QR construidos:', JSON.stringify(datosQR, null, 2));
+
+            // ✅ SOLICITAR QR AL MICROSERVICIO
             const response = await axios.post(
-                `${ARCA_MICROSERVICE_URL}/api/generar-qr`, 
-                {
-                    cae: venta.cae_id,
-                    tipoComprobante: tipoComprobante,
-                    puntoVenta: 1,
-                    numeroComprobante: venta.id,
-                    fechaEmision: venta.fecha,
-                    total: venta.total,
-                    cuitEmisor: process.env.AFIP_CUIT || '20409378472',
-                    cuitReceptor: venta.cliente_cuit || '0',
-                    tipoDocReceptor: tipoDocReceptor
-                }, 
+                `${ARCA_MICROSERVICE_URL}/api/arca/generar-qr`, 
+                datosQR,
                 { timeout: 5000 }
             );
 
             if (response.data && response.data.qrBase64) {
-                console.log('✅ QR obtenido del microservicio ARCA');
+                console.log('✅ QR obtenido del microservicio ARCA correctamente');
+                console.log('🔗 URL del QR:', response.data.qrUrl);
                 return response.data.qrBase64;
             }
 
             throw new Error('No se recibió QR del microservicio');
             
         } catch (error) {
-            console.warn('⚠️ Error obteniendo QR desde ARCA:', error.message);
-            return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-        }
-    }
-
-    // ✅ FUNCIÓN PRINCIPAL MEJORADA: DETECTAR QUÉ FACTURA USAR SEGÚN TIPO_F
-    async generarFactura(venta, productos) {
-        const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
-        
-        // ✅ Facturas A o B → ARCA con CAE
-        if (tipoFiscal === 'A' || tipoFiscal === 'B') {
-            const tieneCAEAprobado = venta.cae_id && 
-                                      venta.cae_resultado && 
-                                      venta.cae_resultado.toString().trim().toUpperCase() === 'A';
-
-            if (tieneCAEAprobado) {
-                console.log(`📋 Generando Factura ARCA tipo ${tipoFiscal} con CAE:`, venta.cae_id);
-                return await this.generarFacturaARCA(venta, productos);
-            } else {
-                console.warn(`⚠️ Factura tipo ${tipoFiscal} sin CAE aprobado, usando genérica`);
-                return await this.generarFacturaGenerica(venta, productos);
+            console.error('❌ Error generando QR desde ARCA:', error.message);
+            if (error.response) {
+                console.error('📋 Respuesta del servidor:', error.response.data);
             }
-        } else {
-            // ✅ Facturas C o cualquier otro tipo → Genérica (factura.html)
-            console.log(`📋 Generando Factura Genérica tipo ${tipoFiscal}`);
-            return await this.generarFacturaGenerica(venta, productos);
+            
+            // ✅ GENERAR QR LOCAL SI FALLA EL MICROSERVICIO
+            console.log('🔄 Intentando generar QR localmente...');
+            return await this.generarQRLocal(venta);
         }
     }
 
-    // ✅ GENERAR FACTURA ARCA (A y B) - PRECIOS SIN IVA
-    async generarFacturaARCA(venta, productos) {
-        const templatePath = path.join(this.templatesPath, 'factura_arca.html');
-        
-        if (!fs.existsSync(templatePath)) {
-            throw new Error('Plantilla factura_arca.html no encontrada');
+    // ✅ FUNCIÓN DE RESPALDO: GENERAR QR LOCALMENTE
+    async generarQRLocal(venta) {
+        try {
+            console.log('⚠️ Generando QR localmente (fallback)...');
+            
+            const QRCode = require('qrcode');
+            
+            // ✅ CONSTRUIR DATOS SEGÚN ESPECIFICACIÓN ARCA
+            const tipoComprobanteMap = { 'A': 1, 'B': 6, 'C': 11 };
+            const tipoComprobante = tipoComprobanteMap[venta.tipo_f] || 6;
+            
+            let tipoDocReceptor = 99;
+            let nroDocReceptor = 0;
+            
+            if (venta.cliente_cuit) {
+                const cuitLimpio = venta.cliente_cuit.replace(/[^0-9]/g, '');
+                if (cuitLimpio.length === 11) {
+                    tipoDocReceptor = 80;
+                    nroDocReceptor = parseInt(cuitLimpio);
+                } else if (cuitLimpio.length >= 7 && cuitLimpio.length <= 8) {
+                    tipoDocReceptor = 96;
+                    nroDocReceptor = parseInt(cuitLimpio);
+                }
+            }
+
+            const fechaEmision = new Date(venta.fecha);
+            const fechaFormateada = fechaEmision.toISOString().split('T')[0];
+
+            // ✅ VALIDAR CAE
+            if (!venta.cae_id) {
+                console.warn('⚠️ No hay CAE, usando QR placeholder');
+                return this.generarQRPlaceholder();
+            }
+
+            // ✅ JSON CON DATOS DEL COMPROBANTE
+            const datosComprobante = {
+                ver: 1,
+                fecha: fechaFormateada,
+                cuit: parseInt(process.env.AFIP_CUIT || '30714525030'),
+                ptoVta: 1,
+                tipoCmp: tipoComprobante,
+                nroCmp: parseInt(venta.id),
+                importe: parseFloat(venta.total),
+                moneda: "PES",
+                ctz: 1,
+                tipoDocRec: tipoDocReceptor,
+                nroDocRec: nroDocReceptor,
+                tipoCodAut: "E",
+                codAut: parseInt(venta.cae_id)
+            };
+
+            // ✅ CODIFICAR EN BASE64
+            const jsonString = JSON.stringify(datosComprobante);
+            const base64Data = Buffer.from(jsonString, 'utf8').toString('base64');
+            
+            // ✅ CONSTRUIR URL SEGÚN ESPECIFICACIÓN ARCA
+            const qrUrl = `https://www.arca.gob.ar/fe/qr/?p=${base64Data}`;
+            
+            console.log('📋 URL del QR:', qrUrl);
+            console.log('📋 JSON QR:', jsonString);
+            
+            // ✅ GENERAR QR
+            const qrDataURL = await QRCode.toDataURL(qrUrl, {
+                errorCorrectionLevel: 'M',
+                type: 'image/png',
+                width: 200,
+                margin: 1
+            });
+            
+            console.log('✅ QR generado localmente correctamente');
+            return qrDataURL;
+            
+        } catch (error) {
+            console.error('❌ Error generando QR local:', error);
+            return this.generarQRPlaceholder();
         }
-
-        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-
-        console.log('📱 Generando QR...');
-        const qrBase64 = await this.generarQRDesdeARCA(venta);
-        const logoARCABase64 = this.obtenerLogoARCABase64();
-
-        const tipoComprobante = venta.tipo_f || 'B';
-        const fechaFormateada = this.formatearFecha(venta.fecha);
-        const fechaVencimientoCAE = this.formatearFecha(venta.cae_fecha);
-        
-        htmlTemplate = htmlTemplate
-            .replace(/{{tipo_comprobante}}/g, tipoComprobante)
-            .replace(/{{punto_venta}}/g, String(1).padStart(4, '0'))
-            .replace(/{{numero_comprobante}}/g, String(venta.id).padStart(8, '0'))
-            .replace(/{{fecha}}/g, fechaFormateada)
-            .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-            .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-            .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-            .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-            .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-            .replace(/{{cliente_cuit}}/g, venta.cliente_cuit || 'No informado')
-            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-            .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
-            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
-
-        // ✅ ITEMS SIN IVA - PRECIOS Y TOTALES SIN IVA
-        const itemsHTML = productos.map(producto => {
-            const cantidad = parseFloat(producto.cantidad) || 0;
-            const subtotal = parseFloat(producto.subtotal) || 0; // Sin IVA
-            const precioUnitarioSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
-            const cantidadFormateada = this.formatearCantidad(cantidad);
-
-            return `
-                <tr>
-                    <td style="text-align: center;">${cantidadFormateada}</td>
-                    <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-                    <td style="text-align: center;">21.00</td>
-                    <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
-                    <td style="text-align: right;">${subtotal.toFixed(2)}</td>
-                </tr>
-            `;
-        }).join('');
-
-        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
-
-        // ✅ CALCULAR TOTALES: SUBTOTAL (sin IVA) + IVA 21%
-        const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
-        const ivaTotal = subtotal * 0.21; // IVA 21% sobre el neto
-        const total = subtotal + ivaTotal;
-
-        htmlTemplate = htmlTemplate
-            .replace(/{{subtotal}}/g, subtotal.toFixed(2))
-            .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
-            .replace(/{{total}}/g, total.toFixed(2))
-            .replace(/{{qr_base64}}/g, qrBase64)
-            .replace(/{{logo_arca}}/g, logoARCABase64)
-            .replace(/{{cae}}/g, venta.cae_id)
-            .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
-
-        console.log('📄 Generando PDF de Factura ARCA...');
-        return await this.generatePdfFromHtml(htmlTemplate);
     }
+
+
+
+    async generarFactura(venta, productos) {
+    const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
+    const condicionIVA = (venta.cliente_condicion || '').toString().trim();
+    
+    console.log(`📋 Generando factura tipo ${tipoFiscal} para ${condicionIVA}`);
+    
+    // ✅ Facturas A o B → ARCA con CAE
+    if (tipoFiscal === 'A' || tipoFiscal === 'B') {
+      const tieneCAEAprobado = venta.cae_id && 
+                                venta.cae_resultado && 
+                                venta.cae_resultado.toString().trim().toUpperCase() === 'A';
+
+      if (tieneCAEAprobado) {
+        console.log(`📋 Generando Factura ARCA tipo ${tipoFiscal} con CAE:`, venta.cae_id);
+        return await this.generarFacturaARCA(venta, productos);
+      } else {
+        console.warn(`⚠️ Factura tipo ${tipoFiscal} sin CAE aprobado, usando genérica`);
+        return await this.generarFacturaGenerica(venta, productos);
+      }
+    } else {
+      // ✅ Facturas C o cualquier otro tipo → Genérica
+      console.log(`📋 Generando Factura Genérica tipo ${tipoFiscal}`);
+      return await this.generarFacturaGenerica(venta, productos);
+    }
+  }
+
+    /**
+   * ✅ GENERAR FACTURA ARCA (A y B) 
+   * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
+   */
+  async generarFacturaARCA(venta, productos) {
+    const templatePath = path.join(this.templatesPath, 'factura_arca.html');
+    
+    if (!fs.existsSync(templatePath)) {
+      throw new Error('Plantilla factura_arca.html no encontrada');
+    }
+
+    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+    console.log('📱 Generando QR...');
+    const qrBase64 = await this.generarQRDesdeARCA(venta);
+    const logoARCABase64 = this.obtenerLogoARCABase64();
+
+    const tipoComprobante = venta.tipo_f || 'B';
+    const fechaFormateada = this.formatearFecha(venta.fecha);
+    const fechaVencimientoCAE = this.formatearFecha(venta.cae_fecha);
+    
+    // ✅ Determinar si el cliente está EXENTO
+    const condicionIVA = (venta.cliente_condicion || '').toString().trim();
+    const esExento = condicionIVA === 'Exento';
+    
+    console.log(`🔖 Cliente ${condicionIVA} ${esExento ? '(SIN IVA)' : '(CON IVA)'}`);
+    
+    // ✅ MANEJO CONDICIONAL DE OBSERVACIONES
+    let observacionesHTML = '';
+    const observaciones = (venta.observaciones || '').toString().trim();
+    
+    if (observaciones && observaciones.toLowerCase() !== 'sin observaciones') {
+        observacionesHTML = `
+            <p><strong>OBSERVACIONES:</strong></p>
+            <p>${observaciones}</p>
+        `;
+        console.log('📝 Observaciones incluidas en la factura');
+    } else {
+        console.log('📝 Sin observaciones para mostrar');
+    }
+    
+    // Reemplazar datos generales
+    htmlTemplate = htmlTemplate
+      .replace(/{{tipo_comprobante}}/g, tipoComprobante)
+      .replace(/{{punto_venta}}/g, String(1).padStart(4, '0'))
+      .replace(/{{numero_comprobante}}/g, String(venta.id).padStart(8, '0'))
+      .replace(/{{fecha}}/g, fechaFormateada)
+      .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
+      .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
+      .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
+      .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
+      .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
+      .replace(/{{cliente_cuit}}/g, venta.cliente_cuit || 'No informado')
+      .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
+      .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
+      .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado')
+      .replace(/{{observaciones_html}}/g, observacionesHTML); // ✅ NUEVO
+
+    // ✅ ITEMS - Mostrar precios según si es EXENTO o no
+    const itemsHTML = productos.map(producto => {
+      const cantidad = parseFloat(producto.cantidad) || 0;
+      const subtotal = parseFloat(producto.subtotal) || 0;
+      const precioUnitarioSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
+      const cantidadFormateada = this.formatearCantidad(cantidad);
+
+      return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
+          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
+          <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
+          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join('');
+
+    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+    // ✅ TOTALES
+    const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+    
+    let ivaTotal = 0;
+    let total = subtotal;
+    
+    if (!esExento) {
+      ivaTotal = subtotal * 0.21;
+      total = subtotal + ivaTotal;
+    }
+
+    htmlTemplate = htmlTemplate
+      .replace(/{{subtotal}}/g, subtotal.toFixed(2))
+      .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
+      .replace(/{{total}}/g, total.toFixed(2))
+      .replace(/{{qr_base64}}/g, qrBase64)
+      .replace(/{{logo_arca}}/g, logoARCABase64)
+      .replace(/{{cae}}/g, venta.cae_id)
+      .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
+    
+    console.log('📄 Generando PDF de Factura ARCA...');
+    console.log(`   Subtotal: $${subtotal.toFixed(2)}`);
+    console.log(`   IVA 21%: $${ivaTotal.toFixed(2)} ${esExento ? '(EXENTO)' : ''}`);
+    console.log(`   Total: $${total.toFixed(2)}`);
+    
+    return await this.generatePdfFromHtml(htmlTemplate);
+  }
+
+  /**
+   * ✅ FACTURA GENÉRICA (C) - CON IVA INCLUIDO, SIN $
+   */
+  async generarFacturaGenerica(venta, productos) {
+    const templatePath = path.join(this.templatesPath, 'factura.html');
+    
+    if (!fs.existsSync(templatePath)) {
+      throw new Error('Plantilla factura.html no encontrada');
+    }
+
+    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+    
+    const fechaFormateada = this.formatearFecha(venta.fecha);
+    htmlTemplate = htmlTemplate
+      .replace(/{{fecha}}/g, fechaFormateada)
+      .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
+      .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
+
+    // ✅ ITEMS CON IVA INCLUIDO
+    const itemsHTML = productos.map(producto => {
+      const cantidad = parseFloat(producto.cantidad) || 0;
+      const subtotal = parseFloat(producto.subtotal) || 0;
+      const iva = parseFloat(producto.iva || producto.IVA) || 0;
+      const total = subtotal + iva;
+      const productoPrecioIva = cantidad > 0 ? (total / cantidad) : 0;
+      const cantidadFormateada = this.formatearCantidad(cantidad);
+
+      return `
+        <tr>
+          <td>${producto.producto_id}</td>
+          <td>${producto.producto_nombre}</td>
+          <td>${producto.producto_um}</td>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
+          <td style="text-align: right;">${total.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join('');
+    
+    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+    
+    const totalFactura = productos.reduce((acc, item) => {
+      const subtotal = parseFloat(item.subtotal) || 0;
+      const iva = parseFloat(item.iva || item.IVA) || 0;
+      return acc + subtotal + iva;
+    }, 0);
+
+    htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
+
+    return await this.generatePdfFromHtml(htmlTemplate);
+  }
 
     // ✅ FACTURA GENÉRICA (C) - SIN SÍMBOLO $
     async generarFacturaGenerica(venta, productos) {

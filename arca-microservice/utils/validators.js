@@ -3,25 +3,20 @@ import {
   TIPOS_DOCUMENTO, 
   CONDICIONES_IVA,
   CONCEPTOS,
-  validarCombinaciónComprobanteIVA
+  validarCombinaciónComprobanteIVA,
+  esExento
 } from '../types/billing.types.js';
 
 /**
  * VALIDADORES DE DATOS DE FACTURACIÓN
- * 
- * Estos validadores aseguran que los datos cumplen con los
- * requisitos de ARCA antes de enviarlos
  */
 
 /**
  * Validar CUIT
- * Verifica formato y dígito verificador
  */
 export function validarCUIT(cuit) {
-  // Remover guiones si los tiene
   const cuitLimpio = cuit.toString().replace(/-/g, '');
   
-  // Debe tener 11 dígitos
   if (!/^\d{11}$/.test(cuitLimpio)) {
     return { valido: false, error: 'CUIT debe tener 11 dígitos' };
   }
@@ -60,7 +55,6 @@ export function validarDNI(dni) {
 
 /**
  * Validar fecha
- * Debe estar en formato YYYYMMDD
  */
 export function validarFecha(fecha) {
   const fechaStr = fecha.toString();
@@ -81,7 +75,6 @@ export function validarFecha(fecha) {
     return { valido: false, error: 'Día inválido' };
   }
   
-  // Verificar que la fecha no sea mayor a 10 días en el futuro o pasado
   const fechaDate = new Date(año, mes - 1, dia);
   const hoy = new Date();
   const diferenciaDias = Math.abs((fechaDate - hoy) / (1000 * 60 * 60 * 24));
@@ -111,7 +104,6 @@ export function validarPuntoVenta(puntoVenta) {
 
 /**
  * Validar importes
- * Los importes deben ser números positivos con máximo 2 decimales
  */
 export function validarImporte(importe, nombre = 'Importe') {
   const imp = parseFloat(importe);
@@ -124,7 +116,6 @@ export function validarImporte(importe, nombre = 'Importe') {
     return { valido: false, error: `${nombre} no puede ser negativo` };
   }
   
-  // Verificar máximo 2 decimales
   if (!/^\d+(\.\d{1,2})?$/.test(importe.toString())) {
     return { valido: false, error: `${nombre} debe tener máximo 2 decimales` };
   }
@@ -134,7 +125,7 @@ export function validarImporte(importe, nombre = 'Importe') {
 
 /**
  * Validar estructura completa de un comprobante
- * Esta es la validación principal antes de enviar a ARCA
+ * ✅ ACTUALIZADO: Valida correctamente EXENTOS (sin IVA)
  */
 export function validarDatosComprobante(datos) {
   const errores = [];
@@ -193,43 +184,53 @@ export function validarDatosComprobante(datos) {
   
   const totalCalculado = impNetoParsed + impIVAParsed + impTotConcParsed + impOpExParsed + impTribParsed;
   
-  // Permitir diferencia de 0.01 por redondeos
   if (Math.abs(totalCalculado - impTotalParsed) > 0.01) {
     errores.push(
       `ImpTotal (${impTotalParsed}) no coincide con la suma de componentes (${totalCalculado.toFixed(2)})`
     );
   }
   
-  // 7. Validar IVA si corresponde
-  if (datos.ImpIVA > 0 && (!datos.Iva || datos.Iva.length === 0)) {
-    errores.push('Si ImpIVA > 0, debe incluir el array Iva con las alícuotas');
-  }
+  // ✅ 7. Validar IVA (excepto para EXENTOS)
+  const esReceptorExento = esExento(datos.CondicionIVAReceptorId);
   
-  if (datos.Iva && datos.Iva.length > 0) {
-    let sumaBaseImp = 0;
-    let sumaIVA = 0;
-    
-    datos.Iva.forEach((alicuota, index) => {
-      if (!alicuota.Id) errores.push(`Iva[${index}].Id es obligatorio`);
-      if (alicuota.BaseImp === undefined) errores.push(`Iva[${index}].BaseImp es obligatorio`);
-      if (alicuota.Importe === undefined) errores.push(`Iva[${index}].Importe es obligatorio`);
-      
-      sumaBaseImp += parseFloat(alicuota.BaseImp || 0);
-      sumaIVA += parseFloat(alicuota.Importe || 0);
-    });
-    
-    // Verificar que la suma de bases imponibles coincida con ImpNeto
-    if (Math.abs(sumaBaseImp - impNetoParsed) > 0.01) {
-      errores.push(
-        `La suma de BaseImp en Iva (${sumaBaseImp.toFixed(2)}) debe coincidir con ImpNeto (${impNetoParsed})`
-      );
+  if (!esReceptorExento) {
+    // Si NO es exento y hay IVA, debe tener array Iva
+    if (datos.ImpIVA > 0 && (!datos.Iva || datos.Iva.length === 0)) {
+      errores.push('Si ImpIVA > 0, debe incluir el array Iva con las alícuotas');
     }
     
-    // Verificar que la suma de importes IVA coincida con ImpIVA
-    if (Math.abs(sumaIVA - impIVAParsed) > 0.01) {
-      errores.push(
-        `La suma de Importe en Iva (${sumaIVA.toFixed(2)}) debe coincidir con ImpIVA (${impIVAParsed})`
-      );
+    if (datos.Iva && datos.Iva.length > 0) {
+      let sumaBaseImp = 0;
+      let sumaIVA = 0;
+      
+      datos.Iva.forEach((alicuota, index) => {
+        if (!alicuota.Id) errores.push(`Iva[${index}].Id es obligatorio`);
+        if (alicuota.BaseImp === undefined) errores.push(`Iva[${index}].BaseImp es obligatorio`);
+        if (alicuota.Importe === undefined) errores.push(`Iva[${index}].Importe es obligatorio`);
+        
+        sumaBaseImp += parseFloat(alicuota.BaseImp || 0);
+        sumaIVA += parseFloat(alicuota.Importe || 0);
+      });
+      
+      if (Math.abs(sumaBaseImp - impNetoParsed) > 0.01) {
+        errores.push(
+          `La suma de BaseImp en Iva (${sumaBaseImp.toFixed(2)}) debe coincidir con ImpNeto (${impNetoParsed})`
+        );
+      }
+      
+      if (Math.abs(sumaIVA - impIVAParsed) > 0.01) {
+        errores.push(
+          `La suma de Importe en Iva (${sumaIVA.toFixed(2)}) debe coincidir con ImpIVA (${impIVAParsed})`
+        );
+      }
+    }
+  } else {
+    // ✅ Si es EXENTO, ImpIVA debe ser 0 y NO debe tener array Iva
+    if (datos.ImpIVA > 0) {
+      errores.push('Para receptores EXENTOS, ImpIVA debe ser 0');
+    }
+    if (datos.Iva && datos.Iva.length > 0) {
+      errores.push('Para receptores EXENTOS, no debe incluir array Iva');
     }
   }
   
@@ -260,7 +261,6 @@ export function validarDatosComprobante(datos) {
 
 /**
  * Validar datos de entrada de la API
- * Formato más amigable para el usuario
  */
 export function validarDatosEntrada(datos) {
   const errores = [];

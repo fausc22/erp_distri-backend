@@ -1,10 +1,7 @@
-import { PORCENTAJES_IVA, ALICUOTAS_IVA } from '../types/billing.types.js';
+import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento } from '../types/billing.types.js';
 
 /**
- * FORMATEADORES DE DATOS
- * 
- * Convierte datos del formato amigable del usuario
- * al formato que requiere ARCA
+ * FORMATEADORES DE DATOS PARA ARCA/AFIP
  */
 
 /**
@@ -47,10 +44,6 @@ export function redondear(numero) {
 
 /**
  * Calcular IVA desde un precio neto
- * 
- * @param {number} precioNeto - Precio sin IVA
- * @param {number} alicuotaId - ID de la alícuota (ej: 5 para 21%)
- * @returns {number} Importe del IVA
  */
 export function calcularIVA(precioNeto, alicuotaId) {
   const porcentaje = PORCENTAJES_IVA[alicuotaId] || 0;
@@ -59,10 +52,6 @@ export function calcularIVA(precioNeto, alicuotaId) {
 
 /**
  * Calcular precio total (neto + IVA)
- * 
- * @param {number} precioNeto - Precio sin IVA
- * @param {number} alicuotaId - ID de la alícuota
- * @returns {number} Precio total con IVA
  */
 export function calcularPrecioTotal(precioNeto, alicuotaId) {
   const iva = calcularIVA(precioNeto, alicuotaId);
@@ -71,12 +60,14 @@ export function calcularPrecioTotal(precioNeto, alicuotaId) {
 
 /**
  * Agrupar items por alícuota de IVA
- * ARCA requiere que se envíe el IVA agrupado por alícuota
- * 
- * @param {Array} items - Array de items con precio neto y alícuota
- * @returns {Array} Array con alícuotas agrupadas
+ * ✅ ACTUALIZADO: Maneja casos de EXENTO (sin IVA)
  */
-export function agruparIVAPorAlicuota(items) {
+export function agruparIVAPorAlicuota(items, condicionIVAReceptor) {
+  // Si el receptor está exento, no se agrega IVA
+  if (esExento(condicionIVAReceptor)) {
+    return [];
+  }
+
   const agrupado = {};
   
   items.forEach(item => {
@@ -96,7 +87,6 @@ export function agruparIVAPorAlicuota(items) {
     agrupado[alicuotaId].Importe += iva;
   });
   
-  // Redondear los totales
   return Object.values(agrupado).map(alicuota => ({
     Id: alicuota.Id,
     BaseImp: redondear(alicuota.BaseImp),
@@ -106,20 +96,21 @@ export function agruparIVAPorAlicuota(items) {
 
 /**
  * Calcular totales de un array de items
- * 
- * @param {Array} items - Items con cantidad, precioUnitario y alicuotaIVA
- * @returns {Object} Totales calculados
+ * ✅ ACTUALIZADO: Maneja casos de EXENTO
  */
-export function calcularTotales(items) {
+export function calcularTotales(items, condicionIVAReceptor) {
   let totalNeto = 0;
   let totalIVA = 0;
   
   items.forEach(item => {
     const precioNeto = item.cantidad * item.precioUnitario;
-    const iva = calcularIVA(precioNeto, item.alicuotaIVA);
-    
     totalNeto += precioNeto;
-    totalIVA += iva;
+    
+    // ✅ Si está EXENTO, no calcular IVA
+    if (!esExento(condicionIVAReceptor)) {
+      const iva = calcularIVA(precioNeto, item.alicuotaIVA);
+      totalIVA += iva;
+    }
   });
   
   return {
@@ -138,19 +129,16 @@ export function formatearDocumento(documento) {
 
 /**
  * Transformar datos de entrada del usuario al formato ARCA
- * Esta es la función principal de transformación
- * 
- * @param {Object} datosUsuario - Datos en formato amigable
- * @param {number} numeroComprobante - Número del comprobante
- * @param {number} puntoVenta - Punto de venta
- * @returns {Object} Datos en formato ARCA
+ * ✅ ACTUALIZADO: Maneja todos los casos (RI, Monotributo, Consumidor Final, Exento)
  */
 export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVenta) {
-  // 1. Calcular totales de los items
-  const totales = calcularTotales(datosUsuario.items);
+  const condicionIVAReceptor = datosUsuario.cliente.condicionIVA;
   
-  // 2. Agrupar IVA por alícuota
-  const ivaAgrupado = agruparIVAPorAlicuota(datosUsuario.items);
+  // 1. Calcular totales considerando si es exento
+  const totales = calcularTotales(datosUsuario.items, condicionIVAReceptor);
+  
+  // 2. Agrupar IVA por alícuota (vacío si es exento)
+  const ivaAgrupado = agruparIVAPorAlicuota(datosUsuario.items, condicionIVAReceptor);
   
   // 3. Formatear documento del cliente
   const documentoFormateado = formatearDocumento(datosUsuario.cliente.numeroDocumento);
@@ -165,23 +153,27 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     CantReg: 1,
     PtoVta: puntoVenta,
     CbteTipo: datosUsuario.tipoComprobante,
-    Concepto: datosUsuario.concepto || 1, // Por defecto: Productos
+    Concepto: datosUsuario.concepto || 1,
     DocTipo: datosUsuario.cliente.tipoDocumento,
     DocNro: parseInt(documentoFormateado) || 0,
     CbteDesde: numeroComprobante,
     CbteHasta: numeroComprobante,
     CbteFch: fecha,
     ImpTotal: totales.total,
-    ImpTotConc: datosUsuario.impTotConc || 0, // Importe no gravado
+    ImpTotConc: datosUsuario.impTotConc || 0,
     ImpNeto: totales.totalNeto,
-    ImpOpEx: datosUsuario.impOpEx || 0, // Importe exento
+    ImpOpEx: datosUsuario.impOpEx || 0,
     ImpIVA: totales.totalIVA,
-    ImpTrib: datosUsuario.impTrib || 0, // Tributos adicionales
+    ImpTrib: datosUsuario.impTrib || 0,
     MonId: datosUsuario.moneda || 'PES',
     MonCotiz: datosUsuario.cotizacionMoneda || 1,
-    CondicionIVAReceptorId: datosUsuario.cliente.condicionIVA,
-    Iva: ivaAgrupado
+    CondicionIVAReceptorId: condicionIVAReceptor
   };
+
+  // ✅ Solo agregar array Iva si no está exento
+  if (!esExento(condicionIVAReceptor) && ivaAgrupado.length > 0) {
+    datosARCA.Iva = ivaAgrupado;
+  }
   
   // 6. Agregar fechas de servicio si corresponde
   if (datosUsuario.fechaServicioDesde && datosUsuario.fechaServicioHasta) {
@@ -193,7 +185,7 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
       ? datosUsuario.fechaServicioHasta
       : dateAFormatoARCA(datosUsuario.fechaServicioHasta);
       
-    datosARCA.FchVtoPago = datosARCA.FchServHasta; // Fecha de vencimiento de pago
+    datosARCA.FchVtoPago = datosARCA.FchServHasta;
   }
   
   // 7. Agregar tributos si existen
@@ -225,7 +217,7 @@ export function formatearRespuestaARCA(respuestaARCA, datosOriginal) {
     autorizacion: {
       cae: respuestaARCA.CAE,
       fechaVencimiento: respuestaARCA.CAEFchVto,
-      resultado: respuestaARCA.Resultado || 'A' // A = Aprobado
+      resultado: respuestaARCA.Resultado || 'A'
     },
     cliente: {
       tipoDocumento: datosOriginal.DocTipo,

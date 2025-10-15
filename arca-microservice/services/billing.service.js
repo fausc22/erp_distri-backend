@@ -2,13 +2,17 @@ import afipService from './afip.service.js';
 import afipConfig from '../config/afip.config.js';
 import { validarDatosEntrada, validarDatosComprobante } from '../utils/validators.js';
 import { transformarAFormatoARCA, formatearRespuestaARCA } from '../utils/formatters.js';
-import { getNombreComprobante } from '../types/billing.types.js';
+import { 
+  getNombreComprobante, 
+  determinarTipoComprobante,
+  determinarTipoDocumento,
+  esExento,
+  CONDICIONES_IVA,
+  TIPOS_COMPROBANTE
+} from '../types/billing.types.js';
 
 /**
  * SERVICIO DE FACTURACIÓN
- * 
- * Este servicio proporciona la lógica de negocio para
- * crear facturas electrónicas de forma simple
  */
 
 class BillingService {
@@ -18,35 +22,7 @@ class BillingService {
 
   /**
    * CREAR FACTURA
-   * 
-   * Método principal para crear una factura electrónica
-   * Maneja toda la lógica: validación, numeración, envío a ARCA
-   * 
-   * @param {Object} datosFactura - Datos de la factura en formato amigable
-   * @returns {Promise<Object>} Resultado de la factura creada
-   * 
-   * FORMATO DE datosFactura:
-   * {
-   *   tipoComprobante: 6,          // 6 = Factura B (ver TIPOS_COMPROBANTE)
-   *   concepto: 1,                 // 1 = Productos, 2 = Servicios, 3 = Ambos
-   *   puntoVenta: 1,               // Punto de venta (opcional, usa default)
-   *   cliente: {
-   *     tipoDocumento: 99,         // 99 = Consumidor Final, 80 = CUIT, 96 = DNI
-   *     numeroDocumento: 0,        // 0 para consumidor final
-   *     condicionIVA: 5            // 5 = Consumidor Final, 1 = Responsable Inscripto
-   *   },
-   *   items: [
-   *     {
-   *       descripcion: "Producto 1",
-   *       cantidad: 2,
-   *       precioUnitario: 100,     // Precio SIN IVA
-   *       alicuotaIVA: 5           // 5 = 21% (ver ALICUOTAS_IVA)
-   *     }
-   *   ],
-   *   fecha: 20250930,             // Opcional, usa fecha actual si no se especifica
-   *   moneda: 'PES',               // Opcional, por defecto PES (pesos)
-   *   cotizacionMoneda: 1          // Opcional, por defecto 1
-   * }
+   * ✅ ACTUALIZADO: Maneja todos los casos (RI, Monotributo, CF, Exento)
    */
   async crearFactura(datosFactura) {
     try {
@@ -62,7 +38,12 @@ class BillingService {
         console.error('❌ Errores de validación:', validacion.errores);
         throw new Error('Datos inválidos:\n' + validacion.errores.join('\n'));
       }
+      
+      const condicionIVA = datosFactura.cliente.condicionIVA;
+      const esClienteExento = esExento(condicionIVA);
+      
       console.log('✓ Datos válidos');
+      console.log(`  - Condición IVA: ${condicionIVA} ${esClienteExento ? '(EXENTO)' : ''}`);
       
       // PASO 2: Obtener punto de venta
       const puntoVenta = datosFactura.puntoVenta || afipConfig.puntoVentaDefault;
@@ -89,7 +70,7 @@ class BillingService {
       
       console.log('✓ Datos transformados:');
       console.log(`  - Importe Neto: $${datosARCA.ImpNeto}`);
-      console.log(`  - IVA: $${datosARCA.ImpIVA}`);
+      console.log(`  - IVA: $${datosARCA.ImpIVA} ${esClienteExento ? '(EXENTO - Sin IVA)' : ''}`);
       console.log(`  - Total: $${datosARCA.ImpTotal}`);
       
       // PASO 5: Validar estructura final
@@ -119,9 +100,8 @@ class BillingService {
         datosARCA
       );
       
-      // Agregar información adicional
       respuestaFormateada.items = datosFactura.items;
-      respuestaFormateada.datosARCA = datosARCA; // Para debugging
+      respuestaFormateada.datosARCA = datosARCA;
       
       return respuestaFormateada;
       
@@ -132,50 +112,93 @@ class BillingService {
   }
 
   /**
-   * CREAR NOTA DE CRÉDITO
-   * 
-   * Crea una nota de crédito asociada a una factura
-   * 
-   * @param {Object} datosNota - Similar a datosFactura pero para nota de crédito
-   * @returns {Promise<Object>} Resultado de la nota creada
+   * CREAR FACTURA PARA CONSUMIDOR FINAL
+   * ✅ Puede incluir DNI del consumidor
    */
-  async crearNotaCredito(datosNota) {
-    // Las notas de crédito siguen el mismo proceso que las facturas
-    // pero con tipo de comprobante diferente:
-    // - Nota Crédito A: 3
-    // - Nota Crédito B: 8
-    // - Nota Crédito C: 13
+  async crearFacturaConsumidorFinal(items, opciones = {}) {
+    const datosFactura = {
+      tipoComprobante: TIPOS_COMPROBANTE.FACTURA_B,
+      concepto: opciones.concepto || 1,
+      cliente: {
+        tipoDocumento: opciones.dni ? determinarTipoDocumento(opciones.dni) : 99,
+        numeroDocumento: opciones.dni || 0,
+        condicionIVA: CONDICIONES_IVA.CONSUMIDOR_FINAL
+      },
+      items: items,
+      ...opciones
+    };
     
-    return await this.crearFactura(datosNota);
+    return await this.crearFactura(datosFactura);
   }
 
   /**
-   * CREAR NOTA DE DÉBITO
-   * 
-   * Crea una nota de débito asociada a una factura
-   * 
-   * @param {Object} datosNota - Similar a datosFactura pero para nota de débito
-   * @returns {Promise<Object>} Resultado de la nota creada
+   * CREAR FACTURA A RESPONSABLE INSCRIPTO
    */
-  async crearNotaDebito(datosNota) {
-    // Las notas de débito siguen el mismo proceso que las facturas
-    // pero con tipo de comprobante diferente:
-    // - Nota Débito A: 2
-    // - Nota Débito B: 7
-    // - Nota Débito C: 12
+  async crearFacturaResponsableInscripto(cuit, items, opciones = {}) {
+    const datosFactura = {
+      tipoComprobante: TIPOS_COMPROBANTE.FACTURA_A,
+      concepto: opciones.concepto || 1,
+      cliente: {
+        tipoDocumento: 80, // CUIT
+        numeroDocumento: cuit,
+        condicionIVA: CONDICIONES_IVA.RESPONSABLE_INSCRIPTO
+      },
+      items: items,
+      ...opciones
+    };
     
+    return await this.crearFactura(datosFactura);
+  }
+
+  /**
+   * CREAR FACTURA A MONOTRIBUTISTA
+   */
+  async crearFacturaMonotributista(cuit, items, opciones = {}) {
+    const datosFactura = {
+      tipoComprobante: TIPOS_COMPROBANTE.FACTURA_A,
+      concepto: opciones.concepto || 1,
+      cliente: {
+        tipoDocumento: 80, // CUIT
+        numeroDocumento: cuit,
+        condicionIVA: CONDICIONES_IVA.MONOTRIBUTO
+      },
+      items: items,
+      ...opciones
+    };
+    
+    return await this.crearFactura(datosFactura);
+  }
+
+  /**
+   * ✅ NUEVO: CREAR FACTURA A EXENTO
+   */
+  async crearFacturaExento(cuitODni, items, opciones = {}) {
+    const tipoDoc = determinarTipoDocumento(cuitODni);
+    
+    const datosFactura = {
+      tipoComprobante: TIPOS_COMPROBANTE.FACTURA_B,
+      concepto: opciones.concepto || 1,
+      cliente: {
+        tipoDocumento: tipoDoc,
+        numeroDocumento: cuitODni || 0,
+        condicionIVA: CONDICIONES_IVA.EXENTO
+      },
+      items: items,
+      ...opciones
+    };
+    
+    return await this.crearFactura(datosFactura);
+  }
+
+  /**
+   * CREAR NOTA DE CRÉDITO
+   */
+  async crearNotaCredito(datosNota) {
     return await this.crearFactura(datosNota);
   }
 
   /**
    * CONSULTAR FACTURA
-   * 
-   * Consulta una factura ya emitida por su número
-   * 
-   * @param {number} numeroComprobante - Número del comprobante
-   * @param {number} puntoVenta - Punto de venta
-   * @param {number} tipoComprobante - Tipo de comprobante
-   * @returns {Promise<Object>} Información de la factura
    */
   async consultarFactura(numeroComprobante, puntoVenta, tipoComprobante) {
     try {
@@ -207,12 +230,6 @@ class BillingService {
 
   /**
    * OBTENER ÚLTIMO NÚMERO
-   * 
-   * Consulta el último número de comprobante emitido
-   * 
-   * @param {number} tipoComprobante - Tipo de comprobante
-   * @param {number} puntoVenta - Punto de venta (opcional)
-   * @returns {Promise<number>} Último número
    */
   async obtenerUltimoNumero(tipoComprobante, puntoVenta = null) {
     const pv = puntoVenta || afipConfig.puntoVentaDefault;
@@ -220,98 +237,13 @@ class BillingService {
   }
 
   /**
-   * CREAR FACTURA PARA CONSUMIDOR FINAL
-   * 
-   * Método helper para crear rápidamente una Factura B a consumidor final
-   * Este es el caso de uso más común
-   * 
-   * @param {Array} items - Array de items a facturar
-   * @param {Object} opciones - Opciones adicionales (opcional)
-   * @returns {Promise<Object>} Resultado de la factura
-   */
-  async crearFacturaConsumidorFinal(items, opciones = {}) {
-    const datosFactura = {
-      tipoComprobante: 6, // Factura B
-      concepto: opciones.concepto || 1, // Productos
-      cliente: {
-        tipoDocumento: 99, // Consumidor Final
-        numeroDocumento: 0,
-        condicionIVA: 5 // Consumidor Final
-      },
-      items: items,
-      ...opciones
-    };
-    
-    return await this.crearFactura(datosFactura);
-  }
-
-  /**
-   * CREAR FACTURA A RESPONSABLE INSCRIPTO
-   * 
-   * Método helper para crear una Factura A a un responsable inscripto
-   * 
-   * @param {string} cuit - CUIT del cliente
-   * @param {Array} items - Array de items a facturar
-   * @param {Object} opciones - Opciones adicionales (opcional)
-   * @returns {Promise<Object>} Resultado de la factura
-   */
-  async crearFacturaResponsableInscripto(cuit, items, opciones = {}) {
-    const datosFactura = {
-      tipoComprobante: 1, // Factura A
-      concepto: opciones.concepto || 1, // Productos
-      cliente: {
-        tipoDocumento: 80, // CUIT
-        numeroDocumento: cuit,
-        condicionIVA: 1 // Responsable Inscripto
-      },
-      items: items,
-      ...opciones
-    };
-    
-    return await this.crearFactura(datosFactura);
-  }
-
-  /**
-   * CREAR FACTURA A MONOTRIBUTISTA
-   * 
-   * Método helper para crear una Factura B a un monotributista
-   * 
-   * @param {string} cuit - CUIT del monotributista
-   * @param {Array} items - Array de items a facturar
-   * @param {Object} opciones - Opciones adicionales (opcional)
-   * @returns {Promise<Object>} Resultado de la factura
-   */
-  async crearFacturaMonotributista(cuit, items, opciones = {}) {
-    const datosFactura = {
-      tipoComprobante: 6, // Factura B
-      concepto: opciones.concepto || 1, // Productos
-      cliente: {
-        tipoDocumento: 80, // CUIT
-        numeroDocumento: cuit,
-        condicionIVA: 6 // Monotributo
-      },
-      items: items,
-      ...opciones
-    };
-    
-    return await this.crearFactura(datosFactura);
-  }
-
-  /**
    * VERIFICAR SALUD DEL SERVICIO
-   * 
-   * Verifica que todo esté configurado y funcionando
-   * 
-   * @returns {Promise<Object>} Estado del servicio
    */
   async verificarSalud() {
     try {
       console.log('\n🏥 Verificando salud del servicio...');
       
-      // Verificar estado del servidor de ARCA
       const estadoServidor = await afipService.verificarEstadoServidor();
-      
-      // Intentar obtener último comprobante de prueba
       const ultimoComprobante = await afipService.obtenerUltimoComprobante(1, 6);
       
       return {
@@ -333,6 +265,5 @@ class BillingService {
   }
 }
 
-// Exportar instancia única (singleton)
 const billingService = new BillingService();
 export default billingService;
