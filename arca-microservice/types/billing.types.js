@@ -169,6 +169,14 @@ export function determinarTipoDocumento(documento) {
   return TIPOS_DOCUMENTO.CONSUMIDOR_FINAL;
 }
 
+export function esNotaCredito(tipoComprobante) {
+  return [
+    TIPOS_COMPROBANTE.NOTA_CREDITO_A,
+    TIPOS_COMPROBANTE.NOTA_CREDITO_B,
+    TIPOS_COMPROBANTE.NOTA_CREDITO_C
+  ].includes(tipoComprobante);
+}
+
 export default {
   TIPOS_COMPROBANTE,
   CONCEPTOS,
@@ -181,5 +189,6 @@ export default {
   getNombreComprobante,
   validarCombinaciónComprobanteIVA,
   esExento,
-  determinarTipoDocumento
+  determinarTipoDocumento,
+  esNotaCredito,
 };

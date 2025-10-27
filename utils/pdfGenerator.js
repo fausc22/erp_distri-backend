@@ -345,10 +345,29 @@ class PdfGenerator {
     console.log('📱 Generando QR...');
     const qrBase64 = await this.generarQRDesdeARCA(venta);
     const logoARCABase64 = this.obtenerLogoARCABase64();
-
-    const tipoComprobante = venta.tipo_f || 'B';
+    
+    const tipoComprobante = venta.tipo_f;
     const fechaFormateada = this.formatearFecha(venta.fecha);
     const fechaVencimientoCAE = this.formatearFecha(venta.cae_fecha);
+    
+    // ✅ DESGLOSAR NÚMERO DE FACTURA: "A 0004-00000001"
+    let puntoVenta = '';
+    let numeroComprobante = '';
+    
+    if (venta.numero_factura) {
+        const regex = /^([A-Z]+)\s+(\d{4})-(\d{8})$/;
+        const match = venta.numero_factura.trim().match(regex);
+        
+        if (match) {
+            puntoVenta = match[2];           // "0004"
+            numeroComprobante = match[3];     // "00000001"
+            console.log(`📋 Número desglosado: PV=${puntoVenta}, Comp=${numeroComprobante}`);
+        } else {
+            console.warn(`⚠️ Formato de numero_factura inesperado: ${venta.numero_factura}, usando valores por defecto`);
+        }
+    } else {
+        console.warn(`⚠️ numero_factura no disponible, usando ID de venta: ${venta.id}`);
+    }
     
     // ✅ Determinar si el cliente está EXENTO
     const condicionIVA = (venta.cliente_condicion || '').toString().trim();
@@ -373,8 +392,8 @@ class PdfGenerator {
     // Reemplazar datos generales
     htmlTemplate = htmlTemplate
       .replace(/{{tipo_comprobante}}/g, tipoComprobante)
-      .replace(/{{punto_venta}}/g, String(1).padStart(4, '0'))
-      .replace(/{{numero_comprobante}}/g, String(venta.id).padStart(8, '0'))
+      .replace(/{{punto_venta}}/g, puntoVenta)              // ✅ CAMBIADO
+      .replace(/{{numero_comprobante}}/g, numeroComprobante) // ✅ CAMBIADO
       .replace(/{{fecha}}/g, fechaFormateada)
       .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
       .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
@@ -385,7 +404,7 @@ class PdfGenerator {
       .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
       .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
       .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado')
-      .replace(/{{observaciones_html}}/g, observacionesHTML); // ✅ NUEVO
+      .replace(/{{observaciones_html}}/g, observacionesHTML);
 
     // ✅ ITEMS - Mostrar precios según si es EXENTO o no
     const itemsHTML = productos.map(producto => {

@@ -182,4 +182,56 @@ router.post('/generar-qr', async (req, res) => {
   }
 });
 
+
+
+/**
+ * CREAR NOTA DE CRÉDITO A
+ * POST /arca/notas-credito/tipo-a
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, cuit?: string, fecha?: number },
+ *   cuit: string,
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { concepto?, condicionIVA?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-credito/tipo-a', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaCreditoA(req, res)
+);
+
+/**
+ * CREAR NOTA DE CRÉDITO B
+ * POST /arca/notas-credito/tipo-b
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, fecha?: number },
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { dni?, concepto?, condicionIVA?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-credito/tipo-b', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaCreditoB(req, res)
+);
+
+/**
+ * CREAR NOTA DE CRÉDITO (AUTO-DETECTA TIPO A O B)
+ * POST /arca/notas-credito
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, cuit?: string, fecha?: number },
+ *   datosCliente: { cuit?: string, dni?: string, condicionIVA: number },
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { concepto?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-credito', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaCreditoGeneral(req, res)
+);
+
 module.exports = router;

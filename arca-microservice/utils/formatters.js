@@ -1,4 +1,4 @@
-import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento } from '../types/billing.types.js';
+import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento, esNotaCredito } from '../types/billing.types.js';
 
 /**
  * FORMATEADORES DE DATOS PARA ARCA/AFIP
@@ -63,13 +63,22 @@ export function calcularPrecioTotal(precioNeto, alicuotaId) {
  * ✅ ACTUALIZADO: Maneja casos de EXENTO (sin IVA)
  */
 export function agruparIVAPorAlicuota(items, condicionIVAReceptor) {
-  // Si el receptor está exento, no se agrega IVA
-  if (esExento(condicionIVAReceptor)) {
-    return [];
-  }
-
   const agrupado = {};
   
+  // ✅ CAMBIO CRÍTICO: Si es exento, usar alícuota 3 (0%) en lugar de array vacío
+  if (esExento(condicionIVAReceptor)) {
+    const baseTotal = items.reduce((acc, item) => {
+      return acc + (item.cantidad * item.precioUnitario);
+    }, 0);
+    
+    return [{
+      Id: 3,              // Alícuota 3 = 0% (Exento)
+      BaseImp: redondear(baseTotal),
+      Importe: 0          // IVA = 0 para exentos
+    }];
+  }
+
+  // Para NO exentos, agrupar normalmente
   items.forEach(item => {
     const alicuotaId = item.alicuotaIVA;
     const precioNeto = item.cantidad * item.precioUnitario;
@@ -170,10 +179,9 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     CondicionIVAReceptorId: condicionIVAReceptor
   };
 
-  // ✅ Solo agregar array Iva si no está exento
-  if (!esExento(condicionIVAReceptor) && ivaAgrupado.length > 0) {
-    datosARCA.Iva = ivaAgrupado;
-  }
+  if (ivaAgrupado.length > 0) {
+  datosARCA.Iva = ivaAgrupado;
+}
   
   // 6. Agregar fechas de servicio si corresponde
   if (datosUsuario.fechaServicioDesde && datosUsuario.fechaServicioHasta) {
@@ -187,6 +195,15 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
       
     datosARCA.FchVtoPago = datosARCA.FchServHasta;
   }
+
+  if (esNotaCredito(datosUsuario.tipoComprobante)) {
+  if (!datosUsuario.comprobantesAsociados || datosUsuario.comprobantesAsociados.length === 0) {
+    throw new Error('Las Notas de Crédito deben tener al menos un comprobante asociado');
+  }
+  
+  datosARCA.CbtesAsoc = formatearComprobantesAsociados(datosUsuario.comprobantesAsociados);
+  console.log(`✅ ${datosARCA.CbtesAsoc.length} comprobante(s) asociado(s) a la Nota de Crédito`);
+}
   
   // 7. Agregar tributos si existen
   if (datosUsuario.tributos && datosUsuario.tributos.length > 0) {
@@ -199,6 +216,21 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
   }
   
   return datosARCA;
+}
+
+export function formatearComprobantesAsociados(comprobantesAsociados) {
+  if (!comprobantesAsociados || comprobantesAsociados.length === 0) {
+    return [];
+  }
+  
+  return comprobantesAsociados.map(comp => ({
+    Tipo: parseInt(comp.tipo),
+    PtoVta: parseInt(comp.puntoVenta),
+    Nro: parseInt(comp.numero),
+    // ✅ Campos opcionales según SDK
+    Cuit: comp.cuit ? parseInt(comp.cuit) : undefined,
+    CbteFch: comp.fecha ? parseInt(comp.fecha) : undefined
+  }));
 }
 
 /**
@@ -243,5 +275,6 @@ export default {
   calcularTotales,
   formatearDocumento,
   transformarAFormatoARCA,
-  formatearRespuestaARCA
+  formatearRespuestaARCA,
+  formatearComprobantesAsociados 
 };

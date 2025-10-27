@@ -4,7 +4,8 @@ import {
   CONDICIONES_IVA,
   CONCEPTOS,
   validarCombinaciónComprobanteIVA,
-  esExento
+  esExento,
+  esNotaCredito
 } from '../types/billing.types.js';
 
 /**
@@ -145,6 +146,7 @@ export function validarDatosComprobante(datos) {
   if (!datos.MonId) errores.push('MonId es obligatorio');
   if (datos.MonCotiz === undefined) errores.push('MonCotiz es obligatorio');
   
+  
   // 2. Validar punto de venta
   const validPV = validarPuntoVenta(datos.PtoVta);
   if (!validPV.valido) errores.push(validPV.error);
@@ -173,6 +175,10 @@ export function validarDatosComprobante(datos) {
   
   const validImpIVA = validarImporte(datos.ImpIVA, 'ImpIVA');
   if (!validImpIVA.valido) errores.push(validImpIVA.error);
+  const validNC = validarNotaCredito(datos);
+if (!validNC.valido) {
+  errores.push(...validNC.errores);
+}
   
   // 6. Validar coherencia de importes
   const impNetoParsed = parseFloat(datos.ImpNeto);
@@ -190,49 +196,50 @@ export function validarDatosComprobante(datos) {
     );
   }
   
-  // ✅ 7. Validar IVA (excepto para EXENTOS)
-  const esReceptorExento = esExento(datos.CondicionIVAReceptorId);
+  // ✅ 7. Validar IVA (TODOS deben tener array Iva)
+const esReceptorExento = esExento(datos.CondicionIVAReceptorId);
+
+// SIEMPRE debe tener array Iva si ImpNeto > 0
+if (datos.ImpNeto > 0 && (!datos.Iva || datos.Iva.length === 0)) {
+  errores.push('Si ImpNeto > 0, debe incluir el array Iva (usar alícuota 3 con Importe 0 para exentos)');
+}
+
+if (datos.Iva && datos.Iva.length > 0) {
+  let sumaBaseImp = 0;
+  let sumaIVA = 0;
   
-  if (!esReceptorExento) {
-    // Si NO es exento y hay IVA, debe tener array Iva
-    if (datos.ImpIVA > 0 && (!datos.Iva || datos.Iva.length === 0)) {
-      errores.push('Si ImpIVA > 0, debe incluir el array Iva con las alícuotas');
-    }
+  datos.Iva.forEach((alicuota, index) => {
+    if (!alicuota.Id) errores.push(`Iva[${index}].Id es obligatorio`);
+    if (alicuota.BaseImp === undefined) errores.push(`Iva[${index}].BaseImp es obligatorio`);
+    if (alicuota.Importe === undefined) errores.push(`Iva[${index}].Importe es obligatorio`);
     
-    if (datos.Iva && datos.Iva.length > 0) {
-      let sumaBaseImp = 0;
-      let sumaIVA = 0;
-      
-      datos.Iva.forEach((alicuota, index) => {
-        if (!alicuota.Id) errores.push(`Iva[${index}].Id es obligatorio`);
-        if (alicuota.BaseImp === undefined) errores.push(`Iva[${index}].BaseImp es obligatorio`);
-        if (alicuota.Importe === undefined) errores.push(`Iva[${index}].Importe es obligatorio`);
-        
-        sumaBaseImp += parseFloat(alicuota.BaseImp || 0);
-        sumaIVA += parseFloat(alicuota.Importe || 0);
-      });
-      
-      if (Math.abs(sumaBaseImp - impNetoParsed) > 0.01) {
-        errores.push(
-          `La suma de BaseImp en Iva (${sumaBaseImp.toFixed(2)}) debe coincidir con ImpNeto (${impNetoParsed})`
-        );
-      }
-      
-      if (Math.abs(sumaIVA - impIVAParsed) > 0.01) {
-        errores.push(
-          `La suma de Importe en Iva (${sumaIVA.toFixed(2)}) debe coincidir con ImpIVA (${impIVAParsed})`
-        );
-      }
+    sumaBaseImp += parseFloat(alicuota.BaseImp || 0);
+    sumaIVA += parseFloat(alicuota.Importe || 0);
+  });
+  
+  if (Math.abs(sumaBaseImp - impNetoParsed) > 0.01) {
+    errores.push(
+      `La suma de BaseImp en Iva (${sumaBaseImp.toFixed(2)}) debe coincidir con ImpNeto (${impNetoParsed})`
+    );
+  }
+  
+  if (Math.abs(sumaIVA - impIVAParsed) > 0.01) {
+    errores.push(
+      `La suma de Importe en Iva (${sumaIVA.toFixed(2)}) debe coincidir con ImpIVA (${impIVAParsed})`
+    );
+  }
+  
+  // ✅ Para exentos, validar que use alícuota 3 con Importe 0
+  if (esReceptorExento) {
+    const tieneAlicuotaExento = datos.Iva.some(alicuota => alicuota.Id === 3);
+    if (!tieneAlicuotaExento) {
+      errores.push('Para receptores EXENTOS debe usar alícuota ID 3 (0%)');
     }
-  } else {
-    // ✅ Si es EXENTO, ImpIVA debe ser 0 y NO debe tener array Iva
-    if (datos.ImpIVA > 0) {
+    if (impIVAParsed !== 0) {
       errores.push('Para receptores EXENTOS, ImpIVA debe ser 0');
     }
-    if (datos.Iva && datos.Iva.length > 0) {
-      errores.push('Para receptores EXENTOS, no debe incluir array Iva');
-    }
   }
+}
   
   // 8. Validar combinación de tipo de comprobante y condición IVA
   if (datos.CondicionIVAReceptorId) {
@@ -290,6 +297,30 @@ export function validarDatosEntrada(datos) {
   };
 }
 
+export function validarNotaCredito(datos) {
+  const errores = [];
+  
+  // Si es Nota de Crédito, debe tener comprobante asociado
+  if (esNotaCredito(datos.CbteTipo)) {
+    if (!datos.CbtesAsoc || datos.CbtesAsoc.length === 0) {
+      errores.push('Las Notas de Crédito deben tener al menos un comprobante asociado');
+    }
+    
+    if (datos.CbtesAsoc && datos.CbtesAsoc.length > 0) {
+      datos.CbtesAsoc.forEach((asoc, index) => {
+        if (!asoc.Tipo) errores.push(`CbtesAsoc[${index}].Tipo es obligatorio`);
+        if (!asoc.PtoVta) errores.push(`CbtesAsoc[${index}].PtoVta es obligatorio`);
+        if (!asoc.Nro) errores.push(`CbtesAsoc[${index}].Nro es obligatorio`);
+      });
+    }
+  }
+  
+  return {
+    valido: errores.length === 0,
+    errores
+  };
+}
+
 export default {
   validarCUIT,
   validarDNI,
@@ -297,5 +328,6 @@ export default {
   validarPuntoVenta,
   validarImporte,
   validarDatosComprobante,
-  validarDatosEntrada
+  validarDatosEntrada,
+  validarNotaCredito
 };

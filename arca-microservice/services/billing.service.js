@@ -236,6 +236,142 @@ class BillingService {
     return await afipService.obtenerUltimoComprobante(pv, tipoComprobante);
   }
 
+
+
+  /**
+ * ✅ CREAR NOTA DE CRÉDITO A (Responsable Inscripto/Monotributo)
+ * Anula total o parcialmente una Factura A
+ */
+async crearNotaCreditoA(
+  facturaAsociada, // { tipo, puntoVenta, numero, cuit?, fecha? }
+  clienteCuit,
+  items,
+  opciones = {}
+) {
+  try {
+    console.log('\n╔══════════════════════════════════════════╗');
+    console.log('║   CREANDO NOTA DE CRÉDITO A              ║');
+    console.log('╚══════════════════════════════════════════╝');
+    
+    console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+    
+    const datosNota = {
+      tipoComprobante: TIPOS_COMPROBANTE.NOTA_CREDITO_A,
+      concepto: opciones.concepto || 1,
+      cliente: {
+        tipoDocumento: 80, // CUIT
+        numeroDocumento: clienteCuit,
+        condicionIVA: opciones.condicionIVA || CONDICIONES_IVA.RESPONSABLE_INSCRIPTO
+      },
+      items: items,
+      comprobantesAsociados: [facturaAsociada],
+      ...opciones
+    };
+    
+    console.log(`💰 Items: ${items.length} productos`);
+    console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+    
+    const resultado = await this.crearFactura(datosNota);
+    
+    console.log('✅ Nota de Crédito A creada exitosamente\n');
+    return resultado;
+    
+  } catch (error) {
+    console.error('❌ Error creando Nota de Crédito A:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * ✅ CREAR NOTA DE CRÉDITO B (Consumidor Final/Exento)
+ * Anula total o parcialmente una Factura B
+ */
+async crearNotaCreditoB(
+  facturaAsociada, // { tipo, puntoVenta, numero, fecha? }
+  items,
+  opciones = {}
+) {
+  try {
+    console.log('\n╔══════════════════════════════════════════╗');
+    console.log('║   CREANDO NOTA DE CRÉDITO B              ║');
+    console.log('╚══════════════════════════════════════════╝');
+    
+    console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+    
+    // Determinar documento del cliente
+    const tipoDoc = opciones.dni ? determinarTipoDocumento(opciones.dni) : 99;
+    const numeroDoc = opciones.dni || 0;
+    
+    const datosNota = {
+      tipoComprobante: TIPOS_COMPROBANTE.NOTA_CREDITO_B,
+      concepto: opciones.concepto || 1,
+      cliente: {
+        tipoDocumento: tipoDoc,
+        numeroDocumento: numeroDoc,
+        condicionIVA: opciones.condicionIVA || CONDICIONES_IVA.CONSUMIDOR_FINAL
+      },
+      items: items,
+      comprobantesAsociados: [facturaAsociada],
+      ...opciones
+    };
+    
+    console.log(`💰 Items: ${items.length} productos`);
+    console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+    
+    const resultado = await this.crearFactura(datosNota);
+    
+    console.log('✅ Nota de Crédito B creada exitosamente\n');
+    return resultado;
+    
+  } catch (error) {
+    console.error('❌ Error creando Nota de Crédito B:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * ✅ CREAR NOTA DE CRÉDITO GENÉRICA (detecta automáticamente tipo A o B)
+ * Wrapper que decide entre NC A o NC B según condición IVA
+ */
+async crearNotaCredito(
+  facturaAsociada, // { tipo, puntoVenta, numero, cuit?, fecha? }
+  datosCliente, // { cuit?, dni?, condicionIVA }
+  items,
+  opciones = {}
+) {
+  try {
+    const condicionIVA = datosCliente.condicionIVA || CONDICIONES_IVA.CONSUMIDOR_FINAL;
+    
+    // ✅ Determinar tipo de NC según condición IVA
+    if (condicionIVA === CONDICIONES_IVA.RESPONSABLE_INSCRIPTO || 
+        condicionIVA === CONDICIONES_IVA.MONOTRIBUTO) {
+      
+      if (!datosCliente.cuit) {
+        throw new Error('CUIT es obligatorio para Nota de Crédito A');
+      }
+      
+      return await this.crearNotaCreditoA(
+        facturaAsociada,
+        datosCliente.cuit,
+        items,
+        { ...opciones, condicionIVA }
+      );
+      
+    } else {
+      // Consumidor Final o Exento
+      return await this.crearNotaCreditoB(
+        facturaAsociada,
+        items,
+        { ...opciones, dni: datosCliente.dni, condicionIVA }
+      );
+    }
+    
+  } catch (error) {
+    console.error('❌ Error creando Nota de Crédito:', error.message);
+    throw error;
+  }
+}
+
   /**
    * VERIFICAR SALUD DEL SERVICIO
    */
@@ -264,6 +400,11 @@ class BillingService {
     }
   }
 }
+
+
+
+
+
 
 const billingService = new BillingService();
 export default billingService;

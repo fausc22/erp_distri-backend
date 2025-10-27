@@ -350,7 +350,192 @@ class BillingController {
       });
     }
   }
+
+
+  /**
+ * POST /api/notas-credito/tipo-a
+ * Crear Nota de Crédito A (Responsable Inscripto/Monotributo)
+ */
+async crearNotaCreditoA(req, res) {
+  console.log('📦 Body recibido:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { facturaAsociada, cuit, items, opciones } = req.body;
+    
+    // ✅ VALIDACIONES
+    if (!facturaAsociada) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos de la factura asociada'
+      });
+    }
+    
+    if (!facturaAsociada.tipo || !facturaAsociada.puntoVenta || !facturaAsociada.numero) {
+      return res.status(400).json({
+        success: false,
+        message: 'La factura asociada debe tener: tipo, puntoVenta y numero'
+      });
+    }
+    
+    if (!cuit) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar el CUIT del cliente'
+      });
+    }
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe incluir al menos un item'
+      });
+    }
+    
+    // ✅ CREAR NOTA DE CRÉDITO
+    const resultado = await billingService.crearNotaCreditoA(
+      facturaAsociada,
+      cuit,
+      items,
+      opciones
+    );
+    
+    res.status(201).json({
+      success: true,
+      message: 'Nota de Crédito A creada exitosamente',
+      data: resultado
+    });
+    
+  } catch (error) {
+    console.error('Error en crearNotaCreditoA:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error al crear Nota de Crédito A',
+      error: error.message
+    });
+  }
 }
+
+/**
+ * POST /api/notas-credito/tipo-b
+ * Crear Nota de Crédito B (Consumidor Final/Exento)
+ */
+async crearNotaCreditoB(req, res) {
+  console.log('📦 Body recibido:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { facturaAsociada, items, opciones } = req.body;
+    
+    // ✅ VALIDACIONES
+    if (!facturaAsociada) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos de la factura asociada'
+      });
+    }
+    
+    if (!facturaAsociada.tipo || !facturaAsociada.puntoVenta || !facturaAsociada.numero) {
+      return res.status(400).json({
+        success: false,
+        message: 'La factura asociada debe tener: tipo, puntoVenta y numero'
+      });
+    }
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe incluir al menos un item'
+      });
+    }
+    
+    // ✅ CREAR NOTA DE CRÉDITO
+    const resultado = await billingService.crearNotaCreditoB(
+      facturaAsociada,
+      items,
+      opciones
+    );
+    
+    res.status(201).json({
+      success: true,
+      message: 'Nota de Crédito B creada exitosamente',
+      data: resultado
+    });
+    
+  } catch (error) {
+    console.error('Error en crearNotaCreditoB:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error al crear Nota de Crédito B',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * POST /api/notas-credito
+ * Crear Nota de Crédito (detecta automáticamente tipo A o B)
+ */
+async crearNotaCreditoGeneral(req, res) {
+  console.log('📦 Body recibido:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { facturaAsociada, datosCliente, items, opciones } = req.body;
+    
+    // ✅ VALIDACIONES
+    if (!facturaAsociada) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos de la factura asociada'
+      });
+    }
+    
+    if (!datosCliente) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos del cliente'
+      });
+    }
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe incluir al menos un item'
+      });
+    }
+    
+    // ✅ CREAR NOTA DE CRÉDITO
+    const resultado = await billingService.crearNotaCredito(
+      facturaAsociada,
+      datosCliente,
+      items,
+      opciones
+    );
+    
+    res.status(201).json({
+      success: true,
+      message: 'Nota de Crédito creada exitosamente',
+      data: resultado
+    });
+    
+  } catch (error) {
+    console.error('Error en crearNotaCreditoGeneral:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error al crear Nota de Crédito',
+      error: error.message
+    });
+  }
+}
+
+
+
+}
+
+
+
+
 
 // Exportar instancia única
 const billingController = new BillingController();

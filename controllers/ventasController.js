@@ -21,10 +21,92 @@ const verificarArchivoExiste = (comprobantePath) => {
   }
 };
 
+
+
+
+const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta = null) => {
+    try {
+        const pv = puntoVenta || process.env.DEFAULT_PUNTO_VENTA;
+        const puntoVentaFormateado = String(pv).padStart(4, '0');
+        
+        console.log(`🔢 Obteniendo siguiente número para Factura ${tipoFiscal} - Punto de Venta: ${puntoVentaFormateado}`);
+        
+        // ✅ 1. VERIFICAR SI EXISTE
+        const checkQuery = `
+            SELECT ultimo_numero 
+            FROM control_numeracion_facturas 
+            WHERE punto_venta = ? AND tipo_factura = ?
+        `;
+        
+        let checkResults = await queryPromiseWithConnection(connection, checkQuery, [puntoVentaFormateado, tipoFiscal]);
+        
+        console.log(`🔍 Número actual en BD:`, checkResults[0]?.ultimo_numero || 'No existe');
+        
+        // ✅ 2. SI NO EXISTE, CREARLO
+        if (!checkResults || checkResults.length === 0) {
+            console.log(`⚠️ Creando control para ${tipoFiscal} en PV ${puntoVentaFormateado}...`);
+            
+            const insertQuery = `
+                INSERT INTO control_numeracion_facturas (punto_venta, tipo_factura, ultimo_numero)
+                VALUES (?, ?, 0)
+            `;
+            
+            await queryPromiseWithConnection(connection, insertQuery, [puntoVentaFormateado, tipoFiscal]);
+            console.log(`✅ Control creado - Empezará en 1`);
+        }
+        
+        // ✅ 3. INCREMENTAR
+        const updateQuery = `
+            UPDATE control_numeracion_facturas 
+            SET ultimo_numero = ultimo_numero + 1
+            WHERE punto_venta = ? AND tipo_factura = ?
+        `;
+        
+        await queryPromiseWithConnection(connection, updateQuery, [puntoVentaFormateado, tipoFiscal]);
+        console.log(`✅ Número incrementado en BD`);
+        
+        // ✅ 4. OBTENER EL NUEVO NÚMERO
+        const selectQuery = `
+            SELECT ultimo_numero 
+            FROM control_numeracion_facturas 
+            WHERE punto_venta = ? AND tipo_factura = ?
+            LIMIT 1
+        `;
+        
+        const results = await queryPromiseWithConnection(connection, selectQuery, [puntoVentaFormateado, tipoFiscal]);
+        
+        if (!results || !results[0] || typeof results[0].ultimo_numero === 'undefined') {
+            throw new Error(`No se pudo obtener el número de factura para tipo ${tipoFiscal} en PV ${puntoVentaFormateado}`);
+        }
+        
+        const numeroFactura = results[0].ultimo_numero;
+        
+        // ✅ FORMATO CON TIPO DE COMPROBANTE: "A 0004-00000001"
+        const numeroCompleto = `${tipoFiscal} ${puntoVentaFormateado}-${String(numeroFactura).padStart(8, '0')}`;
+        
+        console.log(`✅ Número asignado: ${numeroCompleto}`);
+        
+        return {
+            numeroFactura,
+            numeroCompleto,
+            puntoVenta: puntoVentaFormateado
+        };
+        
+    } catch (error) {
+        console.error('❌ Error obteniendo número de factura:', error);
+        throw error;
+    }
+};
+
+
+
+
+
+
     const obtenerVentas = (req, res) => {
         const query = `
             SELECT 
-                id, fecha, cliente_id, cliente_nombre, cliente_telefono, 
+                id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
                 cliente_direccion, cliente_ciudad, cliente_provincia, 
                 cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, 
                 subtotal, iva_total, total, estado, observaciones, 
@@ -46,7 +128,7 @@ const verificarArchivoExiste = (comprobantePath) => {
         const ventaId = req.params.ventaId;
         const query = `
             SELECT 
-                id, fecha, cliente_id, cliente_nombre, cliente_telefono, 
+                id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
                 cliente_direccion, cliente_ciudad, cliente_provincia, 
                 cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, 
                 subtotal, iva_total, total, estado, observaciones, 
@@ -490,16 +572,23 @@ const facturarPedido = async (req, res) => {
     const { 
         pedidoId,
         cuentaId, 
-        tipoFiscal, 
+        tipoFiscal,  // 'A', 'B' o 'X'
         subtotalSinIva, 
         ivaTotal, 
         totalConIva,
         descuentoAplicado 
     } = req.body;
 
-    console.log('🧾 Iniciando facturación de pedido con remitos:', pedidoId);
+    console.log(`🧾 Iniciando facturación de pedido ${pedidoId} - Tipo: ${tipoFiscal}`);
 
-    // ✅ USAR beginTransaction CORRECTAMENTE según db.js
+    // ✅ VALIDAR TIPO FISCAL
+    if (!['A', 'B', 'X'].includes(tipoFiscal)) {
+        return res.status(400).json({ 
+            success: false, 
+            message: 'Tipo fiscal inválido. Debe ser A, B o X' 
+        });
+    }
+
     db.beginTransaction(async (err, connection) => {
         if (err) {
             console.error('Error iniciando transacción:', err);
@@ -528,18 +617,27 @@ const facturarPedido = async (req, res) => {
             
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
 
-            // 3. Crear la venta
+            // ✅ 3. OBTENER SIGUIENTE NÚMERO DE FACTURA
+            const { numeroFactura, numeroCompleto, puntoVenta } = await obtenerSiguienteNumeroFactura(
+                connection, 
+                tipoFiscal
+            );
+            
+            console.log(`📄 Número de factura asignado: ${numeroCompleto}`);
+
+            // 4. Crear la venta CON NÚMERO DE FACTURA
             const ventaQuery = `
                 INSERT INTO ventas 
-                (fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
+                (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
                  cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
                  cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, 
                  observaciones, empleado_id, empleado_nombre)
                 VALUES 
-                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?)
+                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?)
             `;
 
             const ventaValues = [
+                numeroCompleto,  // ✅ NUEVO: número_factura
                 pedido.cliente_id,
                 pedido.cliente_nombre,
                 pedido.cliente_telefono,
@@ -561,9 +659,9 @@ const facturarPedido = async (req, res) => {
 
             const ventaResult = await queryPromiseWithConnection(connection, ventaQuery, ventaValues);
             const ventaId = ventaResult.insertId;
-            console.log('💰 Venta creada con ID:', ventaId);
+            console.log('💰 Venta creada con ID:', ventaId, '- Número:', numeroCompleto);
 
-            // 4. Copiar productos del pedido a la venta
+            // 5. Copiar productos del pedido a la venta
             for (const producto of productos) {
                 const productoVentaQuery = `
                     INSERT INTO ventas_cont 
@@ -584,7 +682,29 @@ const facturarPedido = async (req, res) => {
             }
             console.log('📦 Productos copiados a la venta');
 
-            // 5. ✅ CREAR REMITO AUTOMÁTICAMENTE
+            // ✅ 6. SI ES FACTURA A o B → SOLICITAR CAE A ARCA
+            let caeData = null;
+            if (tipoFiscal === 'A' || tipoFiscal === 'B') {
+                console.log(`📡 Solicitando CAE para Factura ${tipoFiscal}...`);
+                
+                try {
+                    // Aquí llamarías al microservicio ARCA
+                    // Por ahora lo dejamos preparado
+                    console.log('⚠️ Integración ARCA pendiente - CAE no solicitado');
+                    
+                    // TODO: Implementar llamada a ARCA
+                    // caeData = await solicitarCAEARCA(ventaId, tipoFiscal);
+                    
+                } catch (arcaError) {
+                    console.error('❌ Error solicitando CAE:', arcaError);
+                    // Decidir si hacer rollback o continuar
+                    // Por ahora continuamos sin CAE
+                }
+            } else {
+                console.log('📝 Factura X (en negro) - No requiere CAE');
+            }
+
+            // 7. Crear remito automáticamente
             console.log('📋 Creando remito automáticamente...');
             
             const datosRemito = {
@@ -606,7 +726,7 @@ const facturarPedido = async (req, res) => {
             const remitoId = await registrarRemitoPromiseWithConnection(connection, datosRemito);
             console.log('📋 Remito creado con ID:', remitoId);
 
-            // 6. ✅ INSERTAR PRODUCTOS EN EL REMITO
+            // 8. Insertar productos en el remito
             console.log('📦 Insertando productos en el remito...');
             
             const errorProductosRemito = await insertarProductosRemitoPromiseWithConnection(connection, remitoId, productos);
@@ -615,7 +735,7 @@ const facturarPedido = async (req, res) => {
             }
             console.log('📦 Productos del remito insertados correctamente');
 
-            // 7. Crear movimiento de fondos (INGRESO)
+            // 9. Crear movimiento de fondos (INGRESO)
             const movimientoQuery = `
                 INSERT INTO movimiento_fondos 
                 (cuenta_id, tipo, origen, referencia_id, monto, fecha)
@@ -624,13 +744,13 @@ const facturarPedido = async (req, res) => {
 
             await queryPromiseWithConnection(connection, movimientoQuery, [
                 cuentaId,
-                `Facturación - ${pedido.cliente_nombre}`,
+                `Facturación ${tipoFiscal} - ${pedido.cliente_nombre}`,
                 ventaId,
                 totalConIva
             ]);
             console.log('💰 Movimiento de fondos registrado');
 
-            // 8. Actualizar saldo de la cuenta
+            // 10. Actualizar saldo de la cuenta
             const actualizarSaldoQuery = `
                 UPDATE cuenta_fondos 
                 SET saldo = saldo + ? 
@@ -640,7 +760,7 @@ const facturarPedido = async (req, res) => {
             await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalConIva, cuentaId]);
             console.log('💳 Saldo de cuenta actualizado');
 
-            // 9. Cambiar estado del pedido a "Facturado"
+            // 11. Cambiar estado del pedido a "Facturado"
             const actualizarPedidoQuery = `
                 UPDATE pedidos 
                 SET estado = 'Facturado' 
@@ -650,8 +770,8 @@ const facturarPedido = async (req, res) => {
             await queryPromiseWithConnection(connection, actualizarPedidoQuery, [pedidoId]);
             console.log('📋 Estado del pedido actualizado a "Facturado"');
 
-            // ✅ 10. CONFIRMAR TRANSACCIÓN - USAR CONNECTION CORRECTAMENTE
-            console.log('✅ Todos los procesos completados, confirmando transacción...');
+            // ✅ 12. CONFIRMAR TRANSACCIÓN
+            console.log('✅ Confirmando transacción...');
             
             await new Promise((resolve, reject) => {
                 connection.commit((err) => {
@@ -660,12 +780,12 @@ const facturarPedido = async (req, res) => {
                         return reject(err);
                     }
                     console.log('✅ Transacción confirmada exitosamente');
-                    connection.release(); // ✅ LIBERAR CONEXIÓN
+                    connection.release();
                     resolve();
                 });
             });
 
-            // 11. Auditar facturación exitosa (después del commit)
+            // 13. Auditar facturación exitosa
             try {
                 await auditarOperacion(req, {
                     accion: 'INSERT',
@@ -673,16 +793,17 @@ const facturarPedido = async (req, res) => {
                     registroId: ventaId,
                     datosNuevos: {
                         id: ventaId,
+                        numero_factura: numeroCompleto,
                         pedido_origen: pedidoId,
                         cliente_nombre: pedido.cliente_nombre,
                         total: totalConIva,
                         tipo_fiscal: tipoFiscal,
-                        cuenta_id: cuentaId
+                        cuenta_id: cuentaId,
+                        cae: caeData?.cae || null
                     },
-                    detallesAdicionales: `Pedido #${pedidoId} facturado como venta #${ventaId} - Cliente: ${pedido.cliente_nombre} - Total: $${totalConIva}`
+                    detallesAdicionales: `Pedido #${pedidoId} facturado como ${tipoFiscal} #${numeroCompleto} - Cliente: ${pedido.cliente_nombre} - Total: $${totalConIva}`
                 });
 
-                // ✅ AUDITAR CREACIÓN DE REMITO
                 await auditarOperacion(req, {
                     accion: 'INSERT',
                     tabla: 'remitos',
@@ -694,29 +815,32 @@ const facturarPedido = async (req, res) => {
                         cliente_nombre: pedido.cliente_nombre,
                         estado: 'Generado'
                     },
-                    detallesAdicionales: `Remito #${remitoId} generado automáticamente desde facturación - Venta #${ventaId} - Cliente: ${pedido.cliente_nombre}`
+                    detallesAdicionales: `Remito #${remitoId} generado desde Factura ${tipoFiscal} #${numeroCompleto} - Cliente: ${pedido.cliente_nombre}`
                 });
             } catch (auditError) {
                 console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
             }
 
-            console.log('✅ Facturación y remito completados exitosamente');
+            console.log('✅ Facturación completada exitosamente');
             res.json({ 
                 success: true, 
-                message: 'Facturación y remito completados exitosamente',
+                message: 'Facturación completada exitosamente',
                 data: {
                     ventaId,
+                    numeroFactura: numeroCompleto,
+                    tipoFactura: tipoFiscal,
                     remitoId,
                     pedidoId,
                     total: totalConIva,
-                    productosCount: productos.length
+                    productosCount: productos.length,
+                    requiereCAE: tipoFiscal !== 'X',
+                    cae: caeData?.cae || null
                 }
             });
 
         } catch (error) {
             console.error('❌ Error en facturación:', error);
             
-            // ✅ ROLLBACK CON CONNECTION CORRECTAMENTE
             try {
                 await new Promise((resolve, reject) => {
                     connection.rollback((rollbackErr) => {
@@ -725,7 +849,7 @@ const facturarPedido = async (req, res) => {
                         } else {
                             console.log('🔄 Rollback ejecutado correctamente');
                         }
-                        connection.release(); // ✅ LIBERAR CONEXIÓN
+                        connection.release();
                         resolve();
                     });
                 });
@@ -733,7 +857,6 @@ const facturarPedido = async (req, res) => {
                 console.error('❌ Error crítico en rollback:', rollbackError);
             }
             
-            // Auditar error en facturación
             try {
                 await auditarOperacion(req, {
                     accion: 'INSERT',
@@ -957,7 +1080,7 @@ const buscarVentasPorCliente = (req, res) => {
 
     const query = `
         SELECT 
-            id, fecha, cliente_id, cliente_nombre, cliente_telefono, 
+            id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
             cliente_direccion, cliente_ciudad, cliente_provincia, 
             cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, 
             subtotal, iva_total, total, estado, observaciones, 
@@ -1038,6 +1161,9 @@ const ventaDirecta = async (req, res) => {
 
     console.log(`💰 [Venta Directa] Iniciando proceso - Usuario: ${empleado_nombre} - Cliente: ${cliente_nombre}`);
 
+
+
+    
     // ✅ USAR beginTransaction CORRECTAMENTE
     db.beginTransaction(async (err, connection) => {
         if (err) {
@@ -1116,17 +1242,26 @@ const ventaDirecta = async (req, res) => {
             // ============================================
             console.log('💰 [Venta Directa] Paso 3: Creando venta...');
             
+            const { numeroFactura, numeroCompleto, puntoVenta } = await obtenerSiguienteNumeroFactura(
+                connection, 
+                tipoFiscal
+            );
+
+            console.log(`📄 Número de factura asignado: ${numeroCompleto}`);
+
+            // Crear la venta CON NÚMERO DE FACTURA
             const ventaQuery = `
                 INSERT INTO ventas 
-                (fecha, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
-                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-                 cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, 
-                 observaciones, empleado_id, empleado_nombre)
+                (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
+                cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
+                cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, 
+                observaciones, empleado_id, empleado_nombre)
                 VALUES 
-                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FACTURA', ?, ?, ?, ?, 'Facturada', ?, ?, ?)
+                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FACTURA', ?, ?, ?, ?, 'Facturada', ?, ?, ?)
             `;
 
             const ventaValues = [
+                numeroCompleto,  // ✅ número_factura
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion,
                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit,
                 cuentaId, tipoFiscal, subtotalSinIva, ivaTotal, totalConIva,
