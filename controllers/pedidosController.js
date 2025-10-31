@@ -722,21 +722,45 @@ const agregarProductoPedidoExistente = async (req, res) => {
     const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal } = req.body;
 
     if (!producto_id || !cantidad || cantidad <= 0) {
-        return res.status(400).json({ 
-            success: false, 
-            message: "Producto ID y cantidad son requeridos, y la cantidad debe ser mayor a 0" 
+        return res.status(400).json({
+            success: false,
+            message: "Producto ID y cantidad son requeridos, y la cantidad debe ser mayor a 0"
         });
     }
 
-    const query = `
-        INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-
     try {
-        // 1. Insertar el producto en pedidos_cont
+        // 1. Obtener la condición IVA del cliente del pedido
+        const obtenerClientePedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT cliente_condicion FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosPedido = await obtenerClientePedidoPromise();
+        if (!datosPedido) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        // 2. Recalcular IVA si el cliente es EXENTO
+        const esClienteExento = datosPedido.cliente_condicion?.toUpperCase() === 'EXENTO';
+        let ivaFinal = iva;
+
+        if (esClienteExento) {
+            ivaFinal = 0;
+            console.log(`✅ Cliente EXENTO detectado - IVA ajustado a 0 para producto ${producto_nombre}`);
+        }
+
+        const query = `
+            INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        // 3. Insertar el producto en pedidos_cont
         const insertResult = await new Promise((resolve, reject) => {
-            db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal], (err, results) => {
+            db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, ivaFinal, subtotal], (err, results) => {
                 if (err) {
                     console.error('Error al insertar el producto:', err);
                     return reject(err);
@@ -745,10 +769,10 @@ const agregarProductoPedidoExistente = async (req, res) => {
             });
         });
 
-        // 2. Actualizar stock (restar la cantidad)
+        // 4. Actualizar stock (restar la cantidad)
         await actualizarStockProducto(producto_id, -cantidad, 'agregar_producto_pedido');
 
-        // 3. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
+        // 5. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
         const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
 
         // 4. Auditar agregado de producto
@@ -835,7 +859,7 @@ const actualizarProductoPedido = async (req, res) => {
     }
 
     try {
-        // 3. Obtener datos anteriores del producto en el pedido
+        // 1. Obtener datos anteriores del producto en el pedido
         const obtenerDatosAnterioresPromise = () => {
             return new Promise((resolve, reject) => {
                 db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
@@ -855,11 +879,62 @@ const actualizarProductoPedido = async (req, res) => {
         const pedidoId = datosAnteriores.pedido_id;
         const diferenciaCantidad = cantidad - cantidadAnterior;
 
-        // ✅ 4. RECALCULAR SUBTOTAL CON DESCUENTO (Verificación)
+        // 2. Obtener condición IVA del cliente del pedido
+        const obtenerClientePedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT cliente_condicion FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosPedido = await obtenerClientePedidoPromise();
+        if (!datosPedido) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        // 3. Ajustar IVA si el cliente es EXENTO
+        const esClienteExento = datosPedido.cliente_condicion?.toUpperCase() === 'EXENTO';
+        let ivaFinal = iva;
+
+        if (esClienteExento) {
+            ivaFinal = 0;
+            console.log(`✅ Cliente EXENTO detectado - IVA ajustado a 0 para producto ${datosAnteriores.producto_nombre}`);
+        }
+
+        // 4. VALIDAR STOCK DISPONIBLE **ANTES** DE ACTUALIZAR
+        // Si aumentamos la cantidad, debemos verificar que haya stock disponible
+        if (diferenciaCantidad > 0) {
+            const obtenerStockPromise = () => {
+                return new Promise((resolve, reject) => {
+                    db.query('SELECT stock_actual FROM productos WHERE id = ?', [productoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results.length > 0 ? results[0] : null);
+                    });
+                });
+            };
+
+            const stockInfo = await obtenerStockPromise();
+            if (!stockInfo) {
+                return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+            }
+
+            // El stock actual ya tiene restadas las cantidades anteriores del pedido
+            // Solo necesitamos verificar que hay stock para la diferencia
+            if (stockInfo.stock_actual < diferenciaCantidad) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Stock insuficiente. Stock disponible: ${stockInfo.stock_actual}, necesitas: ${diferenciaCantidad} adicionales`
+                });
+            }
+        }
+
+        // 5. RECALCULAR SUBTOTAL CON DESCUENTO (Verificación)
         const subtotalBase = precio * cantidad;
         const montoDescuento = (subtotalBase * descuentoFinal) / 100;
         const subtotalConDescuento = subtotalBase - montoDescuento;
-        
+
         // Verificar que el subtotal enviado coincida con el calculado
         if (Math.abs(subtotal - subtotalConDescuento) > 0.01) {
             return res.status(400).json({
@@ -868,15 +943,15 @@ const actualizarProductoPedido = async (req, res) => {
             });
         }
 
-        // ✅ 5. ACTUALIZAR EL PRODUCTO CON DESCUENTO
+        // 6. ACTUALIZAR EL PRODUCTO CON DESCUENTO Y IVA AJUSTADO
         const queryActualizar = `
-            UPDATE pedidos_cont 
+            UPDATE pedidos_cont
             SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?
             WHERE id = ?
         `;
 
         await new Promise((resolve, reject) => {
-            db.query(queryActualizar, [cantidad, precio, iva, subtotal, descuentoFinal, productId], (err, result) => {
+            db.query(queryActualizar, [cantidad, precio, ivaFinal, subtotal, descuentoFinal, productId], (err, result) => {
                 if (err) {
                     console.error('Error al actualizar el producto:', err);
                     return reject(err);
@@ -888,7 +963,7 @@ const actualizarProductoPedido = async (req, res) => {
             });
         });
 
-        // 6. Ajustar stock si hay diferencia en cantidad
+        // 7. Ajustar stock si hay diferencia en cantidad
         if (diferenciaCantidad !== 0) {
             await actualizarStockProducto(productoId, -diferenciaCantidad, 'actualizar_cantidad_pedido');
         }
@@ -1324,32 +1399,37 @@ const obtenerDatosFiltros = (req, res) => {
     });
 };
 
-const recalcularYActualizarTotalesPedido = async (pedidoId) => {
+const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente = null) => {
     return new Promise((resolve, reject) => {
-        // 1. Obtener todos los productos actuales del pedido desde BD
+        // 1. Obtener todos los productos del pedido con su porcentaje de IVA desde la tabla productos
         const queryProductos = `
-            SELECT SUM(subtotal) as subtotal_total, 
-                   SUM(IVA) as iva_total 
-            FROM pedidos_cont 
-            WHERE pedido_id = ?
+            SELECT
+                pc.id,
+                pc.producto_nombre,
+                pc.subtotal,
+                pc.IVA,
+                COALESCE(p.IVA, 21) as porcentaje_iva
+            FROM pedidos_cont pc
+            LEFT JOIN productos p ON pc.producto_id = p.id
+            WHERE pc.pedido_id = ?
         `;
-        
-        db.query(queryProductos, [pedidoId], (err, results) => {
+
+        db.query(queryProductos, [pedidoId], async (err, productos) => {
             if (err) {
-                console.error('Error al calcular totales:', err);
+                console.error('Error al obtener productos:', err);
                 return reject(err);
             }
-            
+
             // Manejar caso sin productos
-            if (results.length === 0 || !results[0].subtotal_total) {
+            if (productos.length === 0) {
                 const totalesCero = { subtotal: 0, iva_total: 0, total: 0 };
-                
+
                 const queryActualizar = `
-                    UPDATE pedidos 
-                    SET subtotal = ?, iva_total = ?, total = ? 
+                    UPDATE pedidos
+                    SET subtotal = ?, iva_total = ?, total = ?
                     WHERE id = ?
                 `;
-                
+
                 db.query(queryActualizar, [0, 0, 0, pedidoId], (err, result) => {
                     if (err) {
                         console.error('Error al actualizar totales a cero:', err);
@@ -1360,32 +1440,79 @@ const recalcularYActualizarTotalesPedido = async (pedidoId) => {
                 });
                 return;
             }
-            
-            // Calcular totales desde BD
-            const subtotalTotal = parseFloat(results[0].subtotal_total) || 0;
-            const ivaTotal = parseFloat(results[0].iva_total) || 0;
-            const total = subtotalTotal + ivaTotal;
-            
-            // 2. Actualizar la tabla pedidos con los totales correctos
-            const queryActualizar = `
-                UPDATE pedidos 
-                SET subtotal = ?, iva_total = ?, total = ? 
-                WHERE id = ?
-            `;
-            
-            db.query(queryActualizar, [subtotalTotal, ivaTotal, total, pedidoId], (err, result) => {
-                if (err) {
-                    console.error('Error al actualizar totales del pedido:', err);
-                    return reject(err);
+
+            try {
+                // 2. Si se proporciona condición IVA, recalcular IVA de cada producto
+                if (condicionIvaCliente) {
+                    const esClienteExento = condicionIvaCliente.toUpperCase() === 'EXENTO';
+                    console.log(`🔄 Recalculando IVA para ${productos.length} productos. Cliente ${esClienteExento ? 'EXENTO' : 'CON IVA'}`);
+
+                    for (const producto of productos) {
+                        const subtotal = parseFloat(producto.subtotal) || 0;
+                        const porcentajeIva = parseFloat(producto.porcentaje_iva) || 21;
+
+                        // Si el cliente es EXENTO, IVA = 0. Si no, calcular IVA
+                        const nuevoIva = esClienteExento
+                            ? 0
+                            : parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
+
+                        // Actualizar IVA del producto
+                        await new Promise((resolveUpdate, rejectUpdate) => {
+                            db.query(
+                                'UPDATE pedidos_cont SET IVA = ? WHERE id = ?',
+                                [nuevoIva, producto.id],
+                                (errUpdate) => {
+                                    if (errUpdate) {
+                                        console.error(`Error actualizando IVA producto ${producto.id}:`, errUpdate);
+                                        return rejectUpdate(errUpdate);
+                                    }
+                                    resolveUpdate();
+                                }
+                            );
+                        });
+                    }
                 }
-                
-                console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Total=${total}`);
-                resolve({
-                    subtotal: subtotalTotal,
-                    iva_total: ivaTotal,
-                    total: total
-                });
-            });
+
+                // 3. Recalcular totales desde la BD (ahora con IVAs actualizados)
+                db.query(
+                    'SELECT SUM(subtotal) as subtotal_total, SUM(IVA) as iva_total FROM pedidos_cont WHERE pedido_id = ?',
+                    [pedidoId],
+                    (errSum, results) => {
+                        if (errSum) {
+                            console.error('Error al calcular totales:', errSum);
+                            return reject(errSum);
+                        }
+
+                        const subtotalTotal = parseFloat(results[0].subtotal_total) || 0;
+                        const ivaTotal = parseFloat(results[0].iva_total) || 0;
+                        const total = subtotalTotal + ivaTotal;
+
+                        // 4. Actualizar totales del pedido
+                        const queryActualizar = `
+                            UPDATE pedidos
+                            SET subtotal = ?, iva_total = ?, total = ?
+                            WHERE id = ?
+                        `;
+
+                        db.query(queryActualizar, [subtotalTotal, ivaTotal, total, pedidoId], (errUpdate, result) => {
+                            if (errUpdate) {
+                                console.error('Error al actualizar totales del pedido:', errUpdate);
+                                return reject(errUpdate);
+                            }
+
+                            console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Total=${total}`);
+                            resolve({
+                                subtotal: subtotalTotal,
+                                iva_total: ivaTotal,
+                                total: total
+                            });
+                        });
+                    }
+                );
+            } catch (error) {
+                console.error('Error en recálculo:', error);
+                reject(error);
+            }
         });
     });
 };
@@ -1525,6 +1652,157 @@ const verificarVersionCatalogo = async (req, res) => {
     }
 };
 
+
+// Actualizar cliente de un pedido existente
+const actualizarClientePedido = async (req, res) => {
+    const pedidoId = req.params.pedidoId;
+    const { cliente_id } = req.body;
+
+    if (!cliente_id) {
+        return res.status(400).json({
+            success: false,
+            message: 'El ID del cliente es requerido'
+        });
+    }
+
+    try {
+        // 1. Obtener datos del pedido antes de actualizarlo
+        const obtenerPedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosAnteriores = await obtenerPedidoPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({
+                success: false,
+                message: 'Pedido no encontrado'
+            });
+        }
+
+        // 2. Obtener datos del nuevo cliente
+        const obtenerClientePromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM clientes WHERE id = ?', [cliente_id], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const nuevoCliente = await obtenerClientePromise();
+        if (!nuevoCliente) {
+            return res.status(404).json({
+                success: false,
+                message: 'Cliente no encontrado'
+            });
+        }
+
+        // 3. Actualizar el pedido con los datos del nuevo cliente
+        const queryActualizar = `
+            UPDATE pedidos
+            SET
+                cliente_id = ?,
+                cliente_nombre = ?,
+                cliente_telefono = ?,
+                cliente_direccion = ?,
+                cliente_ciudad = ?,
+                cliente_provincia = ?,
+                cliente_condicion = ?,
+                cliente_cuit = ?
+            WHERE id = ?
+        `;
+
+        await new Promise((resolve, reject) => {
+            db.query(
+                queryActualizar,
+                [
+                    nuevoCliente.id,
+                    nuevoCliente.nombre,
+                    nuevoCliente.telefono || '',
+                    nuevoCliente.direccion || '',
+                    nuevoCliente.ciudad || '',
+                    nuevoCliente.provincia || '',
+                    nuevoCliente.condicion_iva || '',
+                    nuevoCliente.cuit || '',
+                    pedidoId
+                ],
+                (err, result) => {
+                    if (err) {
+                        console.error('Error al actualizar cliente del pedido:', err);
+                        return reject(err);
+                    }
+                    if (result.affectedRows === 0) {
+                        return reject(new Error('No se pudo actualizar el pedido'));
+                    }
+                    resolve(result);
+                }
+            );
+        });
+
+        // 4. Recalcular totales del pedido basados en la condición IVA del nuevo cliente
+        await recalcularYActualizarTotalesPedido(pedidoId, nuevoCliente.condicion_iva);
+
+        // 5. Auditar el cambio
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosAnteriores,
+            datosNuevos: {
+                ...datosAnteriores,
+                cliente_id: nuevoCliente.id,
+                cliente_nombre: nuevoCliente.nombre,
+                cliente_telefono: nuevoCliente.telefono || '',
+                cliente_direccion: nuevoCliente.direccion || '',
+                cliente_ciudad: nuevoCliente.ciudad || '',
+                cliente_provincia: nuevoCliente.provincia || '',
+                cliente_condicion: nuevoCliente.condicion_iva || '',
+                cliente_cuit: nuevoCliente.cuit || ''
+            },
+            detallesAdicionales: `Cliente del pedido actualizado: "${datosAnteriores.cliente_nombre}" (${datosAnteriores.cliente_condicion}) → "${nuevoCliente.nombre}" (${nuevoCliente.condicion_iva})`
+        });
+
+        console.log(`✅ Cliente del pedido ${pedidoId} actualizado: ${datosAnteriores.cliente_nombre} → ${nuevoCliente.nombre}`);
+
+        res.json({
+            success: true,
+            message: `Cliente actualizado correctamente a: ${nuevoCliente.nombre}`,
+            data: {
+                pedidoId,
+                nuevoCliente: {
+                    id: nuevoCliente.id,
+                    nombre: nuevoCliente.nombre,
+                    ciudad: nuevoCliente.ciudad,
+                    provincia: nuevoCliente.provincia,
+                    condicion_iva: nuevoCliente.condicion_iva
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Error en actualizarClientePedido:', error);
+
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            detallesAdicionales: `Error al actualizar cliente del pedido: ${error.message}`
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Error al actualizar el cliente del pedido'
+        });
+    }
+};
+
+
 module.exports = {
      // Funciones de búsqueda
     buscarCliente,
@@ -1556,5 +1834,6 @@ module.exports = {
     obtenerDatosFiltros,
 
     obtenerCatalogoCompleto,
-    verificarVersionCatalogo
+    verificarVersionCatalogo,
+    actualizarClientePedido
 };

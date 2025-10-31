@@ -13,11 +13,19 @@ router.get('/listar',
     ciudadesController.listarCiudades
 );
 
-// Obtener ciudad por ID
+// Buscar ciudades (DEBE IR ANTES de /:id)
+router.get('/buscar',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ciudades', incluirQuery: true }),
+    ciudadesController.buscarCiudades
+);
+
+// Obtener ciudad por ID (DEBE IR DESPUÉS de rutas específicas)
 router.get('/:id',
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'ciudades' }),
     ciudadesController.obtenerCiudadPorId
 );
+
 
 module.exports = router;

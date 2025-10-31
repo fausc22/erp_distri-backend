@@ -121,4 +121,10 @@ router.get('/verificar-version-catalogo',
     pedidosController.verificarVersionCatalogo
 );
 
+router.put('/actualizar-cliente/:pedidoId', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'pedidos', incluirBody: true }),
+    pedidosController.actualizarClientePedido
+);
+
 module.exports = router;
