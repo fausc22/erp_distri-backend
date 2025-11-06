@@ -1,0 +1,14 @@
+{
+  "name": "arca-microservice",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Microservicio de facturación electrónica AFIP/ARCA usando SOAP nativo",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["afip", "arca", "facturacion", "soap"],
+  "author": "",
+  "license": "ISC"
+}
+

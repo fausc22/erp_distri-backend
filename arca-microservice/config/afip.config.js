@@ -39,33 +39,87 @@ class AfipConfig {
   getAfipSDKConfig() {
     const config = {
       CUIT: this.CUIT,
-      // En desarrollo, si usamos el CUIT de prueba no necesitamos certificados
       production: this.environment === 'prod'
     };
 
-    // Si tenemos rutas de certificados configuradas, las cargamos
-    if (process.env.AFIP_CERT_PATH && process.env.AFIP_KEY_PATH) {
+    const hasAccessToken = !!process.env.AFIP_ACCESS_TOKEN;
+    const hasCertificates = !!(process.env.AFIP_CERT_PATH && process.env.AFIP_KEY_PATH);
+
+    // ✅ CASO 1: AfipSDK con access_token + certificados (RECOMENDADO)
+    if (hasAccessToken && hasCertificates) {
       try {
+        config.access_token = process.env.AFIP_ACCESS_TOKEN;
         config.cert = fs.readFileSync(process.env.AFIP_CERT_PATH, { encoding: 'utf8' });
         config.key = fs.readFileSync(process.env.AFIP_KEY_PATH, { encoding: 'utf8' });
-        console.log('✓ Certificados cargados correctamente');
+        
+        console.log('✓ Usando AfipSDK con access_token + certificados');
+        console.log(`  - CUIT: ${this.CUIT}`);
+        console.log(`  - Access Token: ${process.env.AFIP_ACCESS_TOKEN.substring(0, 20)}...`);
+        console.log(`  - Certificado: ${process.env.AFIP_CERT_PATH}`);
+        console.log(`  - Key: ${process.env.AFIP_KEY_PATH}`);
+        console.log(`  - Ambiente: ${this.environment === 'prod' ? '🚀 PRODUCCIÓN' : '🧪 TESTING'}`);
+        console.log(`  - Flujo: Tu App → AfipSDK.com → AFIP`);
+        
+        return config;
       } catch (error) {
-        // Si estamos en desarrollo con el CUIT de prueba, no es crítico
-        if (this.CUIT !== '20409378472') {
-          console.error('⚠ Error al cargar certificados:', error.message);
-          console.error('Para usar tu propio CUIT necesitas certificados válidos');
-        } else {
-          console.log('ℹ Usando CUIT de prueba sin certificados');
-        }
-      }
-    } else {
-      console.log('ℹ No se configuraron rutas de certificados');
-      if (this.CUIT !== '20409378472') {
-        console.warn('⚠ Para tu CUIT debes configurar certificados');
+        console.error('⚠ Error al cargar certificados:', error.message);
+        console.error('Rutas configuradas:');
+        console.error(`  - AFIP_CERT_PATH: ${process.env.AFIP_CERT_PATH}`);
+        console.error(`  - AFIP_KEY_PATH: ${process.env.AFIP_KEY_PATH}`);
+        throw new Error(`No se pudieron cargar los certificados: ${error.message}`);
       }
     }
 
-    return config;
+    // ✅ CASO 2: Solo certificados (conexión directa con AFIP, sin AfipSDK)
+    if (!hasAccessToken && hasCertificates) {
+      try {
+        config.cert = fs.readFileSync(process.env.AFIP_CERT_PATH, { encoding: 'utf8' });
+        config.key = fs.readFileSync(process.env.AFIP_KEY_PATH, { encoding: 'utf8' });
+        
+        console.log('✓ Conexión directa con AFIP (sin AfipSDK)');
+        console.log(`  - CUIT: ${this.CUIT}`);
+        console.log(`  - Certificado: ${process.env.AFIP_CERT_PATH}`);
+        console.log(`  - Key: ${process.env.AFIP_KEY_PATH}`);
+        console.log(`  - Ambiente: ${this.environment === 'prod' ? '🚀 PRODUCCIÓN' : '🧪 TESTING'}`);
+        console.log(`  - Flujo: Tu App → AFIP (directo)`);
+        
+        return config;
+      } catch (error) {
+        console.error('⚠ Error al cargar certificados:', error.message);
+        throw new Error(`No se pudieron cargar los certificados: ${error.message}`);
+      }
+    }
+
+    // ✅ CASO 3: Solo access_token (ERROR - AfipSDK necesita certificados)
+    if (hasAccessToken && !hasCertificates) {
+      console.error('❌ ERROR: AfipSDK requiere AMBOS: access_token Y certificados');
+      console.error('');
+      console.error('Configuraste AFIP_ACCESS_TOKEN pero faltan los certificados.');
+      console.error('AfipSDK usa el access_token para autenticar con su servicio,');
+      console.error('pero TAMBIÉN necesita tus certificados AFIP para funcionar.');
+      console.error('');
+      console.error('Agrega a tu .env:');
+      console.error('  AFIP_CERT_PATH=./arca-microservice/certs/cert_homologacion.crt');
+      console.error('  AFIP_KEY_PATH=./arca-microservice/certs/cert_homologacion.key');
+      console.error('');
+      throw new Error('AfipSDK requiere access_token Y certificados juntos');
+    }
+
+    // ✅ Si no hay access_token ni certificados
+    console.error('❌ CONFIGURACIÓN AFIP INCOMPLETA');
+    console.error('');
+    console.error('Necesitas configurar UNA de estas opciones en tu .env:');
+    console.error('');
+    console.error('OPCIÓN 1 (Recomendada - Más fácil):');
+    console.error('  AFIP_ACCESS_TOKEN=tu_token_de_afipsdk');
+    console.error('  Obtén tu token en: https://app.afipsdk.com/');
+    console.error('');
+    console.error('OPCIÓN 2 (Avanzada - Certificados propios):');
+    console.error('  AFIP_CERT_PATH=./cert/certificado.crt');
+    console.error('  AFIP_KEY_PATH=./cert/clave.key');
+    console.error('');
+    
+    throw new Error('Configuración AFIP incompleta. Configura AFIP_ACCESS_TOKEN o certificados.');
   }
 
   /**
@@ -78,8 +132,30 @@ class AfipConfig {
       errors.push('AFIP_CUIT no está configurado en .env');
     }
 
-    if (this.environment === 'prod' && (!process.env.AFIP_CERT_PATH || !process.env.AFIP_KEY_PATH)) {
-      errors.push('En producción debes configurar AFIP_CERT_PATH y AFIP_KEY_PATH');
+    // Validar que al menos tengamos access_token O certificados
+    const tieneAccessToken = !!process.env.AFIP_ACCESS_TOKEN;
+    const tieneCertificados = !!(process.env.AFIP_CERT_PATH && process.env.AFIP_KEY_PATH);
+
+    if (!tieneAccessToken && !tieneCertificados) {
+      errors.push('');
+      errors.push('❌ CONFIGURACIÓN AFIP INCOMPLETA');
+      errors.push('');
+      errors.push('Necesitas configurar UNA de estas opciones en tu .env:');
+      errors.push('');
+      errors.push('OPCIÓN 1 (Recomendada):');
+      errors.push('  AFIP_ACCESS_TOKEN=tu_token_de_afipsdk');
+      errors.push('  Obtén tu token en: https://app.afipsdk.com/');
+      errors.push('');
+      errors.push('OPCIÓN 2 (Avanzada):');
+      errors.push('  AFIP_CERT_PATH=./cert/certificado.crt');
+      errors.push('  AFIP_KEY_PATH=./cert/clave.key');
+      errors.push('');
+      errors.push('📖 Lee CONFIGURAR-AFIP.md para instrucciones detalladas');
+      errors.push('');
+    }
+
+    if (this.environment === 'prod' && !tieneAccessToken && !tieneCertificados) {
+      errors.push('En producción DEBES configurar AFIP_ACCESS_TOKEN o certificados');
     }
 
     if (errors.length > 0) {

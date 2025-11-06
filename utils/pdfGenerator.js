@@ -1,4 +1,4 @@
-const htmlpdf = require('html-pdf-node');
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -52,7 +52,8 @@ class PdfGenerator {
 
     getOptions(customOptions = {}) {
         const isProduction = process.env.NODE_ENV === 'production';
-        const isVPS = process.platform === 'linux' && isProduction;
+        const isMac = process.platform === 'darwin';
+        const isLinux = process.platform === 'linux';
         
         const baseOptions = {
             format: 'A4',
@@ -66,7 +67,48 @@ class PdfGenerator {
             timeout: 30000
         };
 
-        if (isVPS) {
+        // ✅ CONFIGURACIÓN ESPECÍFICA PARA MACOS
+        if (isMac) {
+            const possibleChromePaths = [
+                '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                '/Applications/Chromium.app/Contents/MacOS/Chromium',
+                '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+                process.env.CHROME_PATH // Variable de entorno personalizada
+            ].filter(Boolean);
+
+            // Buscar Chrome instalado
+            const fs = require('fs');
+            let executablePath = null;
+            
+            for (const path of possibleChromePaths) {
+                if (fs.existsSync(path)) {
+                    executablePath = path;
+                    console.log(`✅ Chrome encontrado en: ${path}`);
+                    break;
+                }
+            }
+
+            if (!executablePath) {
+                console.warn('⚠️  No se encontró Chrome en rutas comunes de macOS');
+                console.warn('   Instala Chrome desde: https://www.google.com/chrome/');
+                console.warn('   O instala Chromium con: brew install --cask chromium');
+            }
+
+            return {
+                ...baseOptions,
+                executablePath,
+                args: [
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ],
+                ...customOptions
+            };
+        }
+
+        // ✅ CONFIGURACIÓN PARA LINUX/VPS
+        if (isLinux && isProduction) {
             return {
                 ...baseOptions,
                 args: [
@@ -82,43 +124,82 @@ class PdfGenerator {
             };
         }
 
+        // ✅ CONFIGURACIÓN POR DEFECTO (Windows, Linux dev)
         return {
             ...baseOptions,
             args: [
                 '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
+                '--disable-features=VizDisplayCompositor',
+                '--no-sandbox'
             ],
             ...customOptions
         };
     }
 
     async generatePdfFromHtml(htmlContent, options = {}) {
+        let browser = null;
         try {
             const environment = process.env.NODE_ENV === 'production' ? 'PRODUCCIÓN' : 'DESARROLLO';
-            console.log(`🔧 Generando PDF con html-pdf-node (${environment})...`);
+            console.log(`🔧 Generando PDF con Puppeteer (${environment})...`);
             
             const pdfOptions = this.getOptions(options);
-            const file = { content: htmlContent };
-            const buffer = await htmlpdf.generatePdf(file, pdfOptions);
             
-            console.log(`✅ PDF generado exitosamente - Tamaño: ${buffer.length} bytes`);
-            return buffer;
+            // Configurar Puppeteer
+            const launchOptions = {
+                headless: 'new',
+                args: pdfOptions.args || [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage'
+                ]
+            };
+
+            // Usar Chrome del sistema si está disponible (macOS)
+            if (pdfOptions.executablePath && fs.existsSync(pdfOptions.executablePath)) {
+                launchOptions.executablePath = pdfOptions.executablePath;
+                console.log(`✅ Usando Chrome del sistema: ${pdfOptions.executablePath}`);
+            }
+            
+            // Lanzar navegador
+            browser = await puppeteer.launch(launchOptions);
+            const page = await browser.newPage();
+            
+            // Configurar contenido HTML
+            await page.setContent(htmlContent, {
+                waitUntil: 'networkidle0',
+                timeout: pdfOptions.timeout || 30000
+            });
+            
+            // Generar PDF
+            const pdfBuffer = await page.pdf({
+                format: pdfOptions.format || 'A4',
+                printBackground: pdfOptions.printBackground !== false,
+                margin: pdfOptions.margin || {
+                    top: '8mm',
+                    right: '6mm',
+                    bottom: '8mm',
+                    left: '6mm'
+                }
+            });
+            
+            await browser.close();
+            browser = null;
+            
+            console.log(`✅ PDF generado exitosamente - Tamaño: ${pdfBuffer.length} bytes`);
+            return pdfBuffer;
             
         } catch (error) {
-            console.error('❌ Error generando PDF:', error);
+            console.error('❌ Error generando PDF:', error.message);
             
-            if (process.env.NODE_ENV === 'production') {
-                console.log('🔄 Reintentando con configuración simplificada...');
-                const simpleOptions = {
-                    format: 'A4',
-                    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-                    timeout: 60000
-                };
-                const file = { content: htmlContent };
-                const buffer = await htmlpdf.generatePdf(file, simpleOptions);
-                console.log(`✅ PDF generado en segundo intento`);
-                return buffer;
+            // Cerrar navegador si quedó abierto
+            if (browser) {
+                try {
+                    await browser.close();
+                } catch (e) {
+                    // Ignorar errores al cerrar
+                }
             }
+            
             throw error;
         }
     }
