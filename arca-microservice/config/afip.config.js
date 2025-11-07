@@ -62,7 +62,7 @@ class AfipConfig {
         
         return config;
       } catch (error) {
-        console.error('⚠ Error al cargar certificados:', error.message);
+          console.error('⚠ Error al cargar certificados:', error.message);
         console.error('Rutas configuradas:');
         console.error(`  - AFIP_CERT_PATH: ${process.env.AFIP_CERT_PATH}`);
         console.error(`  - AFIP_KEY_PATH: ${process.env.AFIP_KEY_PATH}`);

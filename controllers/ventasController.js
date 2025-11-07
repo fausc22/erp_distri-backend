@@ -151,7 +151,7 @@ const filtrarProductosVenta = (req, res) => {
     const ventaId = req.params.id;
 
     const query = `
-        SELECT id, venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal FROM ventas_cont
+        SELECT id, venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, descuento_porcentaje FROM ventas_cont
         WHERE venta_id = ?
     `;
     
@@ -324,7 +324,7 @@ const generarPdfRankingVentas = async (req, res) => {
                     const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
                     
                     const productos = await new Promise((resolve, reject) => {
-                        db.query('SELECT * FROM ventas_cont WHERE venta_id = ?', [ventaId], (err, results) => {
+                        db.query('SELECT *, descuento_porcentaje FROM ventas_cont WHERE venta_id = ?', [ventaId], (err, results) => {
                             if (err) return reject(err);
                             resolve(results);
                         });
@@ -665,8 +665,8 @@ const facturarPedido = async (req, res) => {
             for (const producto of productos) {
                 const productoVentaQuery = `
                     INSERT INTO ventas_cont 
-                    (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `;
                 
                 await queryPromiseWithConnection(connection, productoVentaQuery, [
@@ -677,7 +677,8 @@ const facturarPedido = async (req, res) => {
                     parseFloat(producto.cantidad),
                     producto.precio,
                     producto.IVA,
-                    producto.subtotal
+                    producto.subtotal,
+                    producto.descuento_porcentaje || 0
                 ]);
             }
             console.log('📦 Productos copiados a la venta');
@@ -1204,16 +1205,16 @@ const ventaDirecta = async (req, res) => {
             console.log('📦 [Venta Directa] Paso 2: Insertando productos y actualizando stock...');
             
             const insertProductoPedidoQuery = `
-                INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
 
             for (const producto of productos) {
-                const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal } = producto;
+                const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje } = producto;
                 
-                // Insertar en pedidos_cont
+                // Insertar en pedidos_cont con descuento
                 await queryPromiseWithConnection(connection, insertProductoPedidoQuery, 
-                    [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal]
+                    [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje || 0]
                 );
 
                 // Actualizar stock
@@ -1280,8 +1281,8 @@ const ventaDirecta = async (req, res) => {
             
             const insertProductoVentaQuery = `
                 INSERT INTO ventas_cont 
-                (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
 
             for (const producto of productos) {
@@ -1293,7 +1294,8 @@ const ventaDirecta = async (req, res) => {
                     parseFloat(producto.cantidad),
                     producto.precio,
                     producto.iva,
-                    producto.subtotal
+                    producto.subtotal,
+                    producto.descuento_porcentaje || 0
                 ]);
             }
             

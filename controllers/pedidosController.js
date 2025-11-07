@@ -206,14 +206,14 @@ const registrarPedido = (pedidoData, callback) => {
 // Función para insertar los productos del pedido
 const insertarProductosPedido = async (pedidoId, productos) => {
     const insertProductoQuery = `
-        INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     try {
         await Promise.all(productos.map(async producto => {
-            const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal } = producto;
-            const productoValues = [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal];
+            const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje } = producto;
+            const productoValues = [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje || 0];
 
             // 1. Insertar el producto en pedidos_cont
             await new Promise((resolve, reject) => {
@@ -672,6 +672,26 @@ const actualizarObservacionesPedido = async (req, res) => {
         const datosAnteriores = await obtenerDatosAnterioresPromise();
         if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        // ✅ VALIDAR QUE EL PEDIDO NO ESTÉ FACTURADO
+        if (datosAnteriores.estado === 'Facturado') {
+            console.warn(`⚠️ Intento de editar observaciones en pedido facturado ${pedidoId}`);
+            
+            await auditarOperacion(req, {
+                accion: 'UPDATE_BLOCKED',
+                tabla: 'pedidos',
+                registroId: pedidoId,
+                estado: 'FALLIDO',
+                detallesAdicionales: `Intento bloqueado de cambiar observaciones en pedido facturado ${pedidoId} - Usuario: ${req.user?.nombre || 'Desconocido'}`
+            });
+
+            return res.status(403).json({
+                success: false,
+                message: 'No se pueden modificar las observaciones de un pedido que ya está facturado',
+                code: 'PEDIDO_FACTURADO',
+                estadoActual: datosAnteriores.estado
+            });
         }
 
         const query = `UPDATE pedidos SET observaciones = ? WHERE id = ?`;
@@ -1681,6 +1701,26 @@ const actualizarClientePedido = async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message: 'Pedido no encontrado'
+            });
+        }
+
+        // ✅ VALIDAR QUE EL PEDIDO NO ESTÉ FACTURADO
+        if (datosAnteriores.estado === 'Facturado') {
+            console.warn(`⚠️ Intento de editar cliente en pedido facturado ${pedidoId}`);
+            
+            await auditarOperacion(req, {
+                accion: 'UPDATE_BLOCKED',
+                tabla: 'pedidos',
+                registroId: pedidoId,
+                estado: 'FALLIDO',
+                detallesAdicionales: `Intento bloqueado de cambiar cliente en pedido facturado ${pedidoId} - Usuario: ${req.user?.nombre || 'Desconocido'} - Cliente anterior: ${datosAnteriores.cliente_nombre}`
+            });
+
+            return res.status(403).json({
+                success: false,
+                message: 'No se puede cambiar el cliente de un pedido que ya está facturado',
+                code: 'PEDIDO_FACTURADO',
+                estadoActual: datosAnteriores.estado
             });
         }
 

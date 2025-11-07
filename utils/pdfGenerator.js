@@ -487,14 +487,32 @@ class PdfGenerator {
       .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado')
       .replace(/{{observaciones_html}}/g, observacionesHTML);
 
-    // ✅ ITEMS - Mostrar precios según si es EXENTO o no
+    // ✅ DETECTAR SI HAY DESCUENTOS EN ALGÚN PRODUCTO
+    const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
+    
+    // ✅ ITEMS - Mostrar precios según si es EXENTO o no, con descuentos si corresponde
     const itemsHTML = productos.map(producto => {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
+      const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const precioUnitarioSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
 
-      return `
+      // Si hay descuentos en la factura, agregar columna
+      if (hayDescuentos) {
+        return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
+          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
+          <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
+          <td style="text-align: center;">${descuento.toFixed(0)}%</td>
+          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+        </tr>
+      `;
+      } else {
+        // Layout sin descuentos (mantener original)
+        return `
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
@@ -503,9 +521,36 @@ class PdfGenerator {
           <td style="text-align: right;">${subtotal.toFixed(2)}</td>
         </tr>
       `;
+      }
     }).join('');
 
-    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+    // ✅ REEMPLAZAR HEADER DE LA TABLA SEGÚN SI HAY DESCUENTOS
+    const tableHeader = hayDescuentos ? `
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cantidad</th>
+                        <th style="width: 35%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 8%;">% IVA</th>
+                        <th style="width: 13%;">Precio</th>
+                        <th style="width: 8%;">Desc.</th>
+                        <th style="width: 13%;">Total</th>
+                    </tr>
+                </thead>
+    ` : `
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cantidad</th>
+                        <th style="width: 40%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 10%;">% IVA</th>
+                        <th style="width: 15%;">Precio</th>
+                        <th style="width: 15%;">Total</th>
+                    </tr>
+                </thead>
+    `;
+
+    htmlTemplate = htmlTemplate
+      .replace(/<thead>[\s\S]*?<\/thead>/m, tableHeader)
+      .replace(/{{items}}/g, itemsHTML);
 
     // ✅ TOTALES
     const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
@@ -548,21 +593,57 @@ class PdfGenerator {
     let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
     
     const fechaFormateada = this.formatearFecha(venta.fecha);
+    
+    // ✅ MANEJO DE OBSERVACIONES
+    let observacionesHTML = '';
+    const observaciones = (venta.observaciones || '').toString().trim();
+    
+    if (observaciones && observaciones.toLowerCase() !== 'sin observaciones') {
+        observacionesHTML = `
+            <div class="observaciones-section">
+                <h4>Observaciones:</h4>
+                <p>${observaciones}</p>
+            </div>
+        `;
+        console.log('📝 Observaciones incluidas en la factura genérica');
+    } else {
+        console.log('📝 Sin observaciones para mostrar en factura genérica');
+    }
+    
     htmlTemplate = htmlTemplate
       .replace(/{{fecha}}/g, fechaFormateada)
       .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-      .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
+      .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado')
+      .replace(/{{observaciones_html}}/g, observacionesHTML);
 
-    // ✅ ITEMS CON IVA INCLUIDO
+    // ✅ DETECTAR SI HAY DESCUENTOS
+    const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
+
+    // ✅ ITEMS CON IVA INCLUIDO Y DESCUENTOS OPCIONALES
     const itemsHTML = productos.map(producto => {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
       const iva = parseFloat(producto.iva || producto.IVA) || 0;
+      const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const total = subtotal + iva;
       const productoPrecioIva = cantidad > 0 ? (total / cantidad) : 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
 
-      return `
+      if (hayDescuentos) {
+        return `
+        <tr>
+          <td>${producto.producto_id}</td>
+          <td>${producto.producto_nombre}</td>
+          <td>${producto.producto_um}</td>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
+          <td style="text-align: center;">${descuento.toFixed(0)}%</td>
+          <td style="text-align: right;">${total.toFixed(2)}</td>
+        </tr>
+      `;
+      } else {
+        // Layout original sin descuentos
+        return `
         <tr>
           <td>${producto.producto_id}</td>
           <td>${producto.producto_nombre}</td>
@@ -572,9 +653,38 @@ class PdfGenerator {
           <td style="text-align: right;">${total.toFixed(2)}</td>
         </tr>
       `;
+      }
     }).join('');
     
-    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+    // ✅ REEMPLAZAR HEADER SEGÚN SI HAY DESCUENTOS
+    const tableHeader = hayDescuentos ? `
+            <thead>
+                <tr>
+                    <th style="width: 8%;">ID</th>
+                    <th style="width: 28%;">Producto</th>
+                    <th style="width: 8%;">U.M.</th>
+                    <th style="width: 8%;" class="text-center">Cantidad</th>
+                    <th style="width: 13%;" class="text-right">Precio Unit.</th>
+                    <th style="width: 8%;" class="text-center">Desc.</th>
+                    <th style="width: 15%;" class="text-right">Total</th>
+                </tr>
+            </thead>
+    ` : `
+            <thead>
+                <tr>
+                    <th style="width: 10%;">ID</th>
+                    <th style="width: 35%;">Producto</th>
+                    <th style="width: 10%;">U.M.</th>
+                    <th style="width: 10%;" class="text-center">Cantidad</th>
+                    <th style="width: 15%;" class="text-right">Precio Unit.</th>
+                    <th style="width: 20%;" class="text-right">Total</th>
+                </tr>
+            </thead>
+    `;
+
+    htmlTemplate = htmlTemplate
+      .replace(/<thead>[\s\S]*?<\/thead>/m, tableHeader)
+      .replace(/{{items}}/g, itemsHTML);
     
     const totalFactura = productos.reduce((acc, item) => {
       const subtotal = parseFloat(item.subtotal) || 0;
@@ -586,56 +696,6 @@ class PdfGenerator {
 
     return await this.generatePdfFromHtml(htmlTemplate);
   }
-
-    // ✅ FACTURA GENÉRICA (C) - SIN SÍMBOLO $
-    async generarFacturaGenerica(venta, productos) {
-        const templatePath = path.join(this.templatesPath, 'factura.html');
-        
-        if (!fs.existsSync(templatePath)) {
-            throw new Error('Plantilla factura.html no encontrada');
-        }
-
-        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-        
-        const fechaFormateada = this.formatearFecha(venta.fecha);
-        htmlTemplate = htmlTemplate
-            .replace(/{{fecha}}/g, fechaFormateada)
-            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
-
-        // ✅ ITEMS CON IVA INCLUIDO - SIN SÍMBOLO $
-        const itemsHTML = productos.map(producto => {
-            const cantidad = parseFloat(producto.cantidad) || 0;
-            const subtotal = parseFloat(producto.subtotal) || 0;
-            const iva = parseFloat(producto.iva || producto.IVA) || 0;
-            const total = subtotal + iva;
-            const productoPrecioIva = cantidad > 0 ? (total / cantidad) : 0;
-            const cantidadFormateada = this.formatearCantidad(cantidad);
-
-            return `
-                <tr>
-                    <td>${producto.producto_id}</td>
-                    <td>${producto.producto_nombre}</td>
-                    <td>${producto.producto_um}</td>
-                    <td style="text-align: center;">${cantidadFormateada}</td>
-                    <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
-                    <td style="text-align: right;">${total.toFixed(2)}</td>
-                </tr>
-            `;
-        }).join('');
-
-        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
-
-        const totalFactura = productos.reduce((acc, item) => {
-            const subtotal = parseFloat(item.subtotal) || 0;
-            const iva = parseFloat(item.iva || item.IVA) || 0;
-            return acc + subtotal + iva;
-        }, 0);
-
-        htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
-
-        return await this.generatePdfFromHtml(htmlTemplate);
-    }
 
     // ✅ RESTO DE FUNCIONES SIN CAMBIOS
     async generarRankingVentas(fecha, ventas) {

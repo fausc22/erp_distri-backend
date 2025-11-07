@@ -139,6 +139,30 @@
             color: #666;
             page-break-inside: avoid;
         }
+        
+        .observaciones-section {
+            margin-top: 15px;
+            padding: 12px;
+            border: 1px solid #999;
+            background-color: #fffef7;
+            page-break-inside: avoid;
+        }
+        
+        .observaciones-section h4 {
+            font-size: 12px;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .observaciones-section p {
+            font-size: 11px;
+            line-height: 1.5;
+            color: #444;
+            margin: 0;
+            text-align: left;
+        }
     </style>
 </head>
 <body>
@@ -187,6 +211,7 @@
             <h2>TOTAL: $ {{total}}</h2>
         </div>
 
+        {{observaciones_html}}
         
     </div>
 </body>
