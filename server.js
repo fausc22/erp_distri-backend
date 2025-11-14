@@ -22,6 +22,7 @@ const auditoriaRoutes = require('./routes/auditoriaRoutes');
 const comprobantesRoutes = require('./routes/comprobantesRoutes'); 
 const arcaRoutes = require('./routes/arcaRoutes');
 const ciudadesRoutes = require('./routes/ciudadesRoutes');
+const listadosRoutes = require('./routes/listadosRoutes');
 
 // CORS configuration - Optimizado para VPS
 const allowedOrigins = [
@@ -135,8 +136,8 @@ app.get('/', (req, res) => {
             compras: '/compras',
             auditoria: '/auditoria',
             comprobantes: '/comprobantes',
-            health: '/health',
-            
+            listados: '/listados',
+            health: '/health'
         }
     });
 });
@@ -152,9 +153,10 @@ app.use('/finanzas', finanzasRoutes);
 app.use('/ventas', ventasRoutes); 
 app.use('/compras', comprasRoutes);
 app.use('/auditoria', auditoriaRoutes);
-app.use('/comprobantes', comprobantesRoutes); 
+app.use('/comprobantes', comprobantesRoutes);
 app.use('/arca', arcaRoutes);
 app.use('/ciudades', ciudadesRoutes);
+app.use('/listados', listadosRoutes);
 
 
 

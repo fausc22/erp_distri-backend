@@ -495,18 +495,26 @@ class PdfGenerator {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
       const descuento = parseFloat(producto.descuento_porcentaje || 0);
-      const precioUnitarioSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
+      
+      // Calcular precios: el subtotal YA tiene el descuento aplicado
+      const precioConDescuentoSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
+      
+      // Calcular precio ORIGINAL (antes del descuento)
+      const precioOriginalSinIva = descuento > 0 
+        ? precioConDescuentoSinIva / (1 - descuento / 100)
+        : precioConDescuentoSinIva;
 
-      // Si hay descuentos en la factura, agregar columna
+      // Si hay descuentos en la factura, agregar columnas de precio original y descuento
       if (hayDescuentos) {
         return `
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
           <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
-          <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
+          <td style="text-align: right;">${precioOriginalSinIva.toFixed(2)}</td>
           <td style="text-align: center;">${descuento.toFixed(0)}%</td>
+          <td style="text-align: right;">${precioConDescuentoSinIva.toFixed(2)}</td>
           <td style="text-align: right;">${subtotal.toFixed(2)}</td>
         </tr>
       `;
@@ -517,7 +525,7 @@ class PdfGenerator {
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
           <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
-          <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
+          <td style="text-align: right;">${precioConDescuentoSinIva.toFixed(2)}</td>
           <td style="text-align: right;">${subtotal.toFixed(2)}</td>
         </tr>
       `;
@@ -528,12 +536,13 @@ class PdfGenerator {
     const tableHeader = hayDescuentos ? `
                 <thead>
                     <tr>
-                        <th style="width: 8%;">Cantidad</th>
-                        <th style="width: 35%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 8%;">% IVA</th>
-                        <th style="width: 13%;">Precio</th>
-                        <th style="width: 8%;">Desc.</th>
-                        <th style="width: 13%;">Total</th>
+                        <th style="width: 7%;">Cant.</th>
+                        <th style="width: 28%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 7%;">IVA</th>
+                        <th style="width: 12%;">P. Original</th>
+                        <th style="width: 7%;">Desc.</th>
+                        <th style="width: 12%;">P. Final</th>
+                        <th style="width: 12%;">Total</th>
                     </tr>
                 </thead>
     ` : `
@@ -626,8 +635,15 @@ class PdfGenerator {
       const iva = parseFloat(producto.iva || producto.IVA) || 0;
       const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const total = subtotal + iva;
-      const productoPrecioIva = cantidad > 0 ? (total / cantidad) : 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
+      
+      // Precio CON IVA y CON descuento aplicado (precio actual)
+      const precioConDescuentoConIva = cantidad > 0 ? (total / cantidad) : 0;
+      
+      // Precio ORIGINAL CON IVA (antes del descuento)
+      const precioOriginalConIva = descuento > 0 
+        ? precioConDescuentoConIva / (1 - descuento / 100)
+        : precioConDescuentoConIva;
 
       if (hayDescuentos) {
         return `
@@ -636,8 +652,9 @@ class PdfGenerator {
           <td>${producto.producto_nombre}</td>
           <td>${producto.producto_um}</td>
           <td style="text-align: center;">${cantidadFormateada}</td>
-          <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
+          <td style="text-align: right;">${precioOriginalConIva.toFixed(2)}</td>
           <td style="text-align: center;">${descuento.toFixed(0)}%</td>
+          <td style="text-align: right;">${precioConDescuentoConIva.toFixed(2)}</td>
           <td style="text-align: right;">${total.toFixed(2)}</td>
         </tr>
       `;
@@ -649,7 +666,7 @@ class PdfGenerator {
           <td>${producto.producto_nombre}</td>
           <td>${producto.producto_um}</td>
           <td style="text-align: center;">${cantidadFormateada}</td>
-          <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
+          <td style="text-align: right;">${precioConDescuentoConIva.toFixed(2)}</td>
           <td style="text-align: right;">${total.toFixed(2)}</td>
         </tr>
       `;
@@ -660,13 +677,14 @@ class PdfGenerator {
     const tableHeader = hayDescuentos ? `
             <thead>
                 <tr>
-                    <th style="width: 8%;">ID</th>
-                    <th style="width: 28%;">Producto</th>
-                    <th style="width: 8%;">U.M.</th>
-                    <th style="width: 8%;" class="text-center">Cantidad</th>
-                    <th style="width: 13%;" class="text-right">Precio Unit.</th>
-                    <th style="width: 8%;" class="text-center">Desc.</th>
-                    <th style="width: 15%;" class="text-right">Total</th>
+                    <th style="width: 7%;">ID</th>
+                    <th style="width: 24%;">Producto</th>
+                    <th style="width: 7%;">U.M.</th>
+                    <th style="width: 7%;" class="text-center">Cant.</th>
+                    <th style="width: 13%;" class="text-right">P. Original</th>
+                    <th style="width: 7%;" class="text-center">Desc.</th>
+                    <th style="width: 13%;" class="text-right">P. Final</th>
+                    <th style="width: 13%;" class="text-right">Total</th>
                 </tr>
             </thead>
     ` : `
@@ -851,6 +869,226 @@ class PdfGenerator {
         const htmlDoble = htmlTemplate + '<div style="page-break-before: always;"></div>' + htmlTemplate;
 
         return await this.generatePdfFromHtml(htmlDoble);
+    }
+
+    // ✅ NUEVO: Generar reporte financiero simplificado
+    async generarReporteFinanciero(dashboardData) {
+        const templatePath = path.join(this.templatesPath, 'reporte_financiero.html');
+        
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla reporte_financiero.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+        
+        console.log('📊 Generando reporte financiero PDF...');
+        
+        const { periodo, resumen, comparacion_periodo_anterior, top_productos, vendedores, alertas } = dashboardData;
+        
+        // ✅ Formatear fechas
+        const fechaGeneracion = new Date().toLocaleDateString('es-AR', {
+            day: '2-digit',
+            month: 'long',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+        
+        const periodoTexto = `Desde ${this.formatearFecha(periodo.desde)} hasta ${this.formatearFecha(periodo.hasta)}`;
+        
+        // ✅ Formatear montos
+        const formatMoney = (valor) => {
+            return parseFloat(valor || 0).toLocaleString('es-AR', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        };
+        
+        // ✅ Determinar clases CSS según valores
+        const resultadoClase = resumen.resultado_neto >= 0 ? 'positivo' : 'negativo';
+        const estadoBadgeClase = resumen.estado === 'GANANCIA' ? 'ganancia' : 'perdida';
+        const tendenciaClase = comparacion_periodo_anterior.tendencia === 'MEJORA' ? 'mejora' : 
+                               comparacion_periodo_anterior.tendencia === 'DISMINUCIÓN' ? 'disminucion' : '';
+        const diferenciaClase = comparacion_periodo_anterior.diferencia >= 0 ? 'positivo' : 'negativo';
+        
+        // ✅ Generar HTML de alertas
+        let alertasHTML = '';
+        if (alertas && alertas.length > 0) {
+            alertasHTML = '<div class="seccion"><div class="seccion-titulo">⚠️ Alertas</div>';
+            alertas.forEach(alerta => {
+                const claseAlerta = alerta.tipo === 'CRÍTICO' ? 'critico' :
+                                   alerta.tipo === 'ADVERTENCIA' ? 'advertencia' : 'info';
+                alertasHTML += `<div class="alerta ${claseAlerta}">${alerta.mensaje}</div>`;
+            });
+            alertasHTML += '</div>';
+        }
+        
+        // ✅ Generar tabla de top productos
+        let topProductosRows = '';
+        if (top_productos && top_productos.length > 0) {
+            topProductosRows = top_productos.map(p => `
+                <tr>
+                    <td>${p.nombre}</td>
+                    <td class="text-center">${this.formatearCantidad(p.cantidad_vendida)}</td>
+                    <td class="text-right">$ ${formatMoney(p.ingresos)}</td>
+                    <td class="text-center">${p.ventas}</td>
+                </tr>
+            `).join('');
+        } else {
+            topProductosRows = '<tr><td colspan="4" class="text-center" style="padding: 20px; color: #94a3b8;">No hay productos vendidos en este período</td></tr>';
+        }
+        
+        // ✅ Generar tabla de vendedores
+        let vendedoresRows = '';
+        if (vendedores && vendedores.length > 0) {
+            vendedoresRows = vendedores.map(v => `
+                <tr>
+                    <td>${v.nombre}</td>
+                    <td class="text-center">${v.cantidad_ventas}</td>
+                    <td class="text-right">$ ${formatMoney(v.monto_total)}</td>
+                    <td class="text-right">$ ${formatMoney(v.ticket_promedio)}</td>
+                </tr>
+            `).join('');
+        } else {
+            vendedoresRows = '<tr><td colspan="4" class="text-center" style="padding: 20px; color: #94a3b8;">No hay datos de vendedores en este período</td></tr>';
+        }
+        
+        // ✅ Reemplazar variables en template
+        htmlTemplate = htmlTemplate
+            .replace(/{{periodo_texto}}/g, periodoTexto)
+            .replace(/{{ventas_monto}}/g, formatMoney(resumen.ventas.monto))
+            .replace(/{{ventas_cantidad}}/g, resumen.ventas.cantidad)
+            .replace(/{{egresos_total}}/g, formatMoney(resumen.egresos.total))
+            .replace(/{{compras_monto}}/g, formatMoney(resumen.egresos.compras))
+            .replace(/{{gastos_monto}}/g, formatMoney(resumen.egresos.gastos))
+            .replace(/{{resultado_neto}}/g, formatMoney(Math.abs(resumen.resultado_neto)))
+            .replace(/{{resultado_clase}}/g, resultadoClase)
+            .replace(/{{estado_texto}}/g, resumen.estado)
+            .replace(/{{estado_badge_clase}}/g, estadoBadgeClase)
+            .replace(/{{porcentaje_cambio}}/g, formatMoney(comparacion_periodo_anterior.porcentaje_cambio))
+            .replace(/{{tendencia_texto}}/g, comparacion_periodo_anterior.tendencia)
+            .replace(/{{tendencia_clase}}/g, tendenciaClase)
+            .replace(/{{dias_periodo}}/g, periodo.dias)
+            .replace(/{{ventas_actuales}}/g, formatMoney(comparacion_periodo_anterior.ventas_actuales))
+            .replace(/{{ventas_anteriores}}/g, formatMoney(comparacion_periodo_anterior.ventas_anteriores))
+            .replace(/{{diferencia_ventas}}/g, formatMoney(Math.abs(comparacion_periodo_anterior.diferencia)))
+            .replace(/{{diferencia_clase}}/g, diferenciaClase)
+            .replace(/{{alertas_html}}/g, alertasHTML)
+            .replace(/{{top_productos_rows}}/g, topProductosRows)
+            .replace(/{{vendedores_rows}}/g, vendedoresRows)
+            .replace(/{{fecha_generacion}}/g, fechaGeneracion);
+        
+        console.log('✅ Template procesado, generando PDF...');
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
+    // ✅ GENERAR PDF - Libro IVA
+    async generarLibroIva(datos) {
+        const templatePath = path.join(this.templatesPath, 'libro_iva.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla libro_iva.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        const mesesNombres = [
+            'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+            'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+        ];
+        const mesNombre = mesesNombres[parseInt(datos.mes) - 1];
+
+        // Reemplazar datos del encabezado
+        htmlTemplate = htmlTemplate
+            .replace(/{{mes}}/g, mesNombre)
+            .replace(/{{anio}}/g, datos.anio);
+
+        // Generar filas de la tabla
+        const itemsHTML = datos.ventas.map(venta => {
+            const fecha = this.formatearFecha(venta.fecha);
+            return `
+                <tr>
+                    <td>${fecha}</td>
+                    <td>${venta.comprobante}</td>
+                    <td>${venta.numero}</td>
+                    <td>${venta.cliente}</td>
+                    <td>${venta.cuit}</td>
+                    <td>$ ${venta.neto.toFixed(2)}</td>
+                    <td>$ ${venta.exento.toFixed(2)}</td>
+                    <td>$ ${venta.iva.toFixed(2)}</td>
+                    <td>$ ${venta.percepciones.toFixed(2)}</td>
+                    <td>$ ${venta.retenciones.toFixed(2)}</td>
+                    <td>$ ${venta.total.toFixed(2)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+        // Reemplazar totales
+        htmlTemplate = htmlTemplate
+            .replace(/{{total_neto}}/g, datos.totales.neto.toFixed(2))
+            .replace(/{{total_exento}}/g, datos.totales.exento.toFixed(2))
+            .replace(/{{total_iva}}/g, datos.totales.iva.toFixed(2))
+            .replace(/{{total_percepciones}}/g, datos.totales.percepciones.toFixed(2))
+            .replace(/{{total_retenciones}}/g, datos.totales.retenciones.toFixed(2))
+            .replace(/{{total_total}}/g, datos.totales.total.toFixed(2));
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
+    // ✅ GENERAR PDF - Lista de Precios por Categorías
+    async generarListaPreciosCategorias(datos) {
+        const templatePath = path.join(this.templatesPath, 'lista_precio_categorias.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla lista_precio_categorias.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        const fechaActual = this.formatearFecha(new Date());
+        htmlTemplate = htmlTemplate.replace(/{{fecha}}/g, fechaActual);
+
+        // Generar HTML para cada categoría
+        const categoriasHTML = datos.categorias.map(categoria => {
+            const productos = datos.productosPorCategoria[categoria];
+
+            const productosRows = productos.map(producto => {
+                // Ya viene calculado desde el controlador con el IVA correspondiente
+                const precioConIva = parseFloat(producto.precio_con_iva) || 0;
+                return `
+                    <tr>
+                        <td>${producto.id}</td>
+                        <td>${producto.nombre}</td>
+                        <td>${producto.unidad_medida}</td>
+                        <td>$ ${precioConIva.toFixed(2)}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            return `
+                <div class="categoria-titulo">${categoria}</div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Código</th>
+                            <th>Nombre</th>
+                            <th>Unidad de Medida</th>
+                            <th>Precio Venta (IVA incl.)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${productosRows}
+                    </tbody>
+                </table>
+            `;
+        }).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{categorias}}/g, categoriasHTML);
+
+        return await this.generatePdfFromHtml(htmlTemplate);
     }
 }
 

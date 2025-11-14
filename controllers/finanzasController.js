@@ -1678,180 +1678,190 @@ const obtenerGananciasPorCiudad = async (req, res) => {
   }
 };
 
-// ✅ OBTENER RESUMEN FINANCIERO - Adaptado a tu estructura BD
+// ✅ RESUMEN FINANCIERO CORREGIDO - Sin duplicación, datos reales
 const obtenerResumenFinanciero = async (req, res) => {
   try {
     let { desde, hasta } = req.query;
     
     console.log('🔍 Obteniendo resumen financiero:', { desde, hasta });
     
-    let filtroFecha = '';
-    const params = [];
-    
-    if (desde && hasta) {
-      const fechaDesde = new Date(desde);
-      const fechaHasta = new Date(hasta);
+    // ✅ Autocompletar fechas si no existen (últimos 30 días)
+    if (!desde || !hasta) {
+      const ahora = new Date();
+      const hace30Dias = new Date();
+      hace30Dias.setDate(ahora.getDate() - 30);
       
-      if (isNaN(fechaDesde.getTime()) || isNaN(fechaHasta.getTime())) {
-        return res.status(400).json({
-          success: false,
-          message: 'Formato de fecha inválido. Use YYYY-MM-DD'
-        });
-      }
+      desde = desde || hace30Dias.toISOString().split('T')[0];
+      hasta = hasta || ahora.toISOString().split('T')[0];
       
-      filtroFecha = 'WHERE fecha BETWEEN ? AND ?';
-      params.push(desde, hasta);
-    } else if (desde) {
-      filtroFecha = 'WHERE fecha >= ?';
-      params.push(desde);
-    } else if (hasta) {
-      filtroFecha = 'WHERE fecha <= ?';
-      params.push(hasta);
+      console.log('📅 Usando fechas por defecto:', { desde, hasta });
     }
+    
+    // Validar fechas
+    const fechaDesde = new Date(desde);
+    const fechaHasta = new Date(hasta);
+    
+    if (isNaN(fechaDesde.getTime()) || isNaN(fechaHasta.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Formato de fecha inválido. Use YYYY-MM-DD'
+      });
+    }
+    
+    const filtroFecha = 'WHERE fecha BETWEEN ? AND ?';
+    const params = [desde, hasta];
 
-    // ✅ QUERY DE VENTAS SIN DUPLICACIÓN
+    // ✅ QUERY 1: Ventas (INGRESOS REALES)
     const queryVentas = `
       SELECT 
-        COUNT(*) as total_ventas,
-        COALESCE(SUM(total), 0) as ingresos_ventas,
+        COUNT(*) as cantidad_ventas,
+        COALESCE(SUM(total), 0) as monto_total_ventas,
+        COALESCE(SUM(subtotal), 0) as subtotal_ventas,
+        COALESCE(SUM(iva_total), 0) as iva_ventas,
         COALESCE(AVG(total), 0) as ticket_promedio
       FROM ventas 
       ${filtroFecha}
+      AND estado = 'Facturada'
     `;
 
-    // ✅ QUERY DE GANANCIAS CORREGIDA - Evitar duplicación
-    const queryGanancias = `
+    // ✅ QUERY 2: Compras (EGRESOS REALES - proveedo res)
+    const queryCompras = `
       SELECT 
-        COALESCE(SUM(ganancia_por_venta), 0) as ganancia_total_estimada
-      FROM (
-        SELECT 
-          v.id,
-          SUM(
-            CASE 
-              WHEN p.costo > 0 AND p.costo IS NOT NULL 
-              THEN (vc.precio - p.costo) * vc.cantidad
-              ELSE vc.precio * vc.cantidad * 0.25
-            END
-          ) as ganancia_por_venta
-        FROM ventas v
-        JOIN ventas_cont vc ON v.id = vc.venta_id
-        LEFT JOIN productos p ON vc.producto_id = p.id
-        ${filtroFecha ? filtroFecha.replace('fecha', 'v.fecha') : ''}
-        GROUP BY v.id
-      ) as ganancias_agrupadas
+        COUNT(*) as cantidad_compras,
+        COALESCE(SUM(total), 0) as monto_total_compras
+      FROM compras 
+      ${filtroFecha}
+      AND estado != 'Anulada'
     `;
 
-    const queryEgresos = `
-      SELECT 
-        COALESCE(SUM(monto), 0) as total_egresos
-      FROM movimiento_fondos 
-      WHERE tipo = 'EGRESO'
-      ${filtroFecha ? `AND ${filtroFecha.replace('WHERE ', '')}` : ''}
-    `;
-
+    // ✅ QUERY 3: Gastos (EGRESOS REALES - operativos)
     const queryGastos = `
       SELECT 
-        COUNT(*) as total_gastos,
-        COALESCE(SUM(monto), 0) as total_gastos_monto
+        COUNT(*) as cantidad_gastos,
+        COALESCE(SUM(monto), 0) as monto_total_gastos
       FROM gastos 
       ${filtroFecha}
     `;
 
-    const queryCompras = `
+    // ✅ QUERY 4: Ganancias por producto (solo productos con costo conocido)
+    const queryGanancias = `
       SELECT 
-        COUNT(*) as total_compras,
-        COALESCE(SUM(total), 0) as total_compras_monto
-      FROM compras 
-      ${filtroFecha}
+        COALESCE(SUM(
+          (vc.precio - COALESCE(p.costo, 0)) * vc.cantidad
+        ), 0) as ganancia_bruta_real,
+        COUNT(DISTINCT CASE WHEN p.costo > 0 THEN p.id END) as productos_con_costo,
+        COUNT(DISTINCT p.id) as productos_totales
+      FROM ventas v
+      JOIN ventas_cont vc ON v.id = vc.venta_id
+      LEFT JOIN productos p ON vc.producto_id = p.id
+      ${filtroFecha.replace('fecha', 'v.fecha')}
+      AND v.estado = 'Facturada'
     `;
 
-    const queryPromises = [
+    // ✅ Ejecutar queries en paralelo
+    const [ventasRes, comprasRes, gastosRes, gananciasRes] = await Promise.all([
       new Promise((resolve) => {
         db.query(queryVentas, params, (err, results) => {
           if (err) {
-            console.warn('⚠️ Error en query ventas:', err.message);
-            resolve({ total_ventas: 0, ingresos_ventas: 0, ticket_promedio: 0 });
+            console.error('❌ Error query ventas:', err);
+            resolve({ cantidad_ventas: 0, monto_total_ventas: 0, subtotal_ventas: 0, iva_ventas: 0, ticket_promedio: 0 });
           } else {
-            resolve(results[0] || { total_ventas: 0, ingresos_ventas: 0, ticket_promedio: 0 });
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryGanancias, params, (err, results) => {
-          if (err) {
-            console.warn('⚠️ Error en query ganancias:', err.message);
-            resolve({ ganancia_total_estimada: 0 });
-          } else {
-            resolve(results[0] || { ganancia_total_estimada: 0 });
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryEgresos, params, (err, results) => {
-          if (err) {
-            console.warn('⚠️ Error en query egresos:', err.message);
-            resolve({ total_egresos: 0 });
-          } else {
-            resolve(results[0] || { total_egresos: 0 });
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryGastos, params, (err, results) => {
-          if (err) {
-            console.warn('⚠️ Error en query gastos:', err.message);
-            resolve({ total_gastos: 0, total_gastos_monto: 0 });
-          } else {
-            resolve(results[0] || { total_gastos: 0, total_gastos_monto: 0 });
+            resolve(results[0]);
           }
         });
       }),
       new Promise((resolve) => {
         db.query(queryCompras, params, (err, results) => {
           if (err) {
-            console.warn('⚠️ Error en query compras:', err.message);
-            resolve({ total_compras: 0, total_compras_monto: 0 });
+            console.error('❌ Error query compras:', err);
+            resolve({ cantidad_compras: 0, monto_total_compras: 0 });
           } else {
-            resolve(results[0] || { total_compras: 0, total_compras_monto: 0 });
+            resolve(results[0]);
+          }
+        });
+      }),
+      new Promise((resolve) => {
+        db.query(queryGastos, params, (err, results) => {
+          if (err) {
+            console.error('❌ Error query gastos:', err);
+            resolve({ cantidad_gastos: 0, monto_total_gastos: 0 });
+          } else {
+            resolve(results[0]);
+          }
+        });
+      }),
+      new Promise((resolve) => {
+        db.query(queryGanancias, params, (err, results) => {
+          if (err) {
+            console.error('❌ Error query ganancias:', err);
+            resolve({ ganancia_bruta_real: 0, productos_con_costo: 0, productos_totales: 0 });
+          } else {
+            resolve(results[0]);
           }
         });
       })
-    ];
+    ]);
 
-    const [ventasResults, gananciasResults, egresosResults, gastosResults, comprasResults] = await Promise.all(queryPromises);
+    // ✅ CALCULAR MÉTRICAS REALES
+    const ingresos_totales = parseFloat(ventasRes.monto_total_ventas) || 0;
+    const compras_totales = parseFloat(comprasRes.monto_total_compras) || 0;
+    const gastos_totales = parseFloat(gastosRes.monto_total_gastos) || 0;
+    const ganancia_bruta = parseFloat(gananciasRes.ganancia_bruta_real) || 0;
+    
+    // ✅ Total egresos = Compras + Gastos (NO sumar movimientos_fondos porque ya están incluidos)
+    const egresos_totales = compras_totales + gastos_totales;
+    
+    // ✅ Resultado neto = Ingresos - Egresos
+    const resultado_neto = ingresos_totales - egresos_totales;
+    
+    // ✅ Ganancia neta = Ganancia bruta - Gastos operativos
+    const ganancia_neta = ganancia_bruta - gastos_totales;
 
-    const ingresos = parseFloat(ventasResults.ingresos_ventas) || 0;
-    const ganancias = parseFloat(gananciasResults.ganancia_total_estimada) || 0;
-    const egresos = parseFloat(egresosResults.total_egresos) || 0;
-    const gastos = parseFloat(gastosResults.total_gastos_monto) || 0;
-    const compras = parseFloat(comprasResults.total_compras_monto) || 0;
-    const totalEgresos = egresos + gastos + compras;
-
+    // ✅ Respuesta simplificada y clara
     const resumen = {
-      ventas: {
-        total_ventas: parseInt(ventasResults.total_ventas) || 0,
-        ingresos_totales: ingresos,
-        factura_promedio: parseFloat(ventasResults.ticket_promedio) || 0
+      periodo: {
+        desde,
+        hasta,
+        dias: Math.ceil((fechaHasta - fechaDesde) / (1000 * 60 * 60 * 24))
       },
-      ganancias: {
-        ganancia_estimada: ganancias,
-        margen_promedio: ingresos > 0 ? (ganancias / ingresos * 100) : 0
+      ventas: {
+        cantidad: parseInt(ventasRes.cantidad_ventas) || 0,
+        monto_total: ingresos_totales,
+        subtotal: parseFloat(ventasRes.subtotal_ventas) || 0,
+        iva: parseFloat(ventasRes.iva_ventas) || 0,
+        ticket_promedio: parseFloat(ventasRes.ticket_promedio) || 0
       },
       egresos: {
-        movimientos_egresos: egresos,
-        gastos_directos: gastos,
-        compras_proveedores: compras,
-        total_egresos: totalEgresos
+        compras: {
+          cantidad: parseInt(comprasRes.cantidad_compras) || 0,
+          monto: compras_totales
+        },
+        gastos: {
+          cantidad: parseInt(gastosRes.cantidad_gastos) || 0,
+          monto: gastos_totales
+        },
+        total: egresos_totales
       },
-      balance: {
-        ingresos_totales: ingresos,
-        egresos_totales: totalEgresos,
-        resultado_neto: ingresos - totalEgresos,
-        rentabilidad: ingresos > 0 ? ((ingresos - totalEgresos) / ingresos * 100) : 0
+      ganancias: {
+        ganancia_bruta: ganancia_bruta,
+        ganancia_neta: ganancia_neta,
+        margen_bruto: ingresos_totales > 0 ? (ganancia_bruta / ingresos_totales * 100) : 0,
+        margen_neto: ingresos_totales > 0 ? (ganancia_neta / ingresos_totales * 100) : 0,
+        productos_con_costo: parseInt(gananciasRes.productos_con_costo) || 0,
+        productos_totales: parseInt(gananciasRes.productos_totales) || 0
+      },
+      resultado: {
+        resultado_neto,
+        rentabilidad: ingresos_totales > 0 ? (resultado_neto / ingresos_totales * 100) : 0,
+        estado: resultado_neto >= 0 ? 'POSITIVO' : 'NEGATIVO'
       }
     };
 
-    console.log('✅ Resumen financiero calculado exitosamente');
+    console.log('✅ Resumen financiero calculado:', {
+      ingresos: ingresos_totales,
+      egresos: egresos_totales,
+      resultado: resultado_neto
+    });
 
     res.json({
       success: true,
@@ -2094,6 +2104,283 @@ const verificarDisponibilidadDatos = async (req, res) => {
   }
 };
 
+// ✅ NUEVO: Dashboard completo simplificado - UNA SOLA LLAMADA
+const obtenerDashboardSimplificado = async (req, res) => {
+  try {
+    let { desde, hasta } = req.query;
+    
+    // ✅ Autocompletar fechas si no existen
+    const ahora = new Date();
+    const hace30Dias = new Date();
+    hace30Dias.setDate(ahora.getDate() - 30);
+    
+    desde = desde || hace30Dias.toISOString().split('T')[0];
+    hasta = hasta || ahora.toISOString().split('T')[0];
+    
+    console.log('📊 Generando dashboard completo:', { desde, hasta });
+    
+    const params = [desde, hasta];
+
+    // ✅ QUERY 1: Resumen General
+    const queryResumen = `
+      SELECT 
+        (SELECT COUNT(*) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as cant_ventas,
+        (SELECT COALESCE(SUM(total), 0) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as monto_ventas,
+        (SELECT COALESCE(SUM(total), 0) FROM compras WHERE fecha BETWEEN ? AND ? AND estado != 'Anulada') as monto_compras,
+        (SELECT COALESCE(SUM(monto), 0) FROM gastos WHERE fecha BETWEEN ? AND ?) as monto_gastos
+    `;
+
+    // ✅ QUERY 2: Top 5 Productos Más Vendidos
+    const queryTopProductos = `
+      SELECT 
+        vc.producto_nombre,
+        SUM(vc.cantidad) as cantidad_vendida,
+        SUM(vc.precio * vc.cantidad) as ingresos_generados,
+        COUNT(DISTINCT v.id) as ventas_realizadas
+      FROM ventas v
+      JOIN ventas_cont vc ON v.id = vc.venta_id
+      WHERE v.fecha BETWEEN ? AND ?
+        AND v.estado = 'Facturada'
+      GROUP BY vc.producto_nombre
+      ORDER BY cantidad_vendida DESC
+      LIMIT 5
+    `;
+
+    // ✅ QUERY 3: Ventas por Vendedor
+    const queryVendedores = `
+      SELECT 
+        empleado_nombre,
+        COUNT(*) as cantidad_ventas,
+        SUM(total) as monto_total_ventas,
+        AVG(total) as ticket_promedio
+      FROM ventas
+      WHERE fecha BETWEEN ? AND ?
+        AND estado = 'Facturada'
+        AND empleado_nombre IS NOT NULL
+      GROUP BY empleado_nombre
+      ORDER BY monto_total_ventas DESC
+    `;
+
+    // ✅ QUERY 4: Comparación con Período Anterior
+    const diasPeriodo = Math.ceil((new Date(hasta) - new Date(desde)) / (1000 * 60 * 60 * 24));
+    const fechaDesdeAnterior = new Date(desde);
+    fechaDesdeAnterior.setDate(fechaDesdeAnterior.getDate() - diasPeriodo);
+    const fechaHastaAnterior = new Date(desde);
+    fechaHastaAnterior.setDate(fechaHastaAnterior.getDate() - 1);
+    
+    const queryComparacion = `
+      SELECT 
+        (SELECT COUNT(*) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as cant_ventas_anterior,
+        (SELECT COALESCE(SUM(total), 0) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as monto_ventas_anterior
+    `;
+
+    // ✅ Ejecutar todas las queries en paralelo
+    const [resumenRes, topProductosRes, vendedoresRes, comparacionRes] = await Promise.all([
+      new Promise((resolve) => {
+        db.query(queryResumen, [...params, ...params, ...params, ...params], (err, results) => {
+          if (err) {
+            console.error('❌ Error query resumen:', err);
+            resolve([{ cant_ventas: 0, monto_ventas: 0, monto_compras: 0, monto_gastos: 0 }]);
+          } else {
+            resolve(results);
+          }
+        });
+      }),
+      new Promise((resolve) => {
+        db.query(queryTopProductos, params, (err, results) => {
+          if (err) {
+            console.error('❌ Error query top productos:', err);
+            resolve([]);
+          } else {
+            resolve(results);
+          }
+        });
+      }),
+      new Promise((resolve) => {
+        db.query(queryVendedores, params, (err, results) => {
+          if (err) {
+            console.error('❌ Error query vendedores:', err);
+            resolve([]);
+          } else {
+            resolve(results);
+          }
+        });
+      }),
+      new Promise((resolve) => {
+        const paramsComparacion = [
+          fechaDesdeAnterior.toISOString().split('T')[0],
+          fechaHastaAnterior.toISOString().split('T')[0],
+          fechaDesdeAnterior.toISOString().split('T')[0],
+          fechaHastaAnterior.toISOString().split('T')[0]
+        ];
+        db.query(queryComparacion, paramsComparacion, (err, results) => {
+          if (err) {
+            console.error('❌ Error query comparación:', err);
+            resolve([{ cant_ventas_anterior: 0, monto_ventas_anterior: 0 }]);
+          } else {
+            resolve(results);
+          }
+        });
+      })
+    ]);
+
+    // ✅ Procesar resultados
+    const resumen = resumenRes[0];
+    const ingresos = parseFloat(resumen.monto_ventas) || 0;
+    const compras = parseFloat(resumen.monto_compras) || 0;
+    const gastos = parseFloat(resumen.monto_gastos) || 0;
+    const egresos = compras + gastos;
+    const resultado = ingresos - egresos;
+
+    // ✅ Comparación
+    const comparacion = comparacionRes[0];
+    const montosAnterior = parseFloat(comparacion.monto_ventas_anterior) || 0;
+    const diferenciaVentas = ingresos - montosAnterior;
+    const porcentajeCambio = montosAnterior > 0 ? ((diferenciaVentas / montosAnterior) * 100) : 0;
+
+    // ✅ Respuesta unificada
+    const dashboard = {
+      periodo: {
+        desde,
+        hasta,
+        dias: diasPeriodo
+      },
+      resumen: {
+        ventas: {
+          cantidad: parseInt(resumen.cant_ventas) || 0,
+          monto: ingresos
+        },
+        egresos: {
+          compras: compras,
+          gastos: gastos,
+          total: egresos
+        },
+        resultado_neto: resultado,
+        estado: resultado >= 0 ? 'GANANCIA' : 'PÉRDIDA'
+      },
+      comparacion_periodo_anterior: {
+        ventas_actuales: ingresos,
+        ventas_anteriores: montosAnterior,
+        diferencia: diferenciaVentas,
+        porcentaje_cambio: porcentajeCambio,
+        tendencia: porcentajeCambio > 0 ? 'MEJORA' : porcentajeCambio < 0 ? 'DISMINUCIÓN' : 'IGUAL'
+      },
+      top_productos: topProductosRes.map(p => ({
+        nombre: p.producto_nombre,
+        cantidad_vendida: parseFloat(p.cantidad_vendida),
+        ingresos: parseFloat(p.ingresos_generados),
+        ventas: parseInt(p.ventas_realizadas)
+      })),
+      vendedores: vendedoresRes.map(v => ({
+        nombre: v.empleado_nombre,
+        cantidad_ventas: parseInt(v.cantidad_ventas),
+        monto_total: parseFloat(v.monto_total_ventas),
+        ticket_promedio: parseFloat(v.ticket_promedio)
+      })),
+      alertas: []
+    };
+
+    // ✅ Generar alertas automáticas
+    if (resultado < 0) {
+      dashboard.alertas.push({
+        tipo: 'CRÍTICO',
+        mensaje: `Resultado negativo: Se perdieron $${Math.abs(resultado).toFixed(2)} en este período`
+      });
+    }
+    
+    if (porcentajeCambio < -20) {
+      dashboard.alertas.push({
+        tipo: 'ADVERTENCIA',
+        mensaje: `Las ventas bajaron ${Math.abs(porcentajeCambio).toFixed(1)}% respecto al período anterior`
+      });
+    }
+
+    if (resumen.cant_ventas === 0) {
+      dashboard.alertas.push({
+        tipo: 'INFO',
+        mensaje: 'No hay ventas registradas en este período'
+      });
+    }
+
+    console.log('✅ Dashboard completo generado exitosamente');
+
+    res.json({
+      success: true,
+      data: dashboard
+    });
+
+  } catch (error) {
+    console.error('💥 Error generando dashboard:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al generar dashboard: ' + error.message
+    });
+  }
+};
+
+
+// ✅ NUEVO: Generar PDF del reporte financiero
+const generarPDFReporteFinanciero = async (req, res) => {
+  try {
+    let { desde, hasta } = req.query;
+    
+    console.log('📄 Generando PDF de reporte financiero...');
+    
+    // ✅ Autocompletar fechas si no existen
+    if (!desde || !hasta) {
+      const ahora = new Date();
+      const hace30Dias = new Date();
+      hace30Dias.setDate(ahora.getDate() - 30);
+      
+      desde = desde || hace30Dias.toISOString().split('T')[0];
+      hasta = hasta || ahora.toISOString().split('T')[0];
+    }
+    
+    // ✅ Obtener datos del dashboard simplificado
+    const dashboardData = await new Promise((resolve, reject) => {
+      obtenerDashboardSimplificado(
+        { query: { desde, hasta } },
+        {
+          json: (data) => {
+            if (data.success) {
+              resolve(data.data);
+            } else {
+              reject(new Error(data.message || 'Error obteniendo datos'));
+            }
+          },
+          status: (code) => ({
+            json: (data) => reject(new Error(data.message || `Error ${code}`))
+          })
+        }
+      );
+    });
+    
+    // ✅ Generar PDF
+    const pdfGenerator = require('../utils/pdfGenerator');
+    const pdfBuffer = await pdfGenerator.generarReporteFinanciero(dashboardData);
+    
+    // ✅ Nombre del archivo
+    const fechaActual = new Date().toISOString().split('T')[0];
+    const nombreArchivo = `reporte_financiero_${fechaActual}.pdf`;
+    
+    // ✅ Enviar PDF
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${nombreArchivo}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    
+    console.log(`✅ PDF generado exitosamente: ${nombreArchivo} (${pdfBuffer.length} bytes)`);
+    
+    res.send(pdfBuffer);
+    
+  } catch (error) {
+    console.error('💥 Error generando PDF de reporte financiero:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al generar PDF del reporte financiero: ' + error.message
+    });
+  }
+};
+
 
 // IMPORTANTE: Exportar todas las funciones
 module.exports = {
@@ -2135,5 +2422,8 @@ module.exports = {
   obtenerResumenFinanciero,
   obtenerProductosMasRentables,
   verificarDisponibilidadDatos,
-  obtenerTopProductosTabla
+  obtenerTopProductosTabla,
+  // ✅ NUEVOS
+  obtenerDashboardSimplificado,
+  generarPDFReporteFinanciero
 };
