@@ -234,7 +234,7 @@ process.on('unhandledRejection', async (reason, promise) => {
 });
 
 // Iniciar el servidor en VPS
-const server = app.listen(port, '0.0.0.0', () => {
+const server = app.listen(port, '0.0.0.0', async () => {
     console.log(`🚀 Servidor iniciado en VPS Hostinger`);
     console.log(`🌍 Puerto: ${port}`);
     console.log(`🔧 Entorno: ${process.env.NODE_ENV || 'development'}`);
@@ -248,4 +248,41 @@ const server = app.listen(port, '0.0.0.0', () => {
     console.log(`   - Plataforma: ${process.platform}`);
     console.log(`   - Arquitectura: ${process.arch}`);
     console.log(`   - PID: ${process.pid}`);
+    
+    // Información de AFIP/ARCA - Intentar inicializar el SDK
+    console.log(`\n📋 Inicializando SDK de AFIP/ARCA...`);
+    try {
+        // Cargar configuración de AFIP
+        const configModule = await import('./arca-microservice/config/afip.config.js');
+        const afipConfig = configModule.default;
+        
+        // Intentar inicializar el servicio (esto inicializará el SDK)
+        const afipServiceModule = await import('./arca-microservice/services/afip.service.js');
+        const afipService = afipServiceModule.default;
+        
+        // Mostrar resumen de configuración
+        const ambienteAFIP = afipConfig.environment === 'prod' ? '🚀 PRODUCCIÓN' : '🧪 HOMOLOGACIÓN/TESTING';
+        const cuit = afipConfig.CUIT || 'No configurado';
+        const puntoVenta = afipConfig.puntoVentaDefault || 1;
+        const tieneCertificados = !!(process.env.AFIP_CERT_PATH && process.env.AFIP_KEY_PATH);
+        const tieneAccessToken = !!process.env.AFIP_ACCESS_TOKEN;
+        
+        console.log(`\n📊 Resumen de Configuración AFIP/ARCA:`);
+        console.log(`   - Ambiente: ${ambienteAFIP}`);
+        console.log(`   - CUIT: ${cuit}`);
+        console.log(`   - Punto de Venta: ${puntoVenta}`);
+        console.log(`   - Access Token: ${tieneAccessToken ? '✅ Configurado' : '❌ NO CONFIGURADO'}`);
+        console.log(`   - Certificados: ${tieneCertificados ? '✅ Configurados' : '⚠️  No configurados (usando ARCA)'}`);
+        if (tieneCertificados) {
+            console.log(`     • Certificado: ${process.env.AFIP_CERT_PATH || 'N/A'}`);
+            console.log(`     • Clave: ${process.env.AFIP_KEY_PATH || 'N/A'}`);
+        }
+        console.log(`   - Método: ARCA SDK (@afipsdk/afip.js)`);
+        console.log(`   - Estado SDK: ✅ Inicializado correctamente\n`);
+    } catch (error) {
+        console.error(`\n❌ ERROR al inicializar SDK de AFIP/ARCA:`);
+        console.error(`   ${error.message}`);
+        console.error(`   Stack: ${error.stack}`);
+        console.log(`\n⚠️  El servidor continuará, pero la facturación electrónica no estará disponible.\n`);
+    }
 });

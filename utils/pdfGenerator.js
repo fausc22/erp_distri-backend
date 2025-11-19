@@ -1090,6 +1090,72 @@ class PdfGenerator {
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }
+
+    // ✅ GENERAR PDF - Control de Stock
+    async generarControlStock(datos) {
+        const templatePath = path.join(this.templatesPath, 'control_stock.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla control_stock.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        const fechaActual = this.formatearFecha(new Date());
+        htmlTemplate = htmlTemplate.replace(/{{fecha}}/g, fechaActual);
+        htmlTemplate = htmlTemplate.replace(/{{cantidad_productos}}/g, datos.cantidad);
+
+        // Determinar el título según el tipo de filtro
+        let tipoFiltro = '';
+        if (datos.tipo === 'menor') {
+            tipoFiltro = `${datos.cantidad} PRODUCTOS CON MENOR STOCK`;
+        } else if (datos.tipo === 'mayor') {
+            tipoFiltro = `${datos.cantidad} PRODUCTOS CON MAYOR STOCK`;
+        } else {
+            tipoFiltro = `CONTROL DE STOCK - ${datos.cantidad} PRODUCTOS SELECCIONADOS`;
+        }
+        htmlTemplate = htmlTemplate.replace(/{{tipo_filtro}}/g, tipoFiltro);
+
+        // Generar HTML para cada categoría
+        const categoriasHTML = datos.categorias.map(categoria => {
+            const productos = datos.productosPorCategoria[categoria];
+
+            const productosRows = productos.map(producto => {
+                const stock = parseFloat(producto.stock_actual) || 0;
+                // Formatear stock: si es entero mostrar sin decimales, si tiene decimales mostrar con 1 decimal
+                const stockFormateado = stock % 1 === 0 ? stock.toString() : stock.toFixed(1);
+                return `
+                    <tr>
+                        <td>${producto.id}</td>
+                        <td>${producto.nombre}</td>
+                        <td>${producto.unidad_medida}</td>
+                        <td>${stockFormateado}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            return `
+                <div class="categoria-titulo">${categoria}</div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Código</th>
+                            <th>Nombre</th>
+                            <th>Unidad de Medida</th>
+                            <th>Stock Actual</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${productosRows}
+                    </tbody>
+                </table>
+            `;
+        }).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{categorias}}/g, categoriasHTML);
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
 }
 
 const pdfGenerator = new PdfGenerator();

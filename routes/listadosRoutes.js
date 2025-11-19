@@ -18,4 +18,18 @@ router.post('/generarpdf-lista-precios',
     listadosController.generarPdfListaPrecios
 );
 
+// Ruta para generar PDF de Control de Stock por filtro (menor/mayor stock)
+router.post('/generarpdf-control-stock-filtro',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'productos' }),
+    listadosController.generarPdfControlStockFiltro
+);
+
+// Ruta para generar PDF de Control de Stock por selección manual
+router.post('/generarpdf-control-stock-seleccion',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'productos' }),
+    listadosController.generarPdfControlStockSeleccion
+);
+
 module.exports = router;

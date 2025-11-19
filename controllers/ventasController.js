@@ -8,6 +8,7 @@ const multer = require('multer');
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
+// Nota: Las funciones de ARCA solo se usan al solicitar CAE, no al crear ventas
 
 const verificarArchivoExiste = (comprobantePath) => {
   if (!comprobantePath) return false;
@@ -24,12 +25,21 @@ const verificarArchivoExiste = (comprobantePath) => {
 
 
 
+/**
+ * ✅ OBTENER SIGUIENTE NÚMERO DE FACTURA (NUMERACIÓN LOCAL)
+ * 
+ * Esta función usa SOLO numeración local (tabla control_numeracion_facturas).
+ * NO consulta ARCA en este punto.
+ * 
+ * La sincronización con ARCA se hace SOLO cuando se solicita el CAE,
+ * en ese momento se valida y actualiza el número si es necesario.
+ */
 const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta = null) => {
     try {
         const pv = puntoVenta || process.env.DEFAULT_PUNTO_VENTA;
         const puntoVentaFormateado = String(pv).padStart(4, '0');
         
-        console.log(`🔢 Obteniendo siguiente número para Factura ${tipoFiscal} - Punto de Venta: ${puntoVentaFormateado}`);
+        console.log(`🔢 Obteniendo siguiente número para Factura ${tipoFiscal} - Punto de Venta: ${puntoVentaFormateado} (LOCAL)`);
         
         // ✅ 1. VERIFICAR SI EXISTE
         const checkQuery = `
@@ -37,6 +47,15 @@ const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta 
             FROM control_numeracion_facturas 
             WHERE punto_venta = ? AND tipo_factura = ?
         `;
+        
+        const queryPromiseWithConnection = (connection, query, params) => {
+            return new Promise((resolve, reject) => {
+                connection.query(query, params, (err, results) => {
+                    if (err) reject(err);
+                    else resolve(results);
+                });
+            });
+        };
         
         let checkResults = await queryPromiseWithConnection(connection, checkQuery, [puntoVentaFormateado, tipoFiscal]);
         
@@ -84,7 +103,7 @@ const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta 
         // ✅ FORMATO CON TIPO DE COMPROBANTE: "A 0004-00000001"
         const numeroCompleto = `${tipoFiscal} ${puntoVentaFormateado}-${String(numeroFactura).padStart(8, '0')}`;
         
-        console.log(`✅ Número asignado: ${numeroCompleto}`);
+        console.log(`✅ Número asignado (LOCAL): ${numeroCompleto}`);
         
         return {
             numeroFactura,

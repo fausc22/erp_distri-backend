@@ -45,6 +45,23 @@ router.post('/solicitar-cae',
 );
 
 /**
+ * ✅ SOLICITAR CAE EN BATCH (MÚLTIPLES VENTAS)
+ * POST /arca/solicitar-cae-batch
+ * 
+ * Body: { ventasIds: number[] }
+ * 
+ * Solicita CAE para múltiples ventas de forma secuencial.
+ * Cada solicitud consulta ARCA para obtener el siguiente número disponible,
+ * por lo que maneja correctamente rechazos y mantiene la numeración válida.
+ */
+router.post('/solicitar-cae-batch',
+  authenticateToken,
+  middlewareAuditoria({ accion: 'INSERT', tabla: 'ventas', incluirBody: true }),
+  arcaIntegrationController.verificarARCA,
+  arcaIntegrationController.solicitarCAEBatch
+);
+
+/**
  * ✅ HEALTH CHECK DEL SERVICIO
  * GET /arca/health
  */

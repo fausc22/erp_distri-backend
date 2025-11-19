@@ -226,7 +226,178 @@ const generarPdfListaPrecios = async (req, res) => {
     }
 };
 
+// Generar PDF de Control de Stock por filtro (menor/mayor stock)
+const generarPdfControlStockFiltro = async (req, res) => {
+    const { tipo, cantidad } = req.body; // tipo: 'menor' o 'mayor', cantidad: número de productos
+
+    if (!tipo || !cantidad) {
+        return res.status(400).json({ error: "Debe especificar tipo y cantidad" });
+    }
+
+    if (!['menor', 'mayor'].includes(tipo)) {
+        return res.status(400).json({ error: "Tipo debe ser 'menor' o 'mayor'" });
+    }
+
+    try {
+        console.log(`📄 Generando Control de Stock (${tipo} stock) para ${cantidad} productos...`);
+        const startTime = Date.now();
+
+        // Consulta SQL para obtener productos con menor o mayor stock
+        const orderDirection = tipo === 'menor' ? 'ASC' : 'DESC';
+        const query = `
+            SELECT
+                p.id,
+                p.nombre,
+                p.unidad_medida,
+                p.stock_actual,
+                c.nombre as categoria_nombre
+            FROM productos p
+            LEFT JOIN categorias c ON p.categoria_id = c.id
+            ORDER BY p.stock_actual ${orderDirection}
+            LIMIT ?
+        `;
+
+        const productos = await queryPromise(query, [parseInt(cantidad)]);
+
+        console.log(`📦 Se encontraron ${productos.length} productos`);
+
+        if (productos.length === 0) {
+            return res.status(404).json({
+                error: "No se encontraron productos"
+            });
+        }
+
+        // Agrupar productos por categoría
+        const productosPorCategoria = productos.reduce((acc, producto) => {
+            const categoriaNombre = producto.categoria_nombre || 'Sin Categoría';
+            if (!acc[categoriaNombre]) {
+                acc[categoriaNombre] = [];
+            }
+
+            acc[categoriaNombre].push({
+                id: producto.id,
+                nombre: producto.nombre,
+                unidad_medida: producto.unidad_medida || 'Unidad',
+                stock_actual: parseFloat(producto.stock_actual) || 0
+            });
+            return acc;
+        }, {});
+
+        // Ordenar categorías alfabéticamente
+        const categoriasOrdenadas = Object.keys(productosPorCategoria).sort();
+
+        // Generar PDF usando el generador con la plantilla
+        const pdfBuffer = await pdfGenerator.generarControlStock({
+            tipo,
+            cantidad,
+            categorias: categoriasOrdenadas,
+            productosPorCategoria
+        });
+
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ Control de Stock generado en ${generationTime}ms`);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'productos',
+            detallesAdicionales: `Control de Stock generado - ${tipo} stock - ${productos.length} productos en ${generationTime}ms`
+        });
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="Control_Stock_${tipo}_${cantidad}_productos.pdf"`);
+        res.end(pdfBuffer);
+
+        console.log('✅ Control de Stock enviado exitosamente');
+
+    } catch (error) {
+        console.error("❌ Error generando Control de Stock:", error);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'productos',
+            detallesAdicionales: `Error generando Control de Stock: ${error.message}`
+        });
+
+        res.status(500).json({
+            error: "Error al generar el Control de Stock",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+// Generar PDF de Control de Stock por selección manual
+const generarPdfControlStockSeleccion = async (req, res) => {
+    const { productos } = req.body; // Array de productos seleccionados
+
+    if (!productos || productos.length === 0) {
+        return res.status(400).json({ error: "Debe proporcionar al menos un producto" });
+    }
+
+    try {
+        console.log(`📄 Generando Control de Stock para ${productos.length} productos seleccionados...`);
+        const startTime = Date.now();
+
+        // Agrupar productos por categoría
+        const productosPorCategoria = productos.reduce((acc, producto) => {
+            const categoriaNombre = producto.categoria_nombre || 'Sin Categoría';
+            if (!acc[categoriaNombre]) {
+                acc[categoriaNombre] = [];
+            }
+
+            acc[categoriaNombre].push({
+                id: producto.id,
+                nombre: producto.nombre,
+                unidad_medida: producto.unidad_medida || 'Unidad',
+                stock_actual: parseFloat(producto.stock_actual) || 0
+            });
+            return acc;
+        }, {});
+
+        // Ordenar categorías alfabéticamente
+        const categoriasOrdenadas = Object.keys(productosPorCategoria).sort();
+
+        // Generar PDF usando el generador con la plantilla
+        const pdfBuffer = await pdfGenerator.generarControlStock({
+            tipo: 'seleccion',
+            cantidad: productos.length,
+            categorias: categoriasOrdenadas,
+            productosPorCategoria
+        });
+
+        const generationTime = Date.now() - startTime;
+        console.log(`✅ Control de Stock generado en ${generationTime}ms`);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'productos',
+            detallesAdicionales: `Control de Stock generado - selección manual - ${productos.length} productos en ${generationTime}ms`
+        });
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="Control_Stock_Seleccion_${productos.length}_productos.pdf"`);
+        res.end(pdfBuffer);
+
+        console.log('✅ Control de Stock enviado exitosamente');
+
+    } catch (error) {
+        console.error("❌ Error generando Control de Stock:", error);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'productos',
+            detallesAdicionales: `Error generando Control de Stock: ${error.message}`
+        });
+
+        res.status(500).json({
+            error: "Error al generar el Control de Stock",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
 module.exports = {
     generarPdfLibroIva,
-    generarPdfListaPrecios
+    generarPdfListaPrecios,
+    generarPdfControlStockFiltro,
+    generarPdfControlStockSeleccion
 };
