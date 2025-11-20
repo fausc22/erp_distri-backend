@@ -32,4 +32,11 @@ router.post('/generarpdf-control-stock-seleccion',
     listadosController.generarPdfControlStockSeleccion
 );
 
+// Ruta para generar PDF de Listado de Vendedores
+router.post('/generarpdf-listado-vendedores',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
+    listadosController.generarPdfListadoVendedores
+);
+
 module.exports = router;

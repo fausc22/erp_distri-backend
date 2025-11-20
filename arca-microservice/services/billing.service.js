@@ -373,6 +373,140 @@ async crearNotaCredito(
 }
 
   /**
+   * ✅ CREAR NOTA DE DÉBITO A (Responsable Inscripto/Monotributo)
+   * Incrementa el importe de una Factura A
+   */
+  async crearNotaDebitoA(
+    facturaAsociada, // { tipo, puntoVenta, numero, cuit?, fecha? }
+    clienteCuit,
+    items,
+    opciones = {}
+  ) {
+    try {
+      console.log('\n╔══════════════════════════════════════════╗');
+      console.log('║   CREANDO NOTA DE DÉBITO A              ║');
+      console.log('╚══════════════════════════════════════════╝');
+      
+      console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+      
+      const datosNota = {
+        tipoComprobante: TIPOS_COMPROBANTE.NOTA_DEBITO_A,
+        concepto: opciones.concepto || 1,
+        cliente: {
+          tipoDocumento: 80, // CUIT
+          numeroDocumento: clienteCuit,
+          condicionIVA: opciones.condicionIVA || CONDICIONES_IVA.RESPONSABLE_INSCRIPTO
+        },
+        items: items,
+        comprobantesAsociados: [facturaAsociada],
+        ...opciones
+      };
+      
+      console.log(`💰 Items: ${items.length} productos`);
+      console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+      
+      const resultado = await this.crearFactura(datosNota);
+      
+      console.log('✅ Nota de Débito A creada exitosamente\n');
+      return resultado;
+      
+    } catch (error) {
+      console.error('❌ Error creando Nota de Débito A:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * ✅ CREAR NOTA DE DÉBITO B (Consumidor Final/Exento)
+   * Incrementa el importe de una Factura B
+   */
+  async crearNotaDebitoB(
+    facturaAsociada, // { tipo, puntoVenta, numero, fecha? }
+    items,
+    opciones = {}
+  ) {
+    try {
+      console.log('\n╔══════════════════════════════════════════╗');
+      console.log('║   CREANDO NOTA DE DÉBITO B              ║');
+      console.log('╚══════════════════════════════════════════╝');
+      
+      console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+      
+      // Determinar documento del cliente
+      const tipoDoc = opciones.dni ? determinarTipoDocumento(opciones.dni) : 99;
+      const numeroDoc = opciones.dni || 0;
+      
+      const datosNota = {
+        tipoComprobante: TIPOS_COMPROBANTE.NOTA_DEBITO_B,
+        concepto: opciones.concepto || 1,
+        cliente: {
+          tipoDocumento: tipoDoc,
+          numeroDocumento: numeroDoc,
+          condicionIVA: opciones.condicionIVA || CONDICIONES_IVA.CONSUMIDOR_FINAL
+        },
+        items: items,
+        comprobantesAsociados: [facturaAsociada],
+        ...opciones
+      };
+      
+      console.log(`💰 Items: ${items.length} productos`);
+      console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+      
+      const resultado = await this.crearFactura(datosNota);
+      
+      console.log('✅ Nota de Débito B creada exitosamente\n');
+      return resultado;
+      
+    } catch (error) {
+      console.error('❌ Error creando Nota de Débito B:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * ✅ CREAR NOTA DE DÉBITO GENÉRICA (detecta automáticamente tipo A o B)
+   * Wrapper que decide entre ND A o ND B según condición IVA
+   */
+  async crearNotaDebito(
+    facturaAsociada, // { tipo, puntoVenta, numero, cuit?, fecha? }
+    datosCliente, // { cuit?, dni?, condicionIVA }
+    items,
+    opciones = {}
+  ) {
+    try {
+      const condicionIVA = datosCliente.condicionIVA || CONDICIONES_IVA.CONSUMIDOR_FINAL;
+      
+      // ✅ Determinar tipo de ND según condición IVA
+      if (condicionIVA === CONDICIONES_IVA.RESPONSABLE_INSCRIPTO || 
+          condicionIVA === CONDICIONES_IVA.MONOTRIBUTO) {
+        
+        if (!datosCliente.cuit) {
+          throw new Error('CUIT es obligatorio para Nota de Débito A');
+        }
+        
+        return await this.crearNotaDebitoA(
+          facturaAsociada,
+          datosCliente.cuit,
+          items,
+          { ...opciones, condicionIVA }
+        );
+        
+      } else {
+        // Consumidor Final o Exento
+        return await this.crearNotaDebitoB(
+          facturaAsociada,
+          items,
+          { ...opciones, dni: datosCliente.dni, condicionIVA }
+        );
+      }
+      
+    } catch (error) {
+      console.error('❌ Error creando Nota de Débito:', error.message);
+      throw error;
+    }
+  }
+
+  /**
    * VERIFICAR SALUD DEL SERVICIO
    */
   async verificarSalud() {

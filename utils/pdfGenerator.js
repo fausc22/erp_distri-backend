@@ -590,6 +590,250 @@ class PdfGenerator {
   }
 
   /**
+   * ✅ GENERAR NOTA DE CRÉDITO ARCA (A y B)
+   * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
+   */
+  async generarNotaCreditoARCA(nota, productos, facturaAsociada) {
+    const templatePath = path.join(this.templatesPath, 'nota_credito_arca.html');
+    
+    if (!fs.existsSync(templatePath)) {
+      throw new Error('Plantilla nota_credito_arca.html no encontrada');
+    }
+
+    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+    console.log('📱 Generando QR para Nota de Crédito...');
+    const qrBase64 = await this.generarQRDesdeARCA(nota);
+    const logoARCABase64 = this.obtenerLogoARCABase64();
+    
+    const tipoComprobante = nota.tipo_f || 'NC';
+    const fechaFormateada = this.formatearFecha(nota.fecha);
+    const fechaVencimientoCAE = this.formatearFecha(nota.cae_fecha);
+    
+    // ✅ DESGLOSAR NÚMERO DE NOTA
+    let puntoVenta = '';
+    let numeroComprobante = '';
+    
+    if (nota.numero_factura) {
+        const regex = /^([A-Z]+)\s+(\d{4})-(\d{8})$/;
+        const match = nota.numero_factura.trim().match(regex);
+        
+        if (match) {
+            puntoVenta = match[2];
+            numeroComprobante = match[3];
+            console.log(`📋 Número desglosado: PV=${puntoVenta}, Comp=${numeroComprobante}`);
+        }
+    }
+    
+    // ✅ Determinar si el cliente está EXENTO
+    const condicionIVA = (nota.cliente_condicion || '').toString().trim();
+    const esExento = condicionIVA === 'Exento';
+    
+    // ✅ MANEJO DE OBSERVACIONES
+    let observacionesHTML = '';
+    const observaciones = (nota.observaciones || '').toString().trim();
+    
+    if (observaciones && observaciones.toLowerCase() !== 'sin observaciones') {
+        observacionesHTML = `
+            <p><strong>OBSERVACIONES:</strong></p>
+            <p>${observaciones}</p>
+        `;
+    }
+    
+    // ✅ INFORMACIÓN DE FACTURA ASOCIADA
+    let facturaAsociadaTipo = facturaAsociada?.tipo || 'N/A';
+    let facturaAsociadaPV = facturaAsociada?.puntoVenta || 'N/A';
+    let facturaAsociadaNum = facturaAsociada?.numero || 'N/A';
+    let facturaAsociadaFecha = facturaAsociada?.fecha ? this.formatearFecha(facturaAsociada.fecha) : '';
+    
+    // Reemplazar datos generales
+    htmlTemplate = htmlTemplate
+      .replace(/{{tipo_comprobante}}/g, tipoComprobante)
+      .replace(/{{punto_venta}}/g, puntoVenta)
+      .replace(/{{numero_comprobante}}/g, numeroComprobante)
+      .replace(/{{fecha}}/g, fechaFormateada)
+      .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
+      .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
+      .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
+      .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
+      .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
+      .replace(/{{cliente_cuit}}/g, nota.cliente_cuit || 'No informado')
+      .replace(/{{cliente_nombre}}/g, nota.cliente_nombre || 'No informado')
+      .replace(/{{cliente_condicion}}/g, nota.cliente_condicion || 'No informado')
+      .replace(/{{cliente_direccion}}/g, nota.cliente_direccion || 'No informado')
+      .replace(/{{observaciones_html}}/g, observacionesHTML)
+      .replace(/{{factura_asociada_tipo}}/g, facturaAsociadaTipo)
+      .replace(/{{factura_asociada_punto_venta}}/g, facturaAsociadaPV)
+      .replace(/{{factura_asociada_numero}}/g, facturaAsociadaNum)
+      .replace(/{{factura_asociada_fecha}}/g, facturaAsociadaFecha);
+
+    // ✅ ITEMS
+    const itemsHTML = productos.map(producto => {
+      const cantidad = parseFloat(producto.cantidad) || 0;
+      const subtotal = parseFloat(producto.subtotal) || 0;
+      const cantidadFormateada = this.formatearCantidad(cantidad);
+      const precioUnitario = cantidad > 0 ? (subtotal / cantidad) : 0;
+      
+      return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
+          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
+          <td style="text-align: right;">${precioUnitario.toFixed(2)}</td>
+          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join('');
+
+    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+    // ✅ TOTALES
+    const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+    let ivaTotal = 0;
+    let total = subtotal;
+    
+    if (!esExento) {
+      ivaTotal = subtotal * 0.21;
+      total = subtotal + ivaTotal;
+    }
+
+    htmlTemplate = htmlTemplate
+      .replace(/{{subtotal}}/g, subtotal.toFixed(2))
+      .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
+      .replace(/{{total}}/g, total.toFixed(2))
+      .replace(/{{qr_base64}}/g, qrBase64)
+      .replace(/{{logo_arca}}/g, logoARCABase64)
+      .replace(/{{cae}}/g, nota.cae_id)
+      .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
+    
+    console.log('📄 Generando PDF de Nota de Crédito ARCA...');
+    
+    return await this.generatePdfFromHtml(htmlTemplate);
+  }
+
+  /**
+   * ✅ GENERAR NOTA DE DÉBITO ARCA (A y B)
+   * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
+   */
+  async generarNotaDebitoARCA(nota, productos, facturaAsociada) {
+    const templatePath = path.join(this.templatesPath, 'nota_debito_arca.html');
+    
+    if (!fs.existsSync(templatePath)) {
+      throw new Error('Plantilla nota_debito_arca.html no encontrada');
+    }
+
+    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+    console.log('📱 Generando QR para Nota de Débito...');
+    const qrBase64 = await this.generarQRDesdeARCA(nota);
+    const logoARCABase64 = this.obtenerLogoARCABase64();
+    
+    const tipoComprobante = nota.tipo_f || 'ND';
+    const fechaFormateada = this.formatearFecha(nota.fecha);
+    const fechaVencimientoCAE = this.formatearFecha(nota.cae_fecha);
+    
+    // ✅ DESGLOSAR NÚMERO DE NOTA
+    let puntoVenta = '';
+    let numeroComprobante = '';
+    
+    if (nota.numero_factura) {
+        const regex = /^([A-Z]+)\s+(\d{4})-(\d{8})$/;
+        const match = nota.numero_factura.trim().match(regex);
+        
+        if (match) {
+            puntoVenta = match[2];
+            numeroComprobante = match[3];
+            console.log(`📋 Número desglosado: PV=${puntoVenta}, Comp=${numeroComprobante}`);
+        }
+    }
+    
+    // ✅ Determinar si el cliente está EXENTO
+    const condicionIVA = (nota.cliente_condicion || '').toString().trim();
+    const esExento = condicionIVA === 'Exento';
+    
+    // ✅ MANEJO DE OBSERVACIONES
+    let observacionesHTML = '';
+    const observaciones = (nota.observaciones || '').toString().trim();
+    
+    if (observaciones && observaciones.toLowerCase() !== 'sin observaciones') {
+        observacionesHTML = `
+            <p><strong>OBSERVACIONES:</strong></p>
+            <p>${observaciones}</p>
+        `;
+    }
+    
+    // ✅ INFORMACIÓN DE FACTURA ASOCIADA
+    let facturaAsociadaTipo = facturaAsociada?.tipo || 'N/A';
+    let facturaAsociadaPV = facturaAsociada?.puntoVenta || 'N/A';
+    let facturaAsociadaNum = facturaAsociada?.numero || 'N/A';
+    let facturaAsociadaFecha = facturaAsociada?.fecha ? this.formatearFecha(facturaAsociada.fecha) : '';
+    
+    // Reemplazar datos generales
+    htmlTemplate = htmlTemplate
+      .replace(/{{tipo_comprobante}}/g, tipoComprobante)
+      .replace(/{{punto_venta}}/g, puntoVenta)
+      .replace(/{{numero_comprobante}}/g, numeroComprobante)
+      .replace(/{{fecha}}/g, fechaFormateada)
+      .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
+      .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
+      .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
+      .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
+      .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
+      .replace(/{{cliente_cuit}}/g, nota.cliente_cuit || 'No informado')
+      .replace(/{{cliente_nombre}}/g, nota.cliente_nombre || 'No informado')
+      .replace(/{{cliente_condicion}}/g, nota.cliente_condicion || 'No informado')
+      .replace(/{{cliente_direccion}}/g, nota.cliente_direccion || 'No informado')
+      .replace(/{{observaciones_html}}/g, observacionesHTML)
+      .replace(/{{factura_asociada_tipo}}/g, facturaAsociadaTipo)
+      .replace(/{{factura_asociada_punto_venta}}/g, facturaAsociadaPV)
+      .replace(/{{factura_asociada_numero}}/g, facturaAsociadaNum)
+      .replace(/{{factura_asociada_fecha}}/g, facturaAsociadaFecha);
+
+    // ✅ ITEMS
+    const itemsHTML = productos.map(producto => {
+      const cantidad = parseFloat(producto.cantidad) || 0;
+      const subtotal = parseFloat(producto.subtotal) || 0;
+      const cantidadFormateada = this.formatearCantidad(cantidad);
+      const precioUnitario = cantidad > 0 ? (subtotal / cantidad) : 0;
+      
+      return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
+          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
+          <td style="text-align: right;">${precioUnitario.toFixed(2)}</td>
+          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join('');
+
+    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+    // ✅ TOTALES
+    const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+    let ivaTotal = 0;
+    let total = subtotal;
+    
+    if (!esExento) {
+      ivaTotal = subtotal * 0.21;
+      total = subtotal + ivaTotal;
+    }
+
+    htmlTemplate = htmlTemplate
+      .replace(/{{subtotal}}/g, subtotal.toFixed(2))
+      .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
+      .replace(/{{total}}/g, total.toFixed(2))
+      .replace(/{{qr_base64}}/g, qrBase64)
+      .replace(/{{logo_arca}}/g, logoARCABase64)
+      .replace(/{{cae}}/g, nota.cae_id)
+      .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
+    
+    console.log('📄 Generando PDF de Nota de Débito ARCA...');
+    
+    return await this.generatePdfFromHtml(htmlTemplate);
+  }
+
+  /**
    * ✅ FACTURA GENÉRICA (C) - CON IVA INCLUIDO, SIN $
    */
   async generarFacturaGenerica(venta, productos) {
@@ -1153,6 +1397,62 @@ class PdfGenerator {
         }).join('');
 
         htmlTemplate = htmlTemplate.replace(/{{categorias}}/g, categoriasHTML);
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
+    // ✅ GENERAR PDF - Listado de Vendedores
+    async generarListadoVendedores(datos) {
+        const templatePath = path.join(this.templatesPath, 'listado_vendedores.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla listado_vendedores.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        const mesesNombres = [
+            'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+            'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+        ];
+        const mesNombre = mesesNombres[parseInt(datos.mes) - 1];
+
+        // Reemplazar datos del encabezado
+        htmlTemplate = htmlTemplate
+            .replace(/{{vendedor}}/g, datos.vendedorNombre)
+            .replace(/{{mes}}/g, mesNombre)
+            .replace(/{{anio}}/g, datos.anio);
+
+        // Generar filas de la tabla
+        const itemsHTML = datos.ventas.map(venta => {
+            const fecha = this.formatearFecha(venta.fecha);
+            return `
+                <tr>
+                    <td>${fecha}</td>
+                    <td>${venta.comprobante}</td>
+                    <td>${venta.numero}</td>
+                    <td>${venta.cliente}</td>
+                    <td>${venta.cuit}</td>
+                    <td>$ ${venta.neto.toFixed(2)}</td>
+                    <td>$ ${venta.exento.toFixed(2)}</td>
+                    <td>$ ${venta.iva.toFixed(2)}</td>
+                    <td>$ ${venta.percepciones.toFixed(2)}</td>
+                    <td>$ ${venta.retenciones.toFixed(2)}</td>
+                    <td>$ ${venta.total.toFixed(2)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+
+        // Reemplazar totales
+        htmlTemplate = htmlTemplate
+            .replace(/{{total_neto}}/g, datos.totales.neto.toFixed(2))
+            .replace(/{{total_exento}}/g, datos.totales.exento.toFixed(2))
+            .replace(/{{total_iva}}/g, datos.totales.iva.toFixed(2))
+            .replace(/{{total_percepciones}}/g, datos.totales.percepciones.toFixed(2))
+            .replace(/{{total_retenciones}}/g, datos.totales.retenciones.toFixed(2))
+            .replace(/{{total_total}}/g, datos.totales.total.toFixed(2));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }

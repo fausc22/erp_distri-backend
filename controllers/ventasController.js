@@ -128,7 +128,7 @@ const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta 
                 id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
                 cliente_direccion, cliente_ciudad, cliente_provincia, 
                 cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, 
-                subtotal, iva_total, total, estado, observaciones, 
+                subtotal, iva_total, exento, total, estado, observaciones, 
                 empleado_id, empleado_nombre, 
                 cae_id, cae_fecha, cae_resultado, cae_observaciones, cae_solicitud_fecha,
                 comprobante_path
@@ -150,7 +150,7 @@ const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta 
                 id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
                 cliente_direccion, cliente_ciudad, cliente_provincia, 
                 cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, 
-                subtotal, iva_total, total, estado, observaciones, 
+                subtotal, iva_total, exento, total, estado, observaciones, 
                 empleado_id, empleado_nombre, 
                 cae_id, cae_fecha, cae_resultado, cae_observaciones, cae_solicitud_fecha,
                 comprobante_path
@@ -645,14 +645,55 @@ const facturarPedido = async (req, res) => {
             console.log(`📄 Número de factura asignado: ${numeroCompleto}`);
 
             // 4. Crear la venta CON NÚMERO DE FACTURA
+            // ✅ Obtener monto exento del pedido (si existe)
+            let montoExento = 0;
+            if (pedido.exento !== null && pedido.exento !== undefined && pedido.exento !== '') {
+                const exentoNum = parseFloat(pedido.exento);
+                montoExento = isNaN(exentoNum) ? 0 : exentoNum;
+            }
+            
+            // ✅ Si el monto exento es 0 pero el cliente es exento, calcularlo
+            const esClienteExento = pedido.cliente_condicion?.toUpperCase() === 'EXENTO';
+            if (esClienteExento && montoExento < 0.01 && productos.length > 0) {
+                console.log('🔄 [Facturar Pedido] Calculando monto exento para cliente exento...');
+                
+                // Obtener porcentajes de IVA de los productos
+                const productoIds = productos.map(p => p.producto_id);
+                const placeholders = productoIds.map(() => '?').join(',');
+                const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
+                
+                const productosIva = await queryPromiseWithConnection(connection, queryProductos, productoIds);
+                
+                // Crear mapa de IVA
+                const ivaMap = {};
+                productosIva.forEach(row => {
+                    ivaMap[row.id] = parseFloat(row.iva) || 21;
+                });
+                
+                // Calcular monto exento
+                montoExento = productos.reduce((acc, prod) => {
+                    const porcentajeIva = ivaMap[prod.producto_id] || 21;
+                    const subtotalProducto = parseFloat(prod.subtotal) || 0;
+                    const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
+                    return acc + ivaQueDeberiaCobrarse;
+                }, 0);
+                
+                console.log(`✅ [Facturar Pedido] Monto exento calculado: $${montoExento.toFixed(2)}`);
+            }
+            
+            // ✅ Asegurar que montoExento sea un número válido
+            montoExento = Number(montoExento);
+            
+            console.log(`💰 [Facturar Pedido] Monto exento a guardar en venta: $${montoExento.toFixed(2)}`);
+            
             const ventaQuery = `
                 INSERT INTO ventas 
                 (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
                  cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-                 cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, 
+                 cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, exento, total, estado, 
                  observaciones, empleado_id, empleado_nombre)
                 VALUES 
-                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?)
+                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?)
             `;
 
             const ventaValues = [
@@ -670,15 +711,32 @@ const facturarPedido = async (req, res) => {
                 tipoFiscal,
                 subtotalSinIva,
                 ivaTotal,
+                montoExento,  // ✅ Monto exento del pedido (validado)
                 totalConIva,
                 pedido.observaciones,
                 pedido.empleado_id,
                 pedido.empleado_nombre
             ];
+            
+            console.log(`💾 [Facturar Pedido] Valores a insertar en venta:`);
+            console.log(`   - Exento (posición 15): ${montoExento} (${typeof montoExento})`);
+            console.log(`   - Valores: [${ventaValues.map((v, i) => i === 15 ? `[EXENTO:${v}]` : v).join(', ')}]`);
 
             const ventaResult = await queryPromiseWithConnection(connection, ventaQuery, ventaValues);
             const ventaId = ventaResult.insertId;
             console.log('💰 Venta creada con ID:', ventaId, '- Número:', numeroCompleto);
+            
+            // ✅ Verificar inmediatamente después de insertar
+            const verifyQuery = `SELECT exento FROM ventas WHERE id = ?`;
+            const verifyResult = await queryPromiseWithConnection(connection, verifyQuery, [ventaId]);
+            if (verifyResult.length > 0) {
+                console.log(`🔍 [VERIFICACIÓN] Exento guardado en venta: ${verifyResult[0].exento}`);
+                if (parseFloat(verifyResult[0].exento) !== montoExento) {
+                    console.error(`❌ [ERROR] El exento guardado (${verifyResult[0].exento}) NO coincide con el enviado (${montoExento})`);
+                } else {
+                    console.log(`✅ [VERIFICACIÓN] El exento se guardó correctamente: $${verifyResult[0].exento}`);
+                }
+            }
 
             // 5. Copiar productos del pedido a la venta
             for (const producto of productos) {
@@ -1103,7 +1161,7 @@ const buscarVentasPorCliente = (req, res) => {
             id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
             cliente_direccion, cliente_ciudad, cliente_provincia, 
             cliente_condicion, cliente_cuit, cuenta_id, tipo_doc, tipo_f, 
-            subtotal, iva_total, total, estado, observaciones, 
+            subtotal, iva_total, exento, total, estado, observaciones, 
             empleado_id, empleado_nombre, 
             cae_id, cae_fecha, cae_resultado, cae_observaciones, cae_solicitud_fecha,
             comprobante_path
@@ -1145,6 +1203,7 @@ const ventaDirecta = async (req, res) => {
         tipoFiscal,
         subtotalSinIva,
         ivaTotal,
+        exento,  // ✅ Monto exento
         totalConIva,
         descuentoAplicado,
         
@@ -1200,16 +1259,73 @@ const ventaDirecta = async (req, res) => {
             const pedidoQuery = `
                 INSERT INTO pedidos 
                 (cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
-                 cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, total, 
+                 cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, exento, total, 
                  estado, observaciones, empleado_id, empleado_nombre)
                 VALUES 
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturado', ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturado', ?, ?, ?)
             `;
+
+            // ✅ Calcular monto exento si no viene del frontend o si el cliente es exento
+            const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
+            
+            // Convertir exento a número, manejando strings "0.00" o undefined
+            let montoExento = 0;
+            if (exento !== undefined && exento !== null && exento !== '') {
+                const exentoNum = parseFloat(exento);
+                montoExento = isNaN(exentoNum) ? 0 : exentoNum;
+            }
+            
+            console.log(`🔍 [Venta Directa] Exento recibido: "${exento}" (tipo: ${typeof exento}), Convertido: ${montoExento}`);
+            console.log(`🔍 [Venta Directa] Cliente es exento: ${esClienteExento}, Monto exento actual: ${montoExento}`);
+            
+            // Si el cliente es exento, calcular el monto exento SIEMPRE
+            if (esClienteExento && productos && productos.length > 0) {
+                // Calcular el monto exento desde los productos
+                console.log('🔄 [Venta Directa] Calculando monto exento en backend para cliente exento...');
+                console.log(`   - Productos a procesar: ${productos.length}`);
+                
+                // Obtener todos los IDs de productos
+                const productoIds = productos.map(p => p.id);
+                console.log(`   - IDs de productos: ${productoIds.join(', ')}`);
+                
+                if (productoIds.length > 0) {
+                    // Obtener porcentajes de IVA de todos los productos en una sola consulta
+                    const placeholders = productoIds.map(() => '?').join(',');
+                    const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
+                    
+                    const productosIva = await queryPromiseWithConnection(connection, queryProductos, productoIds);
+                    
+                    console.log(`   - Productos encontrados en BD: ${productosIva.length}`);
+                    
+                    // Crear un mapa de ID -> porcentaje IVA
+                    const ivaMap = {};
+                    productosIva.forEach(row => {
+                        ivaMap[row.id] = parseFloat(row.iva) || 21;
+                        console.log(`   - Producto ${row.id}: IVA ${ivaMap[row.id]}%`);
+                    });
+                    
+                    // Calcular monto exento para cada producto
+                    montoExento = productos.reduce((acc, producto) => {
+                        const porcentajeIva = ivaMap[producto.id] || 21;
+                        const subtotalProducto = parseFloat(producto.subtotal) || 0;
+                        const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
+                        console.log(`   - Producto ${producto.id}: Subtotal $${subtotalProducto}, IVA ${porcentajeIva}%, Exento $${ivaQueDeberiaCobrarse}`);
+                        return acc + ivaQueDeberiaCobrarse;
+                    }, 0);
+                    
+                    console.log(`✅ [Venta Directa] Monto exento calculado: $${montoExento.toFixed(2)}`);
+                }
+            }
+            
+            // ✅ Asegurar que montoExento sea un número válido
+            montoExento = Number(montoExento);
+            
+            console.log(`💰 [Venta Directa] Monto exento final a guardar: $${montoExento.toFixed(2)}`);
 
             const pedidoValues = [
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-                subtotalSinIva, ivaTotal, totalConIva, 
+                subtotalSinIva, ivaTotal, montoExento, totalConIva, 
                 observaciones || '', empleado_id, empleado_nombre
             ];
 
@@ -1274,24 +1390,50 @@ const ventaDirecta = async (req, res) => {
                 INSERT INTO ventas 
                 (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-                cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, total, estado, 
+                cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, exento, total, estado, 
                 observaciones, empleado_id, empleado_nombre)
                 VALUES 
-                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FACTURA', ?, ?, ?, ?, 'Facturada', ?, ?, ?)
+                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FACTURA', ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?)
             `;
 
+            // ✅ Asegurar que montoExento sea un número válido antes de guardar
+            montoExento = Number(montoExento);
+            
+            console.log(`💾 [Venta Directa] Preparando para guardar venta:`);
+            console.log(`   - Cliente: ${cliente_nombre}`);
+            console.log(`   - Condición: ${cliente_condicion}`);
+            console.log(`   - Es exento: ${esClienteExento}`);
+            console.log(`   - Monto exento a guardar: $${montoExento.toFixed(2)}`);
+            console.log(`   - Tipo de montoExento: ${typeof montoExento}`);
+            
             const ventaValues = [
                 numeroCompleto,  // ✅ número_factura
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion,
                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit,
-                cuentaId, tipoFiscal, subtotalSinIva, ivaTotal, totalConIva,
+                cuentaId, tipoFiscal, subtotalSinIva, ivaTotal, montoExento, totalConIva,
                 observaciones || '', empleado_id, empleado_nombre
             ];
+            
+            console.log(`💾 [Venta Directa] Valores a insertar:`);
+            console.log(`   - Exento (posición 15): ${montoExento} (${typeof montoExento})`);
+            console.log(`   - Valores: [${ventaValues.map((v, i) => i === 15 ? `[EXENTO:${v}]` : v).join(', ')}]`);
 
             const ventaResult = await queryPromiseWithConnection(connection, ventaQuery, ventaValues);
             const ventaId = ventaResult.insertId;
             
             console.log(`✅ [Venta Directa] Venta creada con ID: ${ventaId}`);
+            
+            // ✅ Verificar inmediatamente después de insertar
+            const verifyQuery = `SELECT exento FROM ventas WHERE id = ?`;
+            const verifyResult = await queryPromiseWithConnection(connection, verifyQuery, [ventaId]);
+            if (verifyResult.length > 0) {
+                console.log(`🔍 [VERIFICACIÓN] Exento guardado en venta: ${verifyResult[0].exento}`);
+                if (parseFloat(verifyResult[0].exento) !== montoExento) {
+                    console.error(`❌ [ERROR] El exento guardado (${verifyResult[0].exento}) NO coincide con el enviado (${montoExento})`);
+                } else {
+                    console.log(`✅ [VERIFICACIÓN] El exento se guardó correctamente: $${verifyResult[0].exento}`);
+                }
+            }
 
             // ============================================
             // 4️⃣ COPIAR PRODUCTOS A LA VENTA

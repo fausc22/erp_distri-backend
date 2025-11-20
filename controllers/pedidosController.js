@@ -176,29 +176,62 @@ const registrarPedido = (pedidoData, callback) => {
     const { 
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado, empleado_id, empleado_nombre, observaciones 
+        subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, observaciones 
     } = pedidoData;
 
     const registrarPedidoQuery = `
         INSERT INTO pedidos 
         (cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
-         cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, total, 
+         cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, exento, total, 
          estado, observaciones, empleado_id, empleado_nombre)
         VALUES 
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
+    // ✅ Asegurar que exento sea un número válido
+    let exentoFinal = 0;
+    if (exento !== null && exento !== undefined && exento !== '') {
+        const exentoNum = parseFloat(exento);
+        exentoFinal = isNaN(exentoNum) ? 0 : exentoNum;
+    }
+    
+    // ✅ Asegurar que exentoFinal sea un número, no string
+    exentoFinal = Number(exentoFinal);
+    
+    console.log(`💾 [registrarPedido] Recibido exento: ${exento}, Tipo: ${typeof exento}, Final: ${exentoFinal} (${typeof exentoFinal})`);
+    
     const pedidoValues = [
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre
+        subtotal, iva_total, exentoFinal, total, estado, observaciones, empleado_id, empleado_nombre
     ];
-
+    
+    console.log(`💾 [registrarPedido] Valores a insertar:`);
+    console.log(`   - Exento (posición 11): ${exentoFinal} (${typeof exentoFinal})`);
+    console.log(`   - Subtotal: ${subtotal}, IVA: ${iva_total}, Total: ${total}`);
+    console.log(`   - Query campos: cliente_id, cliente_nombre, ..., subtotal, iva_total, exento, total, ...`);
+    console.log(`   - Valores en orden: [${pedidoValues.map((v, i) => i === 10 ? `[EXENTO:${v}]` : v).join(', ')}]`);
+    
     db.query(registrarPedidoQuery, pedidoValues, (err, result) => {
         if (err) {
-            console.error('Error al insertar el pedido:', err);
+            console.error('❌ Error al insertar el pedido:', err);
+            console.error('❌ Query:', registrarPedidoQuery);
+            console.error('❌ Valores:', pedidoValues);
             return callback(err);
         }
+        console.log(`✅ Pedido insertado con ID: ${result.insertId}`);
+        console.log(`✅ Verificar en BD: SELECT id, subtotal, iva_total, exento, total FROM pedidos WHERE id = ${result.insertId}`);
+        
+        // ✅ Verificar inmediatamente después de insertar
+        db.query('SELECT exento FROM pedidos WHERE id = ?', [result.insertId], (errVerify, results) => {
+            if (!errVerify && results.length > 0) {
+                console.log(`🔍 [VERIFICACIÓN] Exento guardado en BD: ${results[0].exento}`);
+                if (parseFloat(results[0].exento) !== exentoFinal) {
+                    console.error(`❌ [ERROR] El exento guardado (${results[0].exento}) NO coincide con el enviado (${exentoFinal})`);
+                }
+            }
+        });
+        
         callback(null, result.insertId);
     });
 };
@@ -240,20 +273,108 @@ const nuevoPedido = async (req, res) => {
     const { 
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado, empleado_id, empleado_nombre, 
+        subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, 
         observaciones, productos 
     } = req.body;
 
     console.log('📋 Datos recibidos para nuevo pedido:', req.body);
+    console.log('🔍 Exento recibido del frontend:', exento);
+    console.log('🔍 Cliente condición:', cliente_condicion);
 
     if (!productos || productos.length === 0) {
         return res.status(400).json({ success: false, message: 'Debe incluir al menos un producto' });
     }
 
+    // ✅ Calcular monto exento si no viene del frontend o si el cliente es exento
+    const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
+    
+    // Convertir exento a número, manejando strings "0.00" o undefined
+    let montoExento = 0;
+    if (exento !== undefined && exento !== null && exento !== '') {
+        const exentoNum = parseFloat(exento);
+        montoExento = isNaN(exentoNum) ? 0 : exentoNum;
+    }
+    
+    console.log(`🔍 Exento recibido: "${exento}" (tipo: ${typeof exento}), Convertido: ${montoExento}`);
+    console.log(`🔍 Cliente es exento: ${esClienteExento}, Monto exento actual: ${montoExento}`);
+    
+    // Si el cliente es exento, calcular el monto exento SIEMPRE (ignorar lo que venga del frontend)
+    if (esClienteExento) {
+        // Calcular el monto exento desde los productos
+        console.log('🔄 Calculando monto exento en backend para cliente exento...');
+        console.log(`   - Productos a procesar: ${productos.length}`);
+        
+        // Obtener todos los IDs de productos
+        const productoIds = productos.map(p => p.id);
+        console.log(`   - IDs de productos: ${productoIds.join(', ')}`);
+        
+        if (productoIds.length > 0) {
+            // Obtener porcentajes de IVA de todos los productos en una sola consulta
+            const placeholders = productoIds.map(() => '?').join(',');
+            const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
+            
+            montoExento = await new Promise((resolve, reject) => {
+                db.query(queryProductos, productoIds, (err, results) => {
+                    if (err) {
+                        console.error('❌ Error obteniendo IVA de productos:', err);
+                        return resolve(0);
+                    }
+                    
+                    console.log(`   - Productos encontrados en BD: ${results.length}`);
+                    
+                    // Crear un mapa de ID -> porcentaje IVA
+                    const ivaMap = {};
+                    results.forEach(row => {
+                        ivaMap[row.id] = parseFloat(row.iva) || 21;
+                        console.log(`   - Producto ${row.id}: IVA ${ivaMap[row.id]}%`);
+                    });
+                    
+                    // Calcular monto exento para cada producto
+                    let totalExento = 0;
+                    productos.forEach(producto => {
+                        const porcentajeIva = ivaMap[producto.id] || 21;
+                        const subtotalProducto = parseFloat(producto.subtotal) || 0;
+                        const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
+                        console.log(`   - Producto ${producto.id}: Subtotal $${subtotalProducto}, IVA ${porcentajeIva}%, Exento $${ivaQueDeberiaCobrarse}`);
+                        totalExento += ivaQueDeberiaCobrarse;
+                    });
+                    
+                    console.log(`✅ Monto exento calculado: $${totalExento.toFixed(2)}`);
+                    resolve(totalExento);
+                });
+            });
+        } else {
+            console.log('⚠️ No hay productos para calcular monto exento');
+            montoExento = 0;
+        }
+    }
+    
+    // ✅ Asegurar que montoExento sea un número válido antes de guardar
+    // Si el cliente es exento, SIEMPRE usar el valor calculado (aunque sea 0)
+    let montoExentoFinal = 0;
+    if (esClienteExento) {
+        // Si se calculó el monto exento, usarlo; si no, usar el que vino del frontend
+        montoExentoFinal = (montoExento !== null && montoExento !== undefined && !isNaN(montoExento)) 
+            ? parseFloat(montoExento.toFixed(2)) 
+            : 0;
+    } else {
+        // Si no es exento, el monto exento debe ser 0
+        montoExentoFinal = 0;
+    }
+    
+    console.log(`💰 Monto exento calculado: $${montoExento.toFixed(2)}`);
+    console.log(`💰 Tipo de montoExento: ${typeof montoExento}, Valor: ${montoExento}`);
+    console.log(`💾 Preparando para guardar pedido:`);
+    console.log(`   - Cliente: ${cliente_nombre}`);
+    console.log(`   - Condición: ${cliente_condicion}`);
+    console.log(`   - Es exento: ${esClienteExento}`);
+    console.log(`   - Monto exento a guardar: $${montoExentoFinal.toFixed(2)}`);
+    console.log(`   - Tipo de montoExentoFinal: ${typeof montoExentoFinal}`);
+    
     registrarPedido({
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado: estado || 'Exportado', 
+        subtotal, iva_total, exento: montoExentoFinal, total, estado: estado || 'Exportado', 
         empleado_id, empleado_nombre, observaciones: observaciones || 'sin observaciones'
     }, async (err, pedidoId) => {
         if (err) {
@@ -315,7 +436,7 @@ const obtenerPedidos = (req, res) => {
             id, fecha, 
             cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
             cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-            subtotal, iva_total, total, estado, observaciones, 
+            subtotal, iva_total, exento, total, estado, observaciones, 
             empleado_id, empleado_nombre
         FROM pedidos 
     `;
@@ -348,10 +469,13 @@ const obtenerDetallePedido = (req, res) => {
     
     const queryPedido = `SELECT * FROM pedidos WHERE id = ?`;
     const queryProductos = `
-        SELECT id, pedido_id, producto_id, producto_nombre, producto_um, 
-               cantidad, precio, iva, subtotal 
-        FROM pedidos_cont
-        WHERE pedido_id = ?
+        SELECT 
+            pc.id, pc.pedido_id, pc.producto_id, pc.producto_nombre, pc.producto_um, 
+            pc.cantidad, pc.precio, pc.IVA as iva, pc.subtotal, pc.descuento_porcentaje,
+            COALESCE(p.iva, 21) as porcentaje_iva
+        FROM pedidos_cont pc
+        LEFT JOIN productos p ON pc.producto_id = p.id
+        WHERE pc.pedido_id = ?
     `;
     
     db.query(queryPedido, [pedidoId], (err, pedidoResults) => {
@@ -843,7 +967,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
 
 // Actualizar producto de un pedido
 const actualizarProductoPedido = async (req, res) => {
-    const { cantidad, precio, iva, subtotal, descuento_porcentaje } = req.body;
+    const { cantidad, precio, iva, subtotal, descuento_porcentaje, producto_nombre } = req.body;
     const productId = req.params.productId;
 
     if (!cantidad || cantidad <= 0 || isNaN(parseFloat(cantidad))) {
@@ -964,14 +1088,17 @@ const actualizarProductoPedido = async (req, res) => {
         }
 
         // 6. ACTUALIZAR EL PRODUCTO CON DESCUENTO Y IVA AJUSTADO
+        // ✅ Si se envía producto_nombre, actualizarlo también
+        const nombreFinal = producto_nombre || datosAnteriores.producto_nombre;
+        
         const queryActualizar = `
             UPDATE pedidos_cont
-            SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?
+            SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?, producto_nombre = ?
             WHERE id = ?
         `;
 
         await new Promise((resolve, reject) => {
-            db.query(queryActualizar, [cantidad, precio, ivaFinal, subtotal, descuentoFinal, productId], (err, result) => {
+            db.query(queryActualizar, [cantidad, precio, ivaFinal, subtotal, descuentoFinal, nombreFinal, productId], (err, result) => {
                 if (err) {
                     console.error('Error al actualizar el producto:', err);
                     return reject(err);
@@ -1004,9 +1131,10 @@ const actualizarProductoPedido = async (req, res) => {
                 precio, 
                 iva, 
                 subtotal, 
-                descuento_porcentaje: descuentoFinal 
+                descuento_porcentaje: descuentoFinal,
+                producto_nombre: nombreFinal
             },
-            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}`
+            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre}${nombreFinal !== datosAnteriores.producto_nombre ? ` → ${nombreFinal}` : ''} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}`
         });
 
         // ✅ 9. RESPUESTA CON INFORMACIÓN DETALLADA
@@ -1442,15 +1570,15 @@ const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente 
 
             // Manejar caso sin productos
             if (productos.length === 0) {
-                const totalesCero = { subtotal: 0, iva_total: 0, total: 0 };
+                const totalesCero = { subtotal: 0, iva_total: 0, exento: 0, total: 0 };
 
                 const queryActualizar = `
                     UPDATE pedidos
-                    SET subtotal = ?, iva_total = ?, total = ?
+                    SET subtotal = ?, iva_total = ?, exento = ?, total = ?
                     WHERE id = ?
                 `;
 
-                db.query(queryActualizar, [0, 0, 0, pedidoId], (err, result) => {
+                db.query(queryActualizar, [0, 0, 0, 0, pedidoId], (err, result) => {
                     if (err) {
                         console.error('Error al actualizar totales a cero:', err);
                         return reject(err);
@@ -1506,24 +1634,37 @@ const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente 
                         const subtotalTotal = parseFloat(results[0].subtotal_total) || 0;
                         const ivaTotal = parseFloat(results[0].iva_total) || 0;
                         const total = subtotalTotal + ivaTotal;
+                        
+                        // ✅ Calcular monto exento: si el cliente es exento, calcular el IVA que debería haberse cobrado
+                        let montoExento = 0;
+                        if (condicionIvaCliente && condicionIvaCliente.toUpperCase() === 'EXENTO') {
+                            // Calcular el IVA que debería haberse cobrado si no fuera exento
+                            montoExento = productos.reduce((acc, prod) => {
+                                const subtotal = parseFloat(prod.subtotal) || 0;
+                                const porcentajeIva = parseFloat(prod.porcentaje_iva) || 21;
+                                const ivaQueDeberiaCobrarse = parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
+                                return acc + ivaQueDeberiaCobrarse;
+                            }, 0);
+                        }
 
                         // 4. Actualizar totales del pedido
                         const queryActualizar = `
                             UPDATE pedidos
-                            SET subtotal = ?, iva_total = ?, total = ?
+                            SET subtotal = ?, iva_total = ?, exento = ?, total = ?
                             WHERE id = ?
                         `;
 
-                        db.query(queryActualizar, [subtotalTotal, ivaTotal, total, pedidoId], (errUpdate, result) => {
+                        db.query(queryActualizar, [subtotalTotal, ivaTotal, montoExento, total, pedidoId], (errUpdate, result) => {
                             if (errUpdate) {
                                 console.error('Error al actualizar totales del pedido:', errUpdate);
                                 return reject(errUpdate);
                             }
 
-                            console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Total=${total}`);
+                            console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Exento=${montoExento}, Total=${total}`);
                             resolve({
                                 subtotal: subtotalTotal,
                                 iva_total: ivaTotal,
+                                exento: montoExento,
                                 total: total
                             });
                         });

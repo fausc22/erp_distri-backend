@@ -529,6 +529,183 @@ async crearNotaCreditoGeneral(req, res) {
   }
 }
 
+/**
+ * POST /api/notas-debito/tipo-a
+ * Crear Nota de Débito A (Responsable Inscripto/Monotributo)
+ */
+async crearNotaDebitoA(req, res) {
+  console.log('📦 Body recibido:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { facturaAsociada, cuit, items, opciones } = req.body;
+    
+    // ✅ VALIDACIONES
+    if (!facturaAsociada) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos de la factura asociada'
+      });
+    }
+    
+    if (!facturaAsociada.tipo || !facturaAsociada.puntoVenta || !facturaAsociada.numero) {
+      return res.status(400).json({
+        success: false,
+        message: 'La factura asociada debe tener: tipo, puntoVenta y numero'
+      });
+    }
+    
+    if (!cuit) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar el CUIT del cliente'
+      });
+    }
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe incluir al menos un item'
+      });
+    }
+    
+    // ✅ CREAR NOTA DE DÉBITO
+    const resultado = await billingService.crearNotaDebitoA(
+      facturaAsociada,
+      cuit,
+      items,
+      opciones
+    );
+    
+    res.status(201).json({
+      success: true,
+      message: 'Nota de Débito A creada exitosamente',
+      data: resultado
+    });
+    
+  } catch (error) {
+    console.error('Error en crearNotaDebitoA:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error al crear Nota de Débito A',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * POST /api/notas-debito/tipo-b
+ * Crear Nota de Débito B (Consumidor Final/Exento)
+ */
+async crearNotaDebitoB(req, res) {
+  console.log('📦 Body recibido:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { facturaAsociada, items, opciones } = req.body;
+    
+    // ✅ VALIDACIONES
+    if (!facturaAsociada) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos de la factura asociada'
+      });
+    }
+    
+    if (!facturaAsociada.tipo || !facturaAsociada.puntoVenta || !facturaAsociada.numero) {
+      return res.status(400).json({
+        success: false,
+        message: 'La factura asociada debe tener: tipo, puntoVenta y numero'
+      });
+    }
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe incluir al menos un item'
+      });
+    }
+    
+    // ✅ CREAR NOTA DE DÉBITO
+    const resultado = await billingService.crearNotaDebitoB(
+      facturaAsociada,
+      items,
+      opciones
+    );
+    
+    res.status(201).json({
+      success: true,
+      message: 'Nota de Débito B creada exitosamente',
+      data: resultado
+    });
+    
+  } catch (error) {
+    console.error('Error en crearNotaDebitoB:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error al crear Nota de Débito B',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * POST /api/notas-debito
+ * Crear Nota de Débito (detecta automáticamente tipo A o B)
+ */
+async crearNotaDebitoGeneral(req, res) {
+  console.log('📦 Body recibido:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { facturaAsociada, datosCliente, items, opciones } = req.body;
+    
+    // ✅ VALIDACIONES
+    if (!facturaAsociada) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos de la factura asociada'
+      });
+    }
+    
+    if (!datosCliente) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe proporcionar los datos del cliente'
+      });
+    }
+    
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe incluir al menos un item'
+      });
+    }
+    
+    // ✅ CREAR NOTA DE DÉBITO
+    const resultado = await billingService.crearNotaDebito(
+      facturaAsociada,
+      datosCliente,
+      items,
+      opciones
+    );
+    
+    res.status(201).json({
+      success: true,
+      message: 'Nota de Débito creada exitosamente',
+      data: resultado
+    });
+    
+  } catch (error) {
+    console.error('Error en crearNotaDebitoGeneral:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error al crear Nota de Débito',
+      error: error.message
+    });
+  }
+}
+
 
 
 }

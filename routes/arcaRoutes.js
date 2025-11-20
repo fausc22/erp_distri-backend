@@ -251,4 +251,54 @@ router.post('/notas-credito',
   (req, res) => billingController.crearNotaCreditoGeneral(req, res)
 );
 
+/**
+ * CREAR NOTA DE DÉBITO A
+ * POST /arca/notas-debito/tipo-a
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, cuit?: string, fecha?: number },
+ *   cuit: string,
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { concepto?, condicionIVA?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-debito/tipo-a', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaDebitoA(req, res)
+);
+
+/**
+ * CREAR NOTA DE DÉBITO B
+ * POST /arca/notas-debito/tipo-b
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, fecha?: number },
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { dni?, concepto?, condicionIVA?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-debito/tipo-b', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaDebitoB(req, res)
+);
+
+/**
+ * CREAR NOTA DE DÉBITO (AUTO-DETECTA TIPO A O B)
+ * POST /arca/notas-debito
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, cuit?: string, fecha?: number },
+ *   datosCliente: { cuit?: string, dni?: string, condicionIVA: number },
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { concepto?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-debito', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaDebitoGeneral(req, res)
+);
+
 module.exports = router;

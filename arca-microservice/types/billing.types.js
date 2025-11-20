@@ -177,6 +177,14 @@ export function esNotaCredito(tipoComprobante) {
   ].includes(tipoComprobante);
 }
 
+export function esNotaDebito(tipoComprobante) {
+  return [
+    TIPOS_COMPROBANTE.NOTA_DEBITO_A,
+    TIPOS_COMPROBANTE.NOTA_DEBITO_B,
+    TIPOS_COMPROBANTE.NOTA_DEBITO_C
+  ].includes(tipoComprobante);
+}
+
 export default {
   TIPOS_COMPROBANTE,
   CONCEPTOS,
@@ -191,4 +199,5 @@ export default {
   esExento,
   determinarTipoDocumento,
   esNotaCredito,
+  esNotaDebito,
 };
