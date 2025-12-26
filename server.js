@@ -23,6 +23,7 @@ const comprobantesRoutes = require('./routes/comprobantesRoutes');
 const arcaRoutes = require('./routes/arcaRoutes');
 const ciudadesRoutes = require('./routes/ciudadesRoutes');
 const listadosRoutes = require('./routes/listadosRoutes');
+const notasRoutes = require('./routes/notasRoutes');
 
 // CORS configuration - Optimizado para VPS
 const allowedOrigins = [
@@ -157,6 +158,7 @@ app.use('/comprobantes', comprobantesRoutes);
 app.use('/arca', arcaRoutes);
 app.use('/ciudades', ciudadesRoutes);
 app.use('/listados', listadosRoutes);
+app.use('/notas', notasRoutes);
 
 
 

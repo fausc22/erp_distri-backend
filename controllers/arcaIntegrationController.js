@@ -84,19 +84,37 @@ const MAPEO_TIPOS_COMPROBANTE = {
 };
 
 /**
- * ✅ Determinar tipo de comprobante según condición IVA
+ * ✅ Determinar tipo de comprobante según condición IVA y tipo de documento
  */
-const determinarTipoComprobante = (condicionIVA, tipoFiscalOriginal) => {
+const determinarTipoComprobante = (condicionIVA, tipoFiscalOriginal, tipoDoc) => {
+  // ✅ Si es una nota, determinar el tipo según tipo_doc y tipo_f
+  if (tipoDoc === 'NOTA_DEBITO' || tipoDoc === 'NOTA_CREDITO') {
+    const esNotaDebito = tipoDoc === 'NOTA_DEBITO';
+    
+    if (tipoFiscalOriginal === 'A') {
+      return esNotaDebito ? 2 : 3; // NOTA_DEBITO_A: 2, NOTA_CREDITO_A: 3
+    } else if (tipoFiscalOriginal === 'B') {
+      return esNotaDebito ? 7 : 8; // NOTA_DEBITO_B: 7, NOTA_CREDITO_B: 8
+    } else {
+      // Tipo X no requiere CAE, pero por si acaso
+      return esNotaDebito ? 7 : 8; // Default a tipo B
+    }
+  }
+  
+  // ✅ Si es factura normal
   if (tipoFiscalOriginal && MAPEO_TIPOS_COMPROBANTE[tipoFiscalOriginal]) {
     return MAPEO_TIPOS_COMPROBANTE[tipoFiscalOriginal];
   }
   
+  // ✅ CORREGIDO: 
+  // - Tipo A: Solo Responsable Inscripto
+  // - Tipo B: Exento, Consumidor Final, Monotributo
   switch (condicionIVA) {
     case 'Responsable Inscripto':
-    case 'Monotributo':
       return 1; // Factura A
     case 'Consumidor Final':
     case 'Exento':
+    case 'Monotributo':
       return 6; // Factura B
     default:
       return 6;
@@ -158,7 +176,8 @@ const solicitarCAE = async (req, res) => {
     const ventaQuery = `
       SELECT 
         id, fecha, cliente_nombre, cliente_cuit, cliente_condicion,
-        tipo_f, subtotal, iva_total, total, cae_id, numero_factura
+        tipo_f, tipo_doc, subtotal, iva_total, total, cae_id, numero_factura,
+        venta_referencia_id
       FROM ventas 
       WHERE id = ?
     `;
@@ -224,73 +243,132 @@ const solicitarCAE = async (req, res) => {
       });
     }
     
-    // Extraer punto de venta y número del formato local
-    const matchNumero = venta.numero_factura.match(/([A-Z])\s+(\d{4})-(\d{8})/);
-    if (!matchNumero) {
-      console.error('❌ Formato de número de factura inválido:', venta.numero_factura);
-      return res.status(400).json({
-        success: false,
-        message: 'Formato de número de factura inválido'
-      });
+    // ✅ Extraer punto de venta y número del formato local
+    // Formato de factura: "A 0004-00000001"
+    // Formato de nota: "0004-00001"
+    let matchNumero;
+    let tipoFiscalLocal, puntoVentaLocal, numeroLocal;
+    
+    // Intentar formato de factura primero
+    matchNumero = venta.numero_factura.match(/([A-Z])\s+(\d{4})-(\d{8})/);
+    if (matchNumero) {
+      [, tipoFiscalLocal, puntoVentaLocal, numeroLocal] = matchNumero;
+    } else {
+      // Intentar formato de nota (sin tipo fiscal al inicio)
+      matchNumero = venta.numero_factura.match(/(\d{4})-(\d{5})/);
+      if (matchNumero) {
+        puntoVentaLocal = matchNumero[1];
+        numeroLocal = matchNumero[2];
+        tipoFiscalLocal = venta.tipo_f || 'B'; // Usar tipo_f de la venta
+      } else {
+        console.error('❌ Formato de número inválido:', venta.numero_factura);
+        return res.status(400).json({
+          success: false,
+          message: 'Formato de número inválido'
+        });
+      }
     }
     
-    const [, tipoFiscalLocal, puntoVentaLocal, numeroLocal] = matchNumero;
     puntoVentaARCA = puntoVentaLocal;
     numeroARCA = parseInt(numeroLocal);
     numeroCompletoARCA = venta.numero_factura;
     
-    // Intentar consultar ARCA para validar (pero no es crítico si falla)
-    try {
-      const connection = await new Promise((resolve, reject) => {
-        db.getConnection((err, conn) => {
-          if (err) reject(err);
-          else resolve(conn);
+    // ✅ Si es una NOTA, NO validar numeración con ARCA (las notas tienen numeración independiente)
+    // Solo validar numeración para FACTURAS
+    const esNota = venta.tipo_doc === 'NOTA_DEBITO' || venta.tipo_doc === 'NOTA_CREDITO';
+    
+    if (!esNota) {
+      // Intentar consultar ARCA para validar (solo para facturas)
+      try {
+        const connection = await new Promise((resolve, reject) => {
+          db.getConnection((err, conn) => {
+            if (err) reject(err);
+            else resolve(conn);
+          });
         });
-      });
+        
+        try {
+          const numeracion = await obtenerSiguienteNumeroFacturaDesdeARCA(
+            connection, 
+            venta.tipo_f
+          );
+          
+          const numeroARCAObtenido = numeracion.numeroFactura;
+          const numeroCompletoARCAObtenido = numeracion.numeroCompleto;
+          
+          console.log(`✅ Número desde ARCA: ${numeroCompletoARCAObtenido}`);
+          
+          // Si hay diferencia, actualizar (solo para facturas, no para notas)
+          if (venta.numero_factura !== numeroCompletoARCAObtenido) {
+            console.log(`⚠️  Desincronización detectada:`);
+            console.log(`   Local: ${venta.numero_factura}`);
+            console.log(`   ARCA: ${numeroCompletoARCAObtenido}`);
+            console.log(`   Actualizando venta con número de ARCA...`);
+            
+            const updateNumeroQuery = `
+              UPDATE ventas 
+              SET numero_factura = ?
+              WHERE id = ?
+            `;
+            await db.execute(updateNumeroQuery, [numeroCompletoARCAObtenido, ventaId]);
+            console.log(`✅ Número actualizado en BD: ${numeroCompletoARCAObtenido}`);
+            
+            // Actualizar variables para usar el número de ARCA
+            numeroARCA = numeracion.numeroFactura;
+            numeroCompletoARCA = numeroCompletoARCAObtenido;
+            puntoVentaARCA = numeracion.puntoVenta;
+          }
+          
+        } finally {
+          connection.release();
+        }
+      } catch (error) {
+        // ⚠️ Si falla la consulta a ARCA, usar el número local
+        // ARCA validará definitivamente al crear el comprobante
+        console.warn('⚠️  No se pudo consultar ARCA para validar numeración:', error.message);
+        console.warn('   Usando número local. ARCA validará al crear el comprobante.');
+        usarNumeroLocal = true;
+      }
+    } else {
+      // ✅ Para notas, consultar ARCA para obtener el siguiente número del tipo correcto
+      console.log(`📝 Es una ${venta.tipo_doc} - Consultando numeración en ARCA para este tipo de comprobante...`);
       
       try {
-        const numeracion = await obtenerSiguienteNumeroFacturaDesdeARCA(
-          connection, 
-          venta.tipo_f
+        // Importar servicio ARCA para consultar último comprobante del tipo de nota
+        const afipServiceModule = await import('../arca-microservice/services/afip.service.js');
+        const afipService = afipServiceModule.default;
+        
+        // Determinar tipo de comprobante ARCA para la nota
+        const tipoComprobanteNota = determinarTipoComprobante(venta.cliente_condicion, venta.tipo_f, venta.tipo_doc);
+        
+        console.log(`🔢 Consultando último comprobante en ARCA para tipo ${tipoComprobanteNota} (${venta.tipo_doc})...`);
+        
+        const ultimoNumeroARCA = await afipService.obtenerUltimoComprobante(
+          parseInt(puntoVentaLocal),
+          tipoComprobanteNota
         );
         
-        const numeroARCAObtenido = numeracion.numeroFactura;
-        const numeroCompletoARCAObtenido = numeracion.numeroCompleto;
+        const siguienteNumeroARCA = ultimoNumeroARCA + 1;
         
-        console.log(`✅ Número desde ARCA: ${numeroCompletoARCAObtenido}`);
+        console.log(`✅ ARCA - Último autorizado para ${venta.tipo_doc}: ${ultimoNumeroARCA}`);
+        console.log(`✅ ARCA - Siguiente número a usar: ${siguienteNumeroARCA}`);
         
-        // Si hay diferencia, actualizar
-        if (venta.numero_factura !== numeroCompletoARCAObtenido) {
-          console.log(`⚠️  Desincronización detectada:`);
-          console.log(`   Local: ${venta.numero_factura}`);
-          console.log(`   ARCA: ${numeroCompletoARCAObtenido}`);
-          console.log(`   Actualizando venta con número de ARCA...`);
-          
-          const updateNumeroQuery = `
-            UPDATE ventas 
-            SET numero_factura = ?
-            WHERE id = ?
-          `;
-          await db.execute(updateNumeroQuery, [numeroCompletoARCAObtenido, ventaId]);
-          console.log(`✅ Número actualizado en BD: ${numeroCompletoARCAObtenido}`);
-          
-          // Actualizar variables para usar el número de ARCA
-          numeroARCA = numeracion.numeroFactura;
-          numeroCompletoARCA = numeroCompletoARCAObtenido;
-          puntoVentaARCA = numeracion.puntoVenta;
-        }
+        // Usar el número de ARCA (no el local)
+        numeroARCA = siguienteNumeroARCA;
+        numeroCompletoARCA = `${puntoVentaLocal}-${String(siguienteNumeroARCA).padStart(5, '0')}`;
+        puntoVentaARCA = puntoVentaLocal;
         
-      } finally {
-        connection.release();
+        console.log(`✅ Usando número de ARCA: ${numeroCompletoARCA}`);
+        
+      } catch (error) {
+        console.error('❌ Error consultando ARCA para nota:', error);
+        // Si falla, usar el número local extraído
+        console.warn('⚠️  Usando número local extraído. ARCA validará al crear el comprobante.');
+        numeroARCA = parseInt(numeroLocal);
+        numeroCompletoARCA = venta.numero_factura;
+        puntoVentaARCA = puntoVentaLocal;
+        usarNumeroLocal = true;
       }
-    } catch (error) {
-      // ⚠️ Si falla la consulta a ARCA, usar el número local
-      // ARCA validará definitivamente al crear el comprobante
-      console.warn('⚠️  No se pudo consultar ARCA para validar numeración:', error.message);
-      console.warn('   Usando número local. ARCA validará al crear el comprobante.');
-      usarNumeroLocal = true;
-      
-      // El número ya está extraído del formato local, continuar con ese
     }
     
     // Usar el número (de ARCA si se obtuvo, o local si falló la consulta)
@@ -340,8 +418,8 @@ const solicitarCAE = async (req, res) => {
     
     console.log(`  - Condición IVA: ${venta.cliente_condicion} → ${condicionIVA} ${clienteEsExento ? '(EXENTO)' : ''}`);
     
-    const tipoComprobante = determinarTipoComprobante(venta.cliente_condicion, venta.tipo_f);
-    console.log(`  - Tipo Comprobante: ${venta.tipo_f} → ${tipoComprobante}`);
+    const tipoComprobante = determinarTipoComprobante(venta.cliente_condicion, venta.tipo_f, venta.tipo_doc);
+    console.log(`  - Tipo Comprobante: ${venta.tipo_doc || 'FACTURA'} ${venta.tipo_f} → ${tipoComprobante}`);
     
     const tipoDocumento = determinarTipoDocumento(venta.cliente_cuit);
     const numeroDocumento = tipoDocumento === 99 ? 0 : (venta.cliente_cuit || '0').replace(/[.-]/g, '');
@@ -369,6 +447,57 @@ const solicitarCAE = async (req, res) => {
     console.log(`✅ Items preparados: ${items.length} productos`);
     console.log(`  - Alícuota IVA aplicada: ${clienteEsExento ? '0% (EXENTO)' : '21%'}`);
     
+    // ✅ Si es una NOTA, obtener la factura original asociada
+    let comprobantesAsociados = [];
+    if (esNota && venta.venta_referencia_id) {
+      console.log(`\n📋 Obteniendo factura original asociada (ID: ${venta.venta_referencia_id})...`);
+      
+      const facturaOriginalQuery = `
+        SELECT 
+          numero_factura, tipo_f, cae_id, fecha
+        FROM ventas
+        WHERE id = ?
+      `;
+      
+      const [facturaOriginalRows] = await db.execute(facturaOriginalQuery, [venta.venta_referencia_id]);
+      
+      if (facturaOriginalRows.length > 0) {
+        const facturaOriginal = facturaOriginalRows[0];
+        
+        // Extraer punto de venta y número de la factura original
+        let pvOriginal, numeroOriginal, tipoFiscalOriginal;
+        
+        // Intentar formato de factura: "A 0004-00000001"
+        const matchFactura = facturaOriginal.numero_factura.match(/([A-Z])\s+(\d{4})-(\d{8})/);
+        if (matchFactura) {
+          [, tipoFiscalOriginal, pvOriginal, numeroOriginal] = matchFactura;
+        } else {
+          // Si no coincide, usar valores por defecto
+          pvOriginal = '0004';
+          numeroOriginal = facturaOriginal.numero_factura;
+          tipoFiscalOriginal = facturaOriginal.tipo_f || 'B';
+        }
+        
+        // Determinar tipo de comprobante ARCA de la factura original
+        const tipoComprobanteOriginal = determinarTipoComprobante(
+          venta.cliente_condicion, 
+          tipoFiscalOriginal, 
+          'FACTURA'
+        );
+        
+        comprobantesAsociados = [{
+          tipo: tipoComprobanteOriginal,
+          puntoVenta: parseInt(pvOriginal),
+          numero: parseInt(numeroOriginal)
+        }];
+        
+        console.log(`✅ Factura original encontrada: ${facturaOriginal.numero_factura}`);
+        console.log(`   Tipo ARCA: ${tipoComprobanteOriginal}, PV: ${pvOriginal}, Nro: ${numeroOriginal}`);
+      } else {
+        console.warn(`⚠️ No se encontró la factura original (ID: ${venta.venta_referencia_id})`);
+      }
+    }
+    
     const datosFactura = {
       tipoComprobante: tipoComprobante,
       concepto: 1,
@@ -382,10 +511,17 @@ const solicitarCAE = async (req, res) => {
       moneda: 'PES',
       cotizacionMoneda: 1,
       // ✅ Usar el número obtenido desde ARCA (no el de la BD)
-      puntoVenta: parseInt(puntoVentaARCA) || 1
+      puntoVenta: parseInt(puntoVentaARCA) || 1,
+      // ✅ Agregar comprobantes asociados si es una nota
+      comprobantesAsociados: comprobantesAsociados,
+      // ✅ Para notas, pasar el número de comprobante que ya tenemos (no que lo obtenga ARCA)
+      numeroComprobante: esNota ? numeroARCA : undefined
     };
     
     console.log('✅ Datos preparados para ARCA');
+    if (esNota && comprobantesAsociados.length > 0) {
+      console.log(`   Comprobantes asociados: ${comprobantesAsociados.length}`);
+    }
     
     // ============================================
     // 4️⃣ LLAMAR AL MICROSERVICIO ARCA
@@ -491,9 +627,19 @@ const solicitarCAE = async (req, res) => {
                             datosRespuesta?.voucher_number ||
                             numeroARCA; // Usar el número que obtuvimos de ARCA
       
-      const numeroCompletoAprobado = datosRespuesta?.comprobante?.numero 
-        ? `${venta.tipo_f} ${puntoVentaARCA}-${String(datosRespuesta.comprobante.numero).padStart(8, '0')}`
-        : numeroCompletoARCA;
+      // ✅ Formatear número según tipo de documento
+      let numeroCompletoAprobado;
+      if (esNota) {
+        // Para notas: "0004-00001" (sin tipo fiscal al inicio, 5 dígitos)
+        numeroCompletoAprobado = datosRespuesta?.comprobante?.numero 
+          ? `${puntoVentaARCA}-${String(datosRespuesta.comprobante.numero).padStart(5, '0')}`
+          : numeroCompletoARCA;
+      } else {
+        // Para facturas: "A 0004-00000001" (con tipo fiscal al inicio, 8 dígitos)
+        numeroCompletoAprobado = datosRespuesta?.comprobante?.numero 
+          ? `${venta.tipo_f} ${puntoVentaARCA}-${String(datosRespuesta.comprobante.numero).padStart(8, '0')}`
+          : numeroCompletoARCA;
+      }
       
       console.log(`🔄 Actualizando número en BD: ${numeroCompletoAprobado}`);
       
@@ -506,8 +652,8 @@ const solicitarCAE = async (req, res) => {
       await db.execute(updateNumeroQuery, [numeroCompletoAprobado, ventaId]);
       console.log(`✅ Número actualizado en venta: ${numeroCompletoAprobado}`);
       
-      // Sincronizar tabla de control
-      if (numeroAprobado && venta.tipo_f) {
+      // Sincronizar tabla de control (solo para facturas, no para notas)
+      if (numeroAprobado && venta.tipo_f && !esNota) {
         console.log(`🔄 Sincronizando tabla local con número aprobado: ${numeroAprobado}`);
         
         const connection = await new Promise((resolve, reject) => {
@@ -522,6 +668,8 @@ const solicitarCAE = async (req, res) => {
         } finally {
           connection.release();
         }
+      } else if (esNota) {
+        console.log(`📝 Es una ${venta.tipo_doc} - No se sincroniza tabla de control (numeración independiente)`);
       }
     } catch (syncError) {
       console.warn('⚠️  Error sincronizando número (no crítico):', syncError.message);

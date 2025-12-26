@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NOTA DE DÉBITO - DISTRIBUIDORA VERTI-MAR</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            background-color: #ffffff;
+        }
+        
+        @page {
+            size: A4;
+            margin: 10mm;
+        }
+        
+        .nota-container {
+            width: 100%;
+            max-width: 750px;
+            margin: 0 auto;
+        }
+        
+        .empresa-info {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 2px solid #000;
+            background-color: #fafafa;
+            page-break-inside: avoid;
+        }
+        
+        .empresa-info h1 {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .empresa-info p {
+            margin: 3px 0;
+            font-size: 11px;
+        }
+        
+        .tipo-comprobante {
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #e8f4f8;
+            border: 2px solid #0066cc;
+            font-size: 18px;
+            font-weight: bold;
+            color: #0066cc;
+        }
+        
+        .cliente-section {
+            margin-bottom: 15px;
+            padding: 12px;
+            border: 1px solid #666;
+            background-color: #f9f9f9;
+            page-break-inside: avoid;
+        }
+        
+        .cliente-section h3 {
+            font-size: 14px;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        
+        .info-row {
+            display: table;
+            width: 100%;
+            margin-bottom: 5px;
+        }
+        
+        .info-item {
+            display: table-cell;
+            padding: 3px 0;
+        }
+        
+        .info-item strong {
+            font-weight: bold;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 15px;
+        }
+        
+        table thead {
+            background-color: #444;
+            color: white;
+        }
+        
+        table thead th {
+            padding: 10px 8px;
+            text-align: left;
+            font-size: 11px;
+            border: 1px solid #333;
+        }
+        
+        table tbody td {
+            padding: 8px;
+            border: 1px solid #999;
+            font-size: 11px;
+        }
+        
+        table tbody tr {
+            page-break-inside: avoid;
+        }
+        
+        table tbody tr:nth-child(even) {
+            background-color: #f5f5f5;
+        }
+        
+        .text-center {
+            text-align: center;
+        }
+        
+        .text-right {
+            text-align: right;
+        }
+        
+        .total-section {
+            margin-top: 20px;
+            padding: 15px;
+            border: 2px solid #000;
+            background-color: #f0f0f0;
+            text-align: right;
+            page-break-inside: avoid;
+        }
+        
+        .total-section h2 {
+            font-size: 18px;
+            color: #333;
+        }
+        
+        .footer-info {
+            margin-top: 20px;
+            padding: 10px;
+            border-top: 1px solid #999;
+            text-align: center;
+            font-size: 10px;
+            color: #666;
+            page-break-inside: avoid;
+        }
+        
+        .observaciones-section {
+            margin-top: 15px;
+            padding: 12px;
+            border: 1px solid #999;
+            background-color: #fffef7;
+            page-break-inside: avoid;
+        }
+        
+        .observaciones-section h4 {
+            font-size: 12px;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .observaciones-section p {
+            font-size: 11px;
+            line-height: 1.5;
+            color: #444;
+            margin: 0;
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+    <div class="nota-container">
+        <div class="empresa-info">
+            <h1>X</h1>
+            
+        </div>
+
+        <div class="tipo-comprobante">
+            NOTA DE DÉBITO
+        </div>
+
+        <div class="cliente-section">
+            <h3>DATOS DEL CLIENTE</h3>
+            <div class="info-row">
+                <div class="info-item">
+                    <strong>Cliente:</strong> {{cliente_nombre}}
+                </div>
+            </div>
+            <div class="info-row">
+                <div class="info-item">
+                    <strong>Dirección:</strong> {{cliente_direccion}}
+                </div>
+            </div>
+            <div class="info-row">
+                <div class="info-item">
+                    <strong>Fecha:</strong> {{fecha}}
+                </div>
+            </div>
+            
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 10%;">ID</th>
+                    <th style="width: 35%;">Producto</th>
+                    <th style="width: 10%;">U.M.</th>
+                    <th style="width: 10%;" class="text-center">Cantidad</th>
+                    <th style="width: 15%;" class="text-right">Precio Unit.</th>
+                    <th style="width: 20%;" class="text-right">Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{items}}
+            </tbody>
+        </table>
+
+        <div class="total-section">
+            <h2>TOTAL: $ {{total}}</h2>
+        </div>
+
+        {{observaciones_html}}
+        
+    </div>
+</body>
+</html>
+

@@ -29,15 +29,17 @@ const generarPdfLibroIva = async (req, res) => {
         const ultimoDia = new Date(anio, mes, 0).getDate(); // Obtiene último día del mes
         const ultimaFecha = `${anio}-${String(mes).padStart(2, '0')}-${ultimoDia}`;
 
-        // Consulta SQL para obtener ventas tipo A y B del mes
+        // Consulta SQL para obtener ventas tipo A y B del mes con condición IVA del cliente
         const query = `
             SELECT
                 v.id,
                 v.fecha,
                 v.numero_factura,
                 v.tipo_f,
+                v.tipo_doc,
                 v.cliente_nombre,
                 v.cliente_cuit,
+                v.cliente_condicion,
                 v.subtotal,
                 v.iva_total,
                 v.exento,
@@ -59,21 +61,45 @@ const generarPdfLibroIva = async (req, res) => {
         }
 
         // Formatear datos para el PDF
-        const ventasFormateadas = ventas.map(venta => ({
-            fecha: venta.fecha,
-            comprobante: venta.tipo_f === 'A' ? 'FACTURA A' : 'FACTURA B',
-            numero: venta.numero_factura || '-',
-            cliente: venta.cliente_nombre || 'Sin nombre',
-            cuit: venta.cliente_cuit || '-',
-            neto: parseFloat(venta.subtotal) || 0,
-            exento: parseFloat(venta.exento) || 0, // ✅ Usar monto exento guardado
-            iva: parseFloat(venta.iva_total) || 0,
-            percepciones: 0, // Siempre 0 según especificación
-            retenciones: 0, // Siempre 0 según especificación
-            total: parseFloat(venta.total) || 0
-        }));
+        const ventasFormateadas = ventas.map(venta => {
+            // Determinar el nombre del comprobante basado en tipo_doc y tipo_f
+            let nombreComprobante = '';
+            const tipoDoc = (venta.tipo_doc || '').toString().trim().toUpperCase();
+            const tipoF = (venta.tipo_f || '').toString().trim().toUpperCase();
+            
+            if (tipoDoc === 'NOTA_DEBITO' || tipoDoc === 'NOTA DEBITO') {
+                nombreComprobante = `NOTA DE DÉBITO ${tipoF}`;
+            } else if (tipoDoc === 'NOTA_CREDITO' || tipoDoc === 'NOTA CREDITO') {
+                nombreComprobante = `NOTA DE CRÉDITO ${tipoF}`;
+            } else if (tipoDoc === 'FACTURA' || !tipoDoc) {
+                // Por defecto es factura si no hay tipo_doc o es FACTURA
+                nombreComprobante = `FACTURA ${tipoF}`;
+            } else {
+                // Si hay otro tipo, usar el tipo_doc con el tipo fiscal
+                nombreComprobante = `${tipoDoc.replace(/_/g, ' ')} ${tipoF}`;
+            }
+            
+            // ✅ Determinar el signo según el tipo de documento
+            const esNotaCredito = tipoDoc === 'NOTA_CREDITO' || tipoDoc === 'NOTA CREDITO';
+            const multiplicador = esNotaCredito ? -1 : 1;
+            
+            return {
+                fecha: venta.fecha,
+                comprobante: nombreComprobante,
+                numero: venta.numero_factura || '-',
+                cliente: venta.cliente_nombre || 'Sin nombre',
+                cuit: venta.cliente_cuit || '-',
+                condicionIva: (venta.cliente_condicion || 'Sin especificar').toString().trim(),
+                neto: (parseFloat(venta.subtotal) || 0) * multiplicador,
+                exento: (parseFloat(venta.exento) || 0) * multiplicador,
+                iva: (parseFloat(venta.iva_total) || 0) * multiplicador,
+                percepciones: 0,
+                retenciones: 0,
+                total: (parseFloat(venta.total) || 0) * multiplicador
+            };
+        });
 
-        // Calcular totales
+        // Calcular totales generales
         const totales = ventasFormateadas.reduce((acc, venta) => ({
             neto: acc.neto + venta.neto,
             exento: acc.exento + venta.exento,
@@ -83,12 +109,61 @@ const generarPdfLibroIva = async (req, res) => {
             total: acc.total + venta.total
         }), { neto: 0, exento: 0, iva: 0, percepciones: 0, retenciones: 0, total: 0 });
 
+        // ✅ CALCULAR DESGLOSE POR CONDICIÓN DE IVA
+        const condicionesIva = ['Responsable Inscripto', 'Monotributo', 'Consumidor Final', 'Exento'];
+        const desglosePorCondicion = condicionesIva.map(condicion => {
+            const ventasCondicion = ventasFormateadas.filter(v => 
+                v.condicionIva.toLowerCase().includes(condicion.toLowerCase())
+            );
+            
+            const totalesCondicion = ventasCondicion.reduce((acc, venta) => ({
+                neto: acc.neto + venta.neto,
+                exento: acc.exento + venta.exento,
+                iva: acc.iva + venta.iva,
+                percepciones: acc.percepciones + venta.percepciones,
+                retenciones: acc.retenciones + venta.retenciones,
+                total: acc.total + venta.total
+            }), { neto: 0, exento: 0, iva: 0, percepciones: 0, retenciones: 0, total: 0 });
+            
+            return {
+                condicion,
+                cantidadVentas: ventasCondicion.length,
+                ...totalesCondicion
+            };
+        });
+
+        // ✅ Agregar fila de "Otros" para condiciones no especificadas
+        const ventasOtras = ventasFormateadas.filter(v => {
+            const condicionLower = v.condicionIva.toLowerCase();
+            return !condicionesIva.some(c => condicionLower.includes(c.toLowerCase()));
+        });
+        
+        if (ventasOtras.length > 0) {
+            const totalesOtras = ventasOtras.reduce((acc, venta) => ({
+                neto: acc.neto + venta.neto,
+                exento: acc.exento + venta.exento,
+                iva: acc.iva + venta.iva,
+                percepciones: acc.percepciones + venta.percepciones,
+                retenciones: acc.retenciones + venta.retenciones,
+                total: acc.total + venta.total
+            }), { neto: 0, exento: 0, iva: 0, percepciones: 0, retenciones: 0, total: 0 });
+            
+            desglosePorCondicion.push({
+                condicion: 'Otros',
+                cantidadVentas: ventasOtras.length,
+                ...totalesOtras
+            });
+        }
+
+        console.log(`📊 Desglose por condición IVA:`, desglosePorCondicion);
+
         // Generar PDF usando el generador con la plantilla
         const pdfBuffer = await pdfGenerator.generarLibroIva({
             mes,
             anio,
             ventas: ventasFormateadas,
-            totales
+            totales,
+            desglosePorCondicion
         });
 
         const generationTime = Date.now() - startTime;

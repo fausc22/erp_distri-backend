@@ -90,15 +90,18 @@ export const MONEDAS = {
 
 /**
  * Determinar tipo de comprobante según condición IVA del receptor
+ * ✅ CORREGIDO: 
+ * - Tipo A: Solo Responsable Inscripto
+ * - Tipo B: Exento, Consumidor Final, Monotributo
  */
 export const determinarTipoComprobante = (condicionIVAReceptor) => {
   switch (condicionIVAReceptor) {
     case CONDICIONES_IVA.RESPONSABLE_INSCRIPTO:
-    case CONDICIONES_IVA.MONOTRIBUTO:
       return TIPOS_COMPROBANTE.FACTURA_A;
     
     case CONDICIONES_IVA.CONSUMIDOR_FINAL:
     case CONDICIONES_IVA.EXENTO:
+    case CONDICIONES_IVA.MONOTRIBUTO:
       return TIPOS_COMPROBANTE.FACTURA_B;
     
     default:

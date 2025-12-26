@@ -51,14 +51,24 @@ class BillingService {
       
       // PASO 3: Obtener siguiente número de comprobante
       console.log('\n🔢 PASO 3: Obteniendo número de comprobante...');
-      const ultimoNumero = await afipService.obtenerUltimoComprobante(
-        puntoVenta,
-        datosFactura.tipoComprobante
-      );
       
-      const numeroComprobante = ultimoNumero + 1;
-      console.log(`✓ Número de comprobante: ${numeroComprobante}`);
-      console.log(`  Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
+      // ✅ Si se proporciona numeroComprobante (para notas), usarlo directamente
+      // Si no, obtener el siguiente desde ARCA (para facturas)
+      let numeroComprobante;
+      if (datosFactura.numeroComprobante !== undefined && datosFactura.numeroComprobante !== null) {
+        numeroComprobante = parseInt(datosFactura.numeroComprobante);
+        console.log(`✓ Número de comprobante proporcionado: ${numeroComprobante}`);
+        console.log(`  Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
+      } else {
+        const ultimoNumero = await afipService.obtenerUltimoComprobante(
+          puntoVenta,
+          datosFactura.tipoComprobante
+        );
+        
+        numeroComprobante = ultimoNumero + 1;
+        console.log(`✓ Número de comprobante: ${numeroComprobante}`);
+        console.log(`  Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
+      }
       
       // PASO 4: Transformar datos al formato ARCA
       console.log('\n🔄 PASO 4: Transformando datos al formato ARCA...');

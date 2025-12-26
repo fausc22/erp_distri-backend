@@ -9,6 +9,78 @@ const multer = require('multer');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 
+// ✅ FUNCIÓN PARA GENERAR HASH ÚNICO DEL PEDIDO (IDEMPOTENCIA)
+const generarHashPedido = (pedidoData) => {
+    try {
+        // Normalizar datos para hash consistente
+        const datosNormalizados = {
+            cliente_id: pedidoData.cliente_id,
+            subtotal: parseFloat(pedidoData.subtotal || 0).toFixed(2),
+            iva_total: parseFloat(pedidoData.iva_total || 0).toFixed(2),
+            total: parseFloat(pedidoData.total || 0).toFixed(2),
+            empleado_id: pedidoData.empleado_id || 1,
+            // Productos ordenados por ID para consistencia
+            productos: (pedidoData.productos || []).map(p => ({
+                id: p.id,
+                cantidad: parseFloat(p.cantidad || 0),
+                precio: parseFloat(p.precio || 0).toFixed(2),
+                subtotal: parseFloat(p.subtotal || 0).toFixed(2)
+            })).sort((a, b) => a.id - b.id)
+        };
+
+        const stringPedido = JSON.stringify(datosNormalizados);
+        
+        // Generar hash simple pero efectivo
+        let hash = 0;
+        for (let i = 0; i < stringPedido.length; i++) {
+            const char = stringPedido.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash;
+        }
+        
+        const fechaHoy = new Date().toISOString().split('T')[0].replace(/-/g, '');
+        const hashFinal = `ped_${Math.abs(hash).toString(36)}_${fechaHoy}`;
+        
+        return hashFinal;
+    } catch (error) {
+        console.error('❌ Error generando hash del pedido:', error);
+        return null;
+    }
+};
+
+// ✅ FUNCIÓN PARA VERIFICAR DUPLICADOS POR HASH
+const verificarPedidoDuplicado = async (hashPedido) => {
+    return new Promise((resolve, reject) => {
+        if (!hashPedido) {
+            return resolve(null);
+        }
+
+        // Buscar pedido con el mismo hash en los últimos 7 días
+        const query = `
+            SELECT id, fecha, cliente_nombre, total, estado
+            FROM pedidos
+            WHERE hash_pedido = ?
+            AND fecha >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+            ORDER BY fecha DESC
+            LIMIT 1
+        `;
+
+        db.query(query, [hashPedido], (err, results) => {
+            if (err) {
+                console.error('❌ Error verificando duplicado:', err);
+                return resolve(null); // En caso de error, continuar (no bloquear)
+            }
+
+            if (results.length > 0) {
+                console.log(`⚠️ Pedido duplicado detectado: hash ${hashPedido}, pedido ID ${results[0].id}`);
+                return resolve(results[0]);
+            }
+
+            return resolve(null);
+        });
+    });
+};
+
 
 
 const formatearFecha = (fechaBD) => {
@@ -172,20 +244,22 @@ const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido') 
 };
 
 // Función para registrar un pedido en la tabla principal
-const registrarPedido = (pedidoData, callback) => {
+const registrarPedido = (pedidoData, callback, hashPedido = null) => {
     const { 
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, observaciones 
+        subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, observaciones
     } = pedidoData;
 
+    // ✅ AGREGAR CAMPO hash_pedido SI EXISTE EN LA TABLA (sino, se ignora)
+    // Nota: Si la columna no existe, MySQL la ignorará silenciosamente
     const registrarPedidoQuery = `
         INSERT INTO pedidos 
         (cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
          cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, exento, total, 
-         estado, observaciones, empleado_id, empleado_nombre)
+         estado, observaciones, empleado_id, empleado_nombre, hash_pedido)
         VALUES 
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     // ✅ Asegurar que exento sea un número válido
@@ -203,7 +277,8 @@ const registrarPedido = (pedidoData, callback) => {
     const pedidoValues = [
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, exentoFinal, total, estado, observaciones, empleado_id, empleado_nombre
+        subtotal, iva_total, exentoFinal, total, estado, observaciones, empleado_id, empleado_nombre,
+        hashPedido || null // ✅ AGREGAR HASH AL INSERT (puede ser null si no existe)
     ];
     
     console.log(`💾 [registrarPedido] Valores a insertar:`);
@@ -268,21 +343,59 @@ const insertarProductosPedido = async (pedidoId, productos) => {
     }
 };
 
-// Endpoint para registrar nuevo pedido
+// Endpoint para registrar nuevo pedido CON IDEMPOTENCIA
 const nuevoPedido = async (req, res) => {
     const { 
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
         subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, 
-        observaciones, productos 
+        observaciones, productos, hash_pedido 
     } = req.body;
 
     console.log('📋 Datos recibidos para nuevo pedido:', req.body);
     console.log('🔍 Exento recibido del frontend:', exento);
     console.log('🔍 Cliente condición:', cliente_condicion);
+    console.log('🔍 Hash del pedido recibido:', hash_pedido);
 
     if (!productos || productos.length === 0) {
         return res.status(400).json({ success: false, message: 'Debe incluir al menos un producto' });
+    }
+
+    // ✅ GENERAR O USAR HASH DEL PEDIDO PARA IDEMPOTENCIA
+    let hashPedidoFinal = hash_pedido;
+    if (!hashPedidoFinal) {
+        // Si no viene del frontend, generarlo en el backend
+        hashPedidoFinal = generarHashPedido({
+            cliente_id,
+            subtotal,
+            iva_total,
+            total,
+            empleado_id,
+            productos
+        });
+        console.log(`🔐 Hash generado en backend: ${hashPedidoFinal}`);
+    }
+
+    // ✅ VERIFICAR DUPLICADOS ANTES DE INSERTAR
+    const pedidoDuplicado = await verificarPedidoDuplicado(hashPedidoFinal);
+    if (pedidoDuplicado) {
+        console.log(`⚠️ Pedido duplicado detectado, retornando pedido existente ID: ${pedidoDuplicado.id}`);
+        
+        // Auditar detección de duplicado
+        await auditarOperacion(req, {
+            accion: 'DUPLICATE_DETECTED',
+            tabla: 'pedidos',
+            registroId: pedidoDuplicado.id,
+            detallesAdicionales: `Intento de duplicar pedido detectado - Hash: ${hashPedidoFinal} - Pedido existente: ID ${pedidoDuplicado.id} - Cliente: ${pedidoDuplicado.cliente_nombre}`
+        });
+
+        return res.json({ 
+            success: true, 
+            message: 'Este pedido ya fue registrado anteriormente',
+            pedidoId: pedidoDuplicado.id,
+            existing: true, // ✅ INDICADOR DE DUPLICADO
+            data: pedidoDuplicado
+        });
     }
 
     // ✅ Calcular monto exento si no viene del frontend o si el cliente es exento
@@ -415,7 +528,7 @@ const nuevoPedido = async (req, res) => {
         });
 
         res.json({ success: true, message: 'Pedido y productos insertados correctamente', pedidoId });
-    });
+    }, hashPedidoFinal); // ✅ PASAR HASH COMO TERCER PARÁMETRO
 };
 
 // Obtener todos los pedidos (con filtro opcional por empleado)
