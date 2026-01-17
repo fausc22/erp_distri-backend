@@ -11,5 +11,8 @@ pnpm-debug.log*
 
 certs/
 
-package-lock.json
+package-lock.json 
 yarn.lock
+
+erp_distri-structure.sql
+arca-microservice/certs/

@@ -9,6 +9,78 @@ const multer = require('multer');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 
+// ✅ FUNCIÓN PARA GENERAR HASH ÚNICO DEL PEDIDO (IDEMPOTENCIA)
+const generarHashPedido = (pedidoData) => {
+    try {
+        // Normalizar datos para hash consistente
+        const datosNormalizados = {
+            cliente_id: pedidoData.cliente_id,
+            subtotal: parseFloat(pedidoData.subtotal || 0).toFixed(2),
+            iva_total: parseFloat(pedidoData.iva_total || 0).toFixed(2),
+            total: parseFloat(pedidoData.total || 0).toFixed(2),
+            empleado_id: pedidoData.empleado_id || 1,
+            // Productos ordenados por ID para consistencia
+            productos: (pedidoData.productos || []).map(p => ({
+                id: p.id,
+                cantidad: parseFloat(p.cantidad || 0),
+                precio: parseFloat(p.precio || 0).toFixed(2),
+                subtotal: parseFloat(p.subtotal || 0).toFixed(2)
+            })).sort((a, b) => a.id - b.id)
+        };
+
+        const stringPedido = JSON.stringify(datosNormalizados);
+        
+        // Generar hash simple pero efectivo
+        let hash = 0;
+        for (let i = 0; i < stringPedido.length; i++) {
+            const char = stringPedido.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash;
+        }
+        
+        const fechaHoy = new Date().toISOString().split('T')[0].replace(/-/g, '');
+        const hashFinal = `ped_${Math.abs(hash).toString(36)}_${fechaHoy}`;
+        
+        return hashFinal;
+    } catch (error) {
+        console.error('❌ Error generando hash del pedido:', error);
+        return null;
+    }
+};
+
+// ✅ FUNCIÓN PARA VERIFICAR DUPLICADOS POR HASH
+const verificarPedidoDuplicado = async (hashPedido) => {
+    return new Promise((resolve, reject) => {
+        if (!hashPedido) {
+            return resolve(null);
+        }
+
+        // Buscar pedido con el mismo hash en los últimos 7 días
+        const query = `
+            SELECT id, fecha, cliente_nombre, total, estado
+            FROM pedidos
+            WHERE hash_pedido = ?
+            AND fecha >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+            ORDER BY fecha DESC
+            LIMIT 1
+        `;
+
+        db.query(query, [hashPedido], (err, results) => {
+            if (err) {
+                console.error('❌ Error verificando duplicado:', err);
+                return resolve(null); // En caso de error, continuar (no bloquear)
+            }
+
+            if (results.length > 0) {
+                console.log(`⚠️ Pedido duplicado detectado: hash ${hashPedido}, pedido ID ${results[0].id}`);
+                return resolve(results[0]);
+            }
+
+            return resolve(null);
+        });
+    });
+};
+
 
 
 const formatearFecha = (fechaBD) => {
@@ -172,33 +244,69 @@ const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido') 
 };
 
 // Función para registrar un pedido en la tabla principal
-const registrarPedido = (pedidoData, callback) => {
+const registrarPedido = (pedidoData, callback, hashPedido = null) => {
     const { 
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado, empleado_id, empleado_nombre, observaciones 
+        subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, observaciones
     } = pedidoData;
 
+    // ✅ AGREGAR CAMPO hash_pedido SI EXISTE EN LA TABLA (sino, se ignora)
+    // Nota: Si la columna no existe, MySQL la ignorará silenciosamente
     const registrarPedidoQuery = `
         INSERT INTO pedidos 
         (cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
-         cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, total, 
-         estado, observaciones, empleado_id, empleado_nombre)
+         cliente_provincia, cliente_condicion, cliente_cuit, subtotal, iva_total, exento, total, 
+         estado, observaciones, empleado_id, empleado_nombre, hash_pedido)
         VALUES 
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
+    // ✅ Asegurar que exento sea un número válido
+    let exentoFinal = 0;
+    if (exento !== null && exento !== undefined && exento !== '') {
+        const exentoNum = parseFloat(exento);
+        exentoFinal = isNaN(exentoNum) ? 0 : exentoNum;
+    }
+    
+    // ✅ Asegurar que exentoFinal sea un número, no string
+    exentoFinal = Number(exentoFinal);
+    
+    console.log(`💾 [registrarPedido] Recibido exento: ${exento}, Tipo: ${typeof exento}, Final: ${exentoFinal} (${typeof exentoFinal})`);
+    
     const pedidoValues = [
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado, observaciones, empleado_id, empleado_nombre
+        subtotal, iva_total, exentoFinal, total, estado, observaciones, empleado_id, empleado_nombre,
+        hashPedido || null // ✅ AGREGAR HASH AL INSERT (puede ser null si no existe)
     ];
-
+    
+    console.log(`💾 [registrarPedido] Valores a insertar:`);
+    console.log(`   - Exento (posición 11): ${exentoFinal} (${typeof exentoFinal})`);
+    console.log(`   - Subtotal: ${subtotal}, IVA: ${iva_total}, Total: ${total}`);
+    console.log(`   - Query campos: cliente_id, cliente_nombre, ..., subtotal, iva_total, exento, total, ...`);
+    console.log(`   - Valores en orden: [${pedidoValues.map((v, i) => i === 10 ? `[EXENTO:${v}]` : v).join(', ')}]`);
+    
     db.query(registrarPedidoQuery, pedidoValues, (err, result) => {
         if (err) {
-            console.error('Error al insertar el pedido:', err);
+            console.error('❌ Error al insertar el pedido:', err);
+            console.error('❌ Query:', registrarPedidoQuery);
+            console.error('❌ Valores:', pedidoValues);
             return callback(err);
         }
+        console.log(`✅ Pedido insertado con ID: ${result.insertId}`);
+        console.log(`✅ Verificar en BD: SELECT id, subtotal, iva_total, exento, total FROM pedidos WHERE id = ${result.insertId}`);
+        
+        // ✅ Verificar inmediatamente después de insertar
+        db.query('SELECT exento FROM pedidos WHERE id = ?', [result.insertId], (errVerify, results) => {
+            if (!errVerify && results.length > 0) {
+                console.log(`🔍 [VERIFICACIÓN] Exento guardado en BD: ${results[0].exento}`);
+                if (parseFloat(results[0].exento) !== exentoFinal) {
+                    console.error(`❌ [ERROR] El exento guardado (${results[0].exento}) NO coincide con el enviado (${exentoFinal})`);
+                }
+            }
+        });
+        
         callback(null, result.insertId);
     });
 };
@@ -206,14 +314,14 @@ const registrarPedido = (pedidoData, callback) => {
 // Función para insertar los productos del pedido
 const insertarProductosPedido = async (pedidoId, productos) => {
     const insertProductoQuery = `
-        INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     try {
         await Promise.all(productos.map(async producto => {
-            const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal } = producto;
-            const productoValues = [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal];
+            const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje } = producto;
+            const productoValues = [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje || 0];
 
             // 1. Insertar el producto en pedidos_cont
             await new Promise((resolve, reject) => {
@@ -235,25 +343,151 @@ const insertarProductosPedido = async (pedidoId, productos) => {
     }
 };
 
-// Endpoint para registrar nuevo pedido
+// Endpoint para registrar nuevo pedido CON IDEMPOTENCIA
 const nuevoPedido = async (req, res) => {
     const { 
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado, empleado_id, empleado_nombre, 
-        observaciones, productos 
+        subtotal, iva_total, exento, total, estado, empleado_id, empleado_nombre, 
+        observaciones, productos, hash_pedido 
     } = req.body;
 
     console.log('📋 Datos recibidos para nuevo pedido:', req.body);
+    console.log('🔍 Exento recibido del frontend:', exento);
+    console.log('🔍 Cliente condición:', cliente_condicion);
+    console.log('🔍 Hash del pedido recibido:', hash_pedido);
 
     if (!productos || productos.length === 0) {
         return res.status(400).json({ success: false, message: 'Debe incluir al menos un producto' });
     }
 
+    // ✅ GENERAR O USAR HASH DEL PEDIDO PARA IDEMPOTENCIA
+    let hashPedidoFinal = hash_pedido;
+    if (!hashPedidoFinal) {
+        // Si no viene del frontend, generarlo en el backend
+        hashPedidoFinal = generarHashPedido({
+            cliente_id,
+            subtotal,
+            iva_total,
+            total,
+            empleado_id,
+            productos
+        });
+        console.log(`🔐 Hash generado en backend: ${hashPedidoFinal}`);
+    }
+
+    // ✅ VERIFICAR DUPLICADOS ANTES DE INSERTAR
+    const pedidoDuplicado = await verificarPedidoDuplicado(hashPedidoFinal);
+    if (pedidoDuplicado) {
+        console.log(`⚠️ Pedido duplicado detectado, retornando pedido existente ID: ${pedidoDuplicado.id}`);
+        
+        // Auditar detección de duplicado
+        await auditarOperacion(req, {
+            accion: 'DUPLICATE_DETECTED',
+            tabla: 'pedidos',
+            registroId: pedidoDuplicado.id,
+            detallesAdicionales: `Intento de duplicar pedido detectado - Hash: ${hashPedidoFinal} - Pedido existente: ID ${pedidoDuplicado.id} - Cliente: ${pedidoDuplicado.cliente_nombre}`
+        });
+
+        return res.json({ 
+            success: true, 
+            message: 'Este pedido ya fue registrado anteriormente',
+            pedidoId: pedidoDuplicado.id,
+            existing: true, // ✅ INDICADOR DE DUPLICADO
+            data: pedidoDuplicado
+        });
+    }
+
+    // ✅ Calcular monto exento si no viene del frontend o si el cliente es exento
+    const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
+    
+    // Convertir exento a número, manejando strings "0.00" o undefined
+    let montoExento = 0;
+    if (exento !== undefined && exento !== null && exento !== '') {
+        const exentoNum = parseFloat(exento);
+        montoExento = isNaN(exentoNum) ? 0 : exentoNum;
+    }
+    
+    console.log(`🔍 Exento recibido: "${exento}" (tipo: ${typeof exento}), Convertido: ${montoExento}`);
+    console.log(`🔍 Cliente es exento: ${esClienteExento}, Monto exento actual: ${montoExento}`);
+    
+    // Si el cliente es exento, calcular el monto exento SIEMPRE (ignorar lo que venga del frontend)
+    if (esClienteExento) {
+        // Calcular el monto exento desde los productos
+        console.log('🔄 Calculando monto exento en backend para cliente exento...');
+        console.log(`   - Productos a procesar: ${productos.length}`);
+        
+        // Obtener todos los IDs de productos
+        const productoIds = productos.map(p => p.id);
+        console.log(`   - IDs de productos: ${productoIds.join(', ')}`);
+        
+        if (productoIds.length > 0) {
+            // Obtener porcentajes de IVA de todos los productos en una sola consulta
+            const placeholders = productoIds.map(() => '?').join(',');
+            const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
+            
+            montoExento = await new Promise((resolve, reject) => {
+                db.query(queryProductos, productoIds, (err, results) => {
+                    if (err) {
+                        console.error('❌ Error obteniendo IVA de productos:', err);
+                        return resolve(0);
+                    }
+                    
+                    console.log(`   - Productos encontrados en BD: ${results.length}`);
+                    
+                    // Crear un mapa de ID -> porcentaje IVA
+                    const ivaMap = {};
+                    results.forEach(row => {
+                        ivaMap[row.id] = parseFloat(row.iva) || 21;
+                        console.log(`   - Producto ${row.id}: IVA ${ivaMap[row.id]}%`);
+                    });
+                    
+                    // Calcular monto exento para cada producto
+                    let totalExento = 0;
+                    productos.forEach(producto => {
+                        const porcentajeIva = ivaMap[producto.id] || 21;
+                        const subtotalProducto = parseFloat(producto.subtotal) || 0;
+                        const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
+                        console.log(`   - Producto ${producto.id}: Subtotal $${subtotalProducto}, IVA ${porcentajeIva}%, Exento $${ivaQueDeberiaCobrarse}`);
+                        totalExento += ivaQueDeberiaCobrarse;
+                    });
+                    
+                    console.log(`✅ Monto exento calculado: $${totalExento.toFixed(2)}`);
+                    resolve(totalExento);
+                });
+            });
+        } else {
+            console.log('⚠️ No hay productos para calcular monto exento');
+            montoExento = 0;
+        }
+    }
+    
+    // ✅ Asegurar que montoExento sea un número válido antes de guardar
+    // Si el cliente es exento, SIEMPRE usar el valor calculado (aunque sea 0)
+    let montoExentoFinal = 0;
+    if (esClienteExento) {
+        // Si se calculó el monto exento, usarlo; si no, usar el que vino del frontend
+        montoExentoFinal = (montoExento !== null && montoExento !== undefined && !isNaN(montoExento)) 
+            ? parseFloat(montoExento.toFixed(2)) 
+            : 0;
+    } else {
+        // Si no es exento, el monto exento debe ser 0
+        montoExentoFinal = 0;
+    }
+    
+    console.log(`💰 Monto exento calculado: $${montoExento.toFixed(2)}`);
+    console.log(`💰 Tipo de montoExento: ${typeof montoExento}, Valor: ${montoExento}`);
+    console.log(`💾 Preparando para guardar pedido:`);
+    console.log(`   - Cliente: ${cliente_nombre}`);
+    console.log(`   - Condición: ${cliente_condicion}`);
+    console.log(`   - Es exento: ${esClienteExento}`);
+    console.log(`   - Monto exento a guardar: $${montoExentoFinal.toFixed(2)}`);
+    console.log(`   - Tipo de montoExentoFinal: ${typeof montoExentoFinal}`);
+    
     registrarPedido({
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, total, estado: estado || 'Exportado', 
+        subtotal, iva_total, exento: montoExentoFinal, total, estado: estado || 'Exportado', 
         empleado_id, empleado_nombre, observaciones: observaciones || 'sin observaciones'
     }, async (err, pedidoId) => {
         if (err) {
@@ -294,7 +528,7 @@ const nuevoPedido = async (req, res) => {
         });
 
         res.json({ success: true, message: 'Pedido y productos insertados correctamente', pedidoId });
-    });
+    }, hashPedidoFinal); // ✅ PASAR HASH COMO TERCER PARÁMETRO
 };
 
 // Obtener todos los pedidos (con filtro opcional por empleado)
@@ -315,7 +549,7 @@ const obtenerPedidos = (req, res) => {
             id, fecha, 
             cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
             cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-            subtotal, iva_total, total, estado, observaciones, 
+            subtotal, iva_total, exento, total, estado, observaciones, 
             empleado_id, empleado_nombre
         FROM pedidos 
     `;
@@ -348,10 +582,13 @@ const obtenerDetallePedido = (req, res) => {
     
     const queryPedido = `SELECT * FROM pedidos WHERE id = ?`;
     const queryProductos = `
-        SELECT id, pedido_id, producto_id, producto_nombre, producto_um, 
-               cantidad, precio, iva, subtotal 
-        FROM pedidos_cont
-        WHERE pedido_id = ?
+        SELECT 
+            pc.id, pc.pedido_id, pc.producto_id, pc.producto_nombre, pc.producto_um, 
+            pc.cantidad, pc.precio, pc.IVA as iva, pc.subtotal, pc.descuento_porcentaje,
+            COALESCE(p.iva, 21) as porcentaje_iva
+        FROM pedidos_cont pc
+        LEFT JOIN productos p ON pc.producto_id = p.id
+        WHERE pc.pedido_id = ?
     `;
     
     db.query(queryPedido, [pedidoId], (err, pedidoResults) => {
@@ -674,6 +911,26 @@ const actualizarObservacionesPedido = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
+        // ✅ VALIDAR QUE EL PEDIDO NO ESTÉ FACTURADO
+        if (datosAnteriores.estado === 'Facturado') {
+            console.warn(`⚠️ Intento de editar observaciones en pedido facturado ${pedidoId}`);
+            
+            await auditarOperacion(req, {
+                accion: 'UPDATE_BLOCKED',
+                tabla: 'pedidos',
+                registroId: pedidoId,
+                estado: 'FALLIDO',
+                detallesAdicionales: `Intento bloqueado de cambiar observaciones en pedido facturado ${pedidoId} - Usuario: ${req.user?.nombre || 'Desconocido'}`
+            });
+
+            return res.status(403).json({
+                success: false,
+                message: 'No se pueden modificar las observaciones de un pedido que ya está facturado',
+                code: 'PEDIDO_FACTURADO',
+                estadoActual: datosAnteriores.estado
+            });
+        }
+
         const query = `UPDATE pedidos SET observaciones = ? WHERE id = ?`;
 
         const result = await new Promise((resolve, reject) => {
@@ -722,21 +979,45 @@ const agregarProductoPedidoExistente = async (req, res) => {
     const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal } = req.body;
 
     if (!producto_id || !cantidad || cantidad <= 0) {
-        return res.status(400).json({ 
-            success: false, 
-            message: "Producto ID y cantidad son requeridos, y la cantidad debe ser mayor a 0" 
+        return res.status(400).json({
+            success: false,
+            message: "Producto ID y cantidad son requeridos, y la cantidad debe ser mayor a 0"
         });
     }
 
-    const query = `
-        INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-
     try {
-        // 1. Insertar el producto en pedidos_cont
+        // 1. Obtener la condición IVA del cliente del pedido
+        const obtenerClientePedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT cliente_condicion FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosPedido = await obtenerClientePedidoPromise();
+        if (!datosPedido) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        // 2. Recalcular IVA si el cliente es EXENTO
+        const esClienteExento = datosPedido.cliente_condicion?.toUpperCase() === 'EXENTO';
+        let ivaFinal = iva;
+
+        if (esClienteExento) {
+            ivaFinal = 0;
+            console.log(`✅ Cliente EXENTO detectado - IVA ajustado a 0 para producto ${producto_nombre}`);
+        }
+
+        const query = `
+            INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        // 3. Insertar el producto en pedidos_cont
         const insertResult = await new Promise((resolve, reject) => {
-            db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal], (err, results) => {
+            db.query(query, [pedidoId, producto_id, producto_nombre, producto_um, cantidad, precio, ivaFinal, subtotal], (err, results) => {
                 if (err) {
                     console.error('Error al insertar el producto:', err);
                     return reject(err);
@@ -745,10 +1026,10 @@ const agregarProductoPedidoExistente = async (req, res) => {
             });
         });
 
-        // 2. Actualizar stock (restar la cantidad)
+        // 4. Actualizar stock (restar la cantidad)
         await actualizarStockProducto(producto_id, -cantidad, 'agregar_producto_pedido');
 
-        // 3. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
+        // 5. ✅ RECALCULAR TOTALES AUTOMÁTICAMENTE DESDE BD
         const totalesActualizados = await recalcularYActualizarTotalesPedido(pedidoId);
 
         // 4. Auditar agregado de producto
@@ -799,7 +1080,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
 
 // Actualizar producto de un pedido
 const actualizarProductoPedido = async (req, res) => {
-    const { cantidad, precio, iva, subtotal, descuento_porcentaje } = req.body;
+    const { cantidad, precio, iva, subtotal, descuento_porcentaje, producto_nombre } = req.body;
     const productId = req.params.productId;
 
     if (!cantidad || cantidad <= 0 || isNaN(parseFloat(cantidad))) {
@@ -835,7 +1116,7 @@ const actualizarProductoPedido = async (req, res) => {
     }
 
     try {
-        // 3. Obtener datos anteriores del producto en el pedido
+        // 1. Obtener datos anteriores del producto en el pedido
         const obtenerDatosAnterioresPromise = () => {
             return new Promise((resolve, reject) => {
                 db.query('SELECT * FROM pedidos_cont WHERE id = ?', [productId], (err, results) => {
@@ -855,11 +1136,62 @@ const actualizarProductoPedido = async (req, res) => {
         const pedidoId = datosAnteriores.pedido_id;
         const diferenciaCantidad = cantidad - cantidadAnterior;
 
-        // ✅ 4. RECALCULAR SUBTOTAL CON DESCUENTO (Verificación)
+        // 2. Obtener condición IVA del cliente del pedido
+        const obtenerClientePedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT cliente_condicion FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosPedido = await obtenerClientePedidoPromise();
+        if (!datosPedido) {
+            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+        }
+
+        // 3. Ajustar IVA si el cliente es EXENTO
+        const esClienteExento = datosPedido.cliente_condicion?.toUpperCase() === 'EXENTO';
+        let ivaFinal = iva;
+
+        if (esClienteExento) {
+            ivaFinal = 0;
+            console.log(`✅ Cliente EXENTO detectado - IVA ajustado a 0 para producto ${datosAnteriores.producto_nombre}`);
+        }
+
+        // 4. VALIDAR STOCK DISPONIBLE **ANTES** DE ACTUALIZAR
+        // Si aumentamos la cantidad, debemos verificar que haya stock disponible
+        if (diferenciaCantidad > 0) {
+            const obtenerStockPromise = () => {
+                return new Promise((resolve, reject) => {
+                    db.query('SELECT stock_actual FROM productos WHERE id = ?', [productoId], (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results.length > 0 ? results[0] : null);
+                    });
+                });
+            };
+
+            const stockInfo = await obtenerStockPromise();
+            if (!stockInfo) {
+                return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+            }
+
+            // El stock actual ya tiene restadas las cantidades anteriores del pedido
+            // Solo necesitamos verificar que hay stock para la diferencia
+            if (stockInfo.stock_actual < diferenciaCantidad) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Stock insuficiente. Stock disponible: ${stockInfo.stock_actual}, necesitas: ${diferenciaCantidad} adicionales`
+                });
+            }
+        }
+
+        // 5. RECALCULAR SUBTOTAL CON DESCUENTO (Verificación)
         const subtotalBase = precio * cantidad;
         const montoDescuento = (subtotalBase * descuentoFinal) / 100;
         const subtotalConDescuento = subtotalBase - montoDescuento;
-        
+
         // Verificar que el subtotal enviado coincida con el calculado
         if (Math.abs(subtotal - subtotalConDescuento) > 0.01) {
             return res.status(400).json({
@@ -868,15 +1200,18 @@ const actualizarProductoPedido = async (req, res) => {
             });
         }
 
-        // ✅ 5. ACTUALIZAR EL PRODUCTO CON DESCUENTO
+        // 6. ACTUALIZAR EL PRODUCTO CON DESCUENTO Y IVA AJUSTADO
+        // ✅ Si se envía producto_nombre, actualizarlo también
+        const nombreFinal = producto_nombre || datosAnteriores.producto_nombre;
+        
         const queryActualizar = `
-            UPDATE pedidos_cont 
-            SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?
+            UPDATE pedidos_cont
+            SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?, producto_nombre = ?
             WHERE id = ?
         `;
 
         await new Promise((resolve, reject) => {
-            db.query(queryActualizar, [cantidad, precio, iva, subtotal, descuentoFinal, productId], (err, result) => {
+            db.query(queryActualizar, [cantidad, precio, ivaFinal, subtotal, descuentoFinal, nombreFinal, productId], (err, result) => {
                 if (err) {
                     console.error('Error al actualizar el producto:', err);
                     return reject(err);
@@ -888,7 +1223,7 @@ const actualizarProductoPedido = async (req, res) => {
             });
         });
 
-        // 6. Ajustar stock si hay diferencia en cantidad
+        // 7. Ajustar stock si hay diferencia en cantidad
         if (diferenciaCantidad !== 0) {
             await actualizarStockProducto(productoId, -diferenciaCantidad, 'actualizar_cantidad_pedido');
         }
@@ -909,9 +1244,10 @@ const actualizarProductoPedido = async (req, res) => {
                 precio, 
                 iva, 
                 subtotal, 
-                descuento_porcentaje: descuentoFinal 
+                descuento_porcentaje: descuentoFinal,
+                producto_nombre: nombreFinal
             },
-            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}`
+            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre}${nombreFinal !== datosAnteriores.producto_nombre ? ` → ${nombreFinal}` : ''} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}`
         });
 
         // ✅ 9. RESPUESTA CON INFORMACIÓN DETALLADA
@@ -1324,33 +1660,38 @@ const obtenerDatosFiltros = (req, res) => {
     });
 };
 
-const recalcularYActualizarTotalesPedido = async (pedidoId) => {
+const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente = null) => {
     return new Promise((resolve, reject) => {
-        // 1. Obtener todos los productos actuales del pedido desde BD
+        // 1. Obtener todos los productos del pedido con su porcentaje de IVA desde la tabla productos
         const queryProductos = `
-            SELECT SUM(subtotal) as subtotal_total, 
-                   SUM(IVA) as iva_total 
-            FROM pedidos_cont 
-            WHERE pedido_id = ?
+            SELECT
+                pc.id,
+                pc.producto_nombre,
+                pc.subtotal,
+                pc.IVA,
+                COALESCE(p.IVA, 21) as porcentaje_iva
+            FROM pedidos_cont pc
+            LEFT JOIN productos p ON pc.producto_id = p.id
+            WHERE pc.pedido_id = ?
         `;
-        
-        db.query(queryProductos, [pedidoId], (err, results) => {
+
+        db.query(queryProductos, [pedidoId], async (err, productos) => {
             if (err) {
-                console.error('Error al calcular totales:', err);
+                console.error('Error al obtener productos:', err);
                 return reject(err);
             }
-            
+
             // Manejar caso sin productos
-            if (results.length === 0 || !results[0].subtotal_total) {
-                const totalesCero = { subtotal: 0, iva_total: 0, total: 0 };
-                
+            if (productos.length === 0) {
+                const totalesCero = { subtotal: 0, iva_total: 0, exento: 0, total: 0 };
+
                 const queryActualizar = `
-                    UPDATE pedidos 
-                    SET subtotal = ?, iva_total = ?, total = ? 
+                    UPDATE pedidos
+                    SET subtotal = ?, iva_total = ?, exento = ?, total = ?
                     WHERE id = ?
                 `;
-                
-                db.query(queryActualizar, [0, 0, 0, pedidoId], (err, result) => {
+
+                db.query(queryActualizar, [0, 0, 0, 0, pedidoId], (err, result) => {
                     if (err) {
                         console.error('Error al actualizar totales a cero:', err);
                         return reject(err);
@@ -1360,32 +1701,92 @@ const recalcularYActualizarTotalesPedido = async (pedidoId) => {
                 });
                 return;
             }
-            
-            // Calcular totales desde BD
-            const subtotalTotal = parseFloat(results[0].subtotal_total) || 0;
-            const ivaTotal = parseFloat(results[0].iva_total) || 0;
-            const total = subtotalTotal + ivaTotal;
-            
-            // 2. Actualizar la tabla pedidos con los totales correctos
-            const queryActualizar = `
-                UPDATE pedidos 
-                SET subtotal = ?, iva_total = ?, total = ? 
-                WHERE id = ?
-            `;
-            
-            db.query(queryActualizar, [subtotalTotal, ivaTotal, total, pedidoId], (err, result) => {
-                if (err) {
-                    console.error('Error al actualizar totales del pedido:', err);
-                    return reject(err);
+
+            try {
+                // 2. Si se proporciona condición IVA, recalcular IVA de cada producto
+                if (condicionIvaCliente) {
+                    const esClienteExento = condicionIvaCliente.toUpperCase() === 'EXENTO';
+                    console.log(`🔄 Recalculando IVA para ${productos.length} productos. Cliente ${esClienteExento ? 'EXENTO' : 'CON IVA'}`);
+
+                    for (const producto of productos) {
+                        const subtotal = parseFloat(producto.subtotal) || 0;
+                        const porcentajeIva = parseFloat(producto.porcentaje_iva) || 21;
+
+                        // Si el cliente es EXENTO, IVA = 0. Si no, calcular IVA
+                        const nuevoIva = esClienteExento
+                            ? 0
+                            : parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
+
+                        // Actualizar IVA del producto
+                        await new Promise((resolveUpdate, rejectUpdate) => {
+                            db.query(
+                                'UPDATE pedidos_cont SET IVA = ? WHERE id = ?',
+                                [nuevoIva, producto.id],
+                                (errUpdate) => {
+                                    if (errUpdate) {
+                                        console.error(`Error actualizando IVA producto ${producto.id}:`, errUpdate);
+                                        return rejectUpdate(errUpdate);
+                                    }
+                                    resolveUpdate();
+                                }
+                            );
+                        });
+                    }
                 }
-                
-                console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Total=${total}`);
-                resolve({
-                    subtotal: subtotalTotal,
-                    iva_total: ivaTotal,
-                    total: total
-                });
-            });
+
+                // 3. Recalcular totales desde la BD (ahora con IVAs actualizados)
+                db.query(
+                    'SELECT SUM(subtotal) as subtotal_total, SUM(IVA) as iva_total FROM pedidos_cont WHERE pedido_id = ?',
+                    [pedidoId],
+                    (errSum, results) => {
+                        if (errSum) {
+                            console.error('Error al calcular totales:', errSum);
+                            return reject(errSum);
+                        }
+
+                        const subtotalTotal = parseFloat(results[0].subtotal_total) || 0;
+                        const ivaTotal = parseFloat(results[0].iva_total) || 0;
+                        const total = subtotalTotal + ivaTotal;
+                        
+                        // ✅ Calcular monto exento: si el cliente es exento, calcular el IVA que debería haberse cobrado
+                        let montoExento = 0;
+                        if (condicionIvaCliente && condicionIvaCliente.toUpperCase() === 'EXENTO') {
+                            // Calcular el IVA que debería haberse cobrado si no fuera exento
+                            montoExento = productos.reduce((acc, prod) => {
+                                const subtotal = parseFloat(prod.subtotal) || 0;
+                                const porcentajeIva = parseFloat(prod.porcentaje_iva) || 21;
+                                const ivaQueDeberiaCobrarse = parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
+                                return acc + ivaQueDeberiaCobrarse;
+                            }, 0);
+                        }
+
+                        // 4. Actualizar totales del pedido
+                        const queryActualizar = `
+                            UPDATE pedidos
+                            SET subtotal = ?, iva_total = ?, exento = ?, total = ?
+                            WHERE id = ?
+                        `;
+
+                        db.query(queryActualizar, [subtotalTotal, ivaTotal, montoExento, total, pedidoId], (errUpdate, result) => {
+                            if (errUpdate) {
+                                console.error('Error al actualizar totales del pedido:', errUpdate);
+                                return reject(errUpdate);
+                            }
+
+                            console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Exento=${montoExento}, Total=${total}`);
+                            resolve({
+                                subtotal: subtotalTotal,
+                                iva_total: ivaTotal,
+                                exento: montoExento,
+                                total: total
+                            });
+                        });
+                    }
+                );
+            } catch (error) {
+                console.error('Error en recálculo:', error);
+                reject(error);
+            }
         });
     });
 };
@@ -1525,6 +1926,177 @@ const verificarVersionCatalogo = async (req, res) => {
     }
 };
 
+
+// Actualizar cliente de un pedido existente
+const actualizarClientePedido = async (req, res) => {
+    const pedidoId = req.params.pedidoId;
+    const { cliente_id } = req.body;
+
+    if (!cliente_id) {
+        return res.status(400).json({
+            success: false,
+            message: 'El ID del cliente es requerido'
+        });
+    }
+
+    try {
+        // 1. Obtener datos del pedido antes de actualizarlo
+        const obtenerPedidoPromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const datosAnteriores = await obtenerPedidoPromise();
+        if (!datosAnteriores) {
+            return res.status(404).json({
+                success: false,
+                message: 'Pedido no encontrado'
+            });
+        }
+
+        // ✅ VALIDAR QUE EL PEDIDO NO ESTÉ FACTURADO
+        if (datosAnteriores.estado === 'Facturado') {
+            console.warn(`⚠️ Intento de editar cliente en pedido facturado ${pedidoId}`);
+            
+            await auditarOperacion(req, {
+                accion: 'UPDATE_BLOCKED',
+                tabla: 'pedidos',
+                registroId: pedidoId,
+                estado: 'FALLIDO',
+                detallesAdicionales: `Intento bloqueado de cambiar cliente en pedido facturado ${pedidoId} - Usuario: ${req.user?.nombre || 'Desconocido'} - Cliente anterior: ${datosAnteriores.cliente_nombre}`
+            });
+
+            return res.status(403).json({
+                success: false,
+                message: 'No se puede cambiar el cliente de un pedido que ya está facturado',
+                code: 'PEDIDO_FACTURADO',
+                estadoActual: datosAnteriores.estado
+            });
+        }
+
+        // 2. Obtener datos del nuevo cliente
+        const obtenerClientePromise = () => {
+            return new Promise((resolve, reject) => {
+                db.query('SELECT * FROM clientes WHERE id = ?', [cliente_id], (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results.length > 0 ? results[0] : null);
+                });
+            });
+        };
+
+        const nuevoCliente = await obtenerClientePromise();
+        if (!nuevoCliente) {
+            return res.status(404).json({
+                success: false,
+                message: 'Cliente no encontrado'
+            });
+        }
+
+        // 3. Actualizar el pedido con los datos del nuevo cliente
+        const queryActualizar = `
+            UPDATE pedidos
+            SET
+                cliente_id = ?,
+                cliente_nombre = ?,
+                cliente_telefono = ?,
+                cliente_direccion = ?,
+                cliente_ciudad = ?,
+                cliente_provincia = ?,
+                cliente_condicion = ?,
+                cliente_cuit = ?
+            WHERE id = ?
+        `;
+
+        await new Promise((resolve, reject) => {
+            db.query(
+                queryActualizar,
+                [
+                    nuevoCliente.id,
+                    nuevoCliente.nombre,
+                    nuevoCliente.telefono || '',
+                    nuevoCliente.direccion || '',
+                    nuevoCliente.ciudad || '',
+                    nuevoCliente.provincia || '',
+                    nuevoCliente.condicion_iva || '',
+                    nuevoCliente.cuit || '',
+                    pedidoId
+                ],
+                (err, result) => {
+                    if (err) {
+                        console.error('Error al actualizar cliente del pedido:', err);
+                        return reject(err);
+                    }
+                    if (result.affectedRows === 0) {
+                        return reject(new Error('No se pudo actualizar el pedido'));
+                    }
+                    resolve(result);
+                }
+            );
+        });
+
+        // 4. Recalcular totales del pedido basados en la condición IVA del nuevo cliente
+        await recalcularYActualizarTotalesPedido(pedidoId, nuevoCliente.condicion_iva);
+
+        // 5. Auditar el cambio
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            datosAnteriores,
+            datosNuevos: {
+                ...datosAnteriores,
+                cliente_id: nuevoCliente.id,
+                cliente_nombre: nuevoCliente.nombre,
+                cliente_telefono: nuevoCliente.telefono || '',
+                cliente_direccion: nuevoCliente.direccion || '',
+                cliente_ciudad: nuevoCliente.ciudad || '',
+                cliente_provincia: nuevoCliente.provincia || '',
+                cliente_condicion: nuevoCliente.condicion_iva || '',
+                cliente_cuit: nuevoCliente.cuit || ''
+            },
+            detallesAdicionales: `Cliente del pedido actualizado: "${datosAnteriores.cliente_nombre}" (${datosAnteriores.cliente_condicion}) → "${nuevoCliente.nombre}" (${nuevoCliente.condicion_iva})`
+        });
+
+        console.log(`✅ Cliente del pedido ${pedidoId} actualizado: ${datosAnteriores.cliente_nombre} → ${nuevoCliente.nombre}`);
+
+        res.json({
+            success: true,
+            message: `Cliente actualizado correctamente a: ${nuevoCliente.nombre}`,
+            data: {
+                pedidoId,
+                nuevoCliente: {
+                    id: nuevoCliente.id,
+                    nombre: nuevoCliente.nombre,
+                    ciudad: nuevoCliente.ciudad,
+                    provincia: nuevoCliente.provincia,
+                    condicion_iva: nuevoCliente.condicion_iva
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Error en actualizarClientePedido:', error);
+
+        // Auditar error
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'pedidos',
+            registroId: pedidoId,
+            detallesAdicionales: `Error al actualizar cliente del pedido: ${error.message}`
+        });
+
+        res.status(500).json({
+            success: false,
+            message: 'Error al actualizar el cliente del pedido'
+        });
+    }
+};
+
+
 module.exports = {
      // Funciones de búsqueda
     buscarCliente,
@@ -1556,5 +2128,6 @@ module.exports = {
     obtenerDatosFiltros,
 
     obtenerCatalogoCompleto,
-    verificarVersionCatalogo
+    verificarVersionCatalogo,
+    actualizarClientePedido
 };

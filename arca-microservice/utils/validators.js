@@ -5,7 +5,8 @@ import {
   CONCEPTOS,
   validarCombinaciónComprobanteIVA,
   esExento,
-  esNotaCredito
+  esNotaCredito,
+  esNotaDebito
 } from '../types/billing.types.js';
 
 /**
@@ -300,10 +301,11 @@ export function validarDatosEntrada(datos) {
 export function validarNotaCredito(datos) {
   const errores = [];
   
-  // Si es Nota de Crédito, debe tener comprobante asociado
-  if (esNotaCredito(datos.CbteTipo)) {
+  // Si es Nota de Crédito o Débito, debe tener comprobante asociado
+  if (esNotaCredito(datos.CbteTipo) || esNotaDebito(datos.CbteTipo)) {
     if (!datos.CbtesAsoc || datos.CbtesAsoc.length === 0) {
-      errores.push('Las Notas de Crédito deben tener al menos un comprobante asociado');
+      const tipoNota = esNotaCredito(datos.CbteTipo) ? 'Crédito' : 'Débito';
+      errores.push(`Las Notas de ${tipoNota} deben tener al menos un comprobante asociado`);
     }
     
     if (datos.CbtesAsoc && datos.CbtesAsoc.length > 0) {

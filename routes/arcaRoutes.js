@@ -45,6 +45,23 @@ router.post('/solicitar-cae',
 );
 
 /**
+ * ✅ SOLICITAR CAE EN BATCH (MÚLTIPLES VENTAS)
+ * POST /arca/solicitar-cae-batch
+ * 
+ * Body: { ventasIds: number[] }
+ * 
+ * Solicita CAE para múltiples ventas de forma secuencial.
+ * Cada solicitud consulta ARCA para obtener el siguiente número disponible,
+ * por lo que maneja correctamente rechazos y mantiene la numeración válida.
+ */
+router.post('/solicitar-cae-batch',
+  authenticateToken,
+  middlewareAuditoria({ accion: 'INSERT', tabla: 'ventas', incluirBody: true }),
+  arcaIntegrationController.verificarARCA,
+  arcaIntegrationController.solicitarCAEBatch
+);
+
+/**
  * ✅ HEALTH CHECK DEL SERVICIO
  * GET /arca/health
  */
@@ -232,6 +249,56 @@ router.post('/notas-credito',
   authenticateToken,
   verificarControlador, 
   (req, res) => billingController.crearNotaCreditoGeneral(req, res)
+);
+
+/**
+ * CREAR NOTA DE DÉBITO A
+ * POST /arca/notas-debito/tipo-a
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, cuit?: string, fecha?: number },
+ *   cuit: string,
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { concepto?, condicionIVA?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-debito/tipo-a', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaDebitoA(req, res)
+);
+
+/**
+ * CREAR NOTA DE DÉBITO B
+ * POST /arca/notas-debito/tipo-b
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, fecha?: number },
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { dni?, concepto?, condicionIVA?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-debito/tipo-b', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaDebitoB(req, res)
+);
+
+/**
+ * CREAR NOTA DE DÉBITO (AUTO-DETECTA TIPO A O B)
+ * POST /arca/notas-debito
+ * 
+ * Body: {
+ *   facturaAsociada: { tipo: number, puntoVenta: number, numero: number, cuit?: string, fecha?: number },
+ *   datosCliente: { cuit?: string, dni?: string, condicionIVA: number },
+ *   items: Array<{ descripcion, cantidad, precioUnitario, alicuotaIVA }>,
+ *   opciones?: { concepto?, puntoVenta?, observaciones? }
+ * }
+ */
+router.post('/notas-debito', 
+  authenticateToken,
+  verificarControlador, 
+  (req, res) => billingController.crearNotaDebitoGeneral(req, res)
 );
 
 module.exports = router;

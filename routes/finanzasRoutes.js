@@ -362,6 +362,19 @@ router.get('/top-productos-tabla',
     finanzasController.obtenerTopProductosTabla
 );
 
+// ✅ NUEVA RUTA: Dashboard simplificado - TODO en una sola llamada
+router.get('/dashboard-simplificado', 
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'dashboard', incluirQuery: true }),
+    finanzasController.obtenerDashboardSimplificado
+);
+
+// ✅ NUEVA RUTA: Generar PDF del reporte financiero
+router.get('/generar-pdf-reporte', 
+    requireManager,
+    middlewareAuditoria({ accion: 'GENERATE_PDF', tabla: 'reportes', incluirQuery: true }),
+    finanzasController.generarPDFReporteFinanciero
+);
 
 
 module.exports = router;

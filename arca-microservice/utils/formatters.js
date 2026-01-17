@@ -1,4 +1,4 @@
-import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento, esNotaCredito } from '../types/billing.types.js';
+import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento, esNotaCredito, esNotaDebito } from '../types/billing.types.js';
 
 /**
  * FORMATEADORES DE DATOS PARA ARCA/AFIP
@@ -196,13 +196,15 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     datosARCA.FchVtoPago = datosARCA.FchServHasta;
   }
 
-  if (esNotaCredito(datosUsuario.tipoComprobante)) {
+  if (esNotaCredito(datosUsuario.tipoComprobante) || esNotaDebito(datosUsuario.tipoComprobante)) {
   if (!datosUsuario.comprobantesAsociados || datosUsuario.comprobantesAsociados.length === 0) {
-    throw new Error('Las Notas de Crédito deben tener al menos un comprobante asociado');
+    const tipoNota = esNotaCredito(datosUsuario.tipoComprobante) ? 'Crédito' : 'Débito';
+    throw new Error(`Las Notas de ${tipoNota} deben tener al menos un comprobante asociado`);
   }
   
   datosARCA.CbtesAsoc = formatearComprobantesAsociados(datosUsuario.comprobantesAsociados);
-  console.log(`✅ ${datosARCA.CbtesAsoc.length} comprobante(s) asociado(s) a la Nota de Crédito`);
+  const tipoNota = esNotaCredito(datosUsuario.tipoComprobante) ? 'Crédito' : 'Débito';
+  console.log(`✅ ${datosARCA.CbtesAsoc.length} comprobante(s) asociado(s) a la Nota de ${tipoNota}`);
 }
   
   // 7. Agregar tributos si existen

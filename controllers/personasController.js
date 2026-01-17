@@ -2,17 +2,17 @@ const db = require('./db');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 
 const nuevoCliente = async (req, res) => {
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
+    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id } = req.body;
 
     const query = `
-        INSERT INTO clientes (nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO clientes (nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email], async (err, results) => {
+    db.query(query, [nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id], async (err, results) => {
         if (err) {
             console.error('Error al insertar el cliente:', err);
-            
+
             // Auditar error en creación
             await auditarOperacion(req, {
                 accion: 'INSERT',
@@ -20,23 +20,43 @@ const nuevoCliente = async (req, res) => {
                 detallesAdicionales: `Error al crear cliente: ${err.message}`,
                 datosNuevos: req.body
             });
-            
+
             return res.status(500).json({ success: false, message: "Error al insertar el cliente" });
         }
-        
-        // Auditar creación exitosa del cliente
-        await auditarOperacion(req, {
-            accion: 'INSERT',
-            tabla: 'clientes',
-            registroId: results.insertId,
-            datosNuevos: { 
-                id: results.insertId,
-                ...req.body
-            },
-            detallesAdicionales: `Cliente creado: ${nombre}`
+
+        // Obtener el cliente recién creado con todos sus datos
+        const clienteId = results.insertId;
+        db.query('SELECT * FROM clientes WHERE id = ?', [clienteId], async (err, clienteResults) => {
+            if (err) {
+                console.error('Error al obtener el cliente creado:', err);
+                // Aún así devolvemos éxito porque se creó
+                return res.json({
+                    success: true,
+                    message: "Cliente agregado correctamente",
+                    data: {
+                        id: clienteId,
+                        ...req.body
+                    }
+                });
+            }
+
+            const clienteCreado = clienteResults[0];
+
+            // Auditar creación exitosa del cliente
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'clientes',
+                registroId: clienteId,
+                datosNuevos: clienteCreado,
+                detallesAdicionales: `Cliente creado: ${nombre}`
+            });
+
+            res.json({
+                success: true,
+                message: "Cliente agregado correctamente",
+                data: clienteCreado
+            });
         });
-        
-        res.json({ success: true, message: "Cliente agregado correctamente", data: results });
     });
 };
 

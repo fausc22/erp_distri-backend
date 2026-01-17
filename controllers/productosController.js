@@ -86,15 +86,30 @@ const buscarProducto = (req, res) => {
     const searchTerm = req.query.search ? `%${req.query.search}%` : '%';
 
     const query = `
-        SELECT * FROM productos
-        WHERE nombre LIKE ?;
+        SELECT p.*, c.nombre as categoria_nombre
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE p.nombre LIKE ? OR c.nombre LIKE ? OR CAST(p.id AS CHAR) LIKE ?
+        ORDER BY p.nombre ASC
     `;
 
-    db.query(query, [searchTerm], (err, results) => {
+    db.query(query, [searchTerm, searchTerm, searchTerm], (err, results) => {
         if (err) {
             console.error('Error al obtener los productos:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los productos" });
         }
+        console.log(`✅ Productos encontrados: ${results.length}`);
+        
+        // Debug: verificar que el IVA esté presente
+        if (results.length > 0) {
+            console.log('📊 Ejemplo de producto con IVA:', {
+                id: results[0].id,
+                nombre: results[0].nombre,
+                iva: results[0].iva,
+                tipo_iva: typeof results[0].iva
+            });
+        }
+        
         res.json({ success: true, data: results });
     });
 };

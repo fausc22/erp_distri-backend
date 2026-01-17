@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FACTURA - DISTRIBUIDORA VERTI-MAR</title>
+    <title>NOTA DE DÉBITO - DISTRIBUIDORA VERTI-MAR</title>
     <style>
         * {
             box-sizing: border-box;
@@ -21,7 +21,7 @@
             margin: 10mm;
         }
         
-        .factura-container {
+        .nota-container {
             width: 100%;
             max-width: 750px;
             margin: 0 auto;
@@ -45,6 +45,17 @@
         .empresa-info p {
             margin: 3px 0;
             font-size: 11px;
+        }
+        
+        .tipo-comprobante {
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #e8f4f8;
+            border: 2px solid #0066cc;
+            font-size: 18px;
+            font-weight: bold;
+            color: #0066cc;
         }
         
         .cliente-section {
@@ -166,10 +177,14 @@
     </style>
 </head>
 <body>
-    <div class="factura-container">
+    <div class="nota-container">
         <div class="empresa-info">
             <h1>X</h1>
             
+        </div>
+
+        <div class="tipo-comprobante">
+            NOTA DE DÉBITO
         </div>
 
         <div class="cliente-section">
@@ -189,6 +204,7 @@
                     <strong>Fecha:</strong> {{fecha}}
                 </div>
             </div>
+            
         </div>
 
         <table>
@@ -216,3 +232,4 @@
     </div>
 </body>
 </html>
+
