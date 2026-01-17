@@ -10,44 +10,22 @@ import afipConfig from '../config/afip.config.js';
 
 class AfipService {
   constructor() {
-    console.log('\n╔══════════════════════════════════════════╗');
-    console.log('║   INICIALIZANDO SDK DE AFIP/ARCA        ║');
-    console.log('╚══════════════════════════════════════════╝');
-    
     // Obtener configuración
     const config = afipConfig.getAfipSDKConfig();
-    
-    // Mostrar información de configuración
-    const ambiente = config.production ? '🚀 PRODUCCIÓN' : '🧪 HOMOLOGACIÓN/TESTING';
-    const tieneAccessToken = !!config.access_token;
-    const tieneCertificados = !!(config.cert && config.key);
-    const cuit = config.CUIT || 'No configurado';
-    
-    console.log(`\n📋 Configuración del SDK:`);
-    console.log(`   - Ambiente: ${ambiente}`);
-    console.log(`   - CUIT: ${cuit}`);
-    console.log(`   - Access Token: ${tieneAccessToken ? '✅ Configurado' : '❌ NO CONFIGURADO'}`);
-    if (tieneAccessToken) {
-      const tokenPreview = config.access_token.length > 20 
-        ? `${config.access_token.substring(0, 10)}...${config.access_token.substring(config.access_token.length - 10)}`
-        : '***';
-      console.log(`     • Token: ${tokenPreview}`);
-    }
-    console.log(`   - Certificados: ${tieneCertificados ? '✅ Configurados' : '⚠️  No configurados (usando ARCA)'}`);
     
     // Inicializar SDK
     try {
       this.afip = new Afip(config);
       this.config = afipConfig;
       
-      // Obtener versión del SDK si está disponible
-      const sdkVersion = this.afip.sdk_version_number || 'N/A';
-      console.log(`   - SDK Versión: ${sdkVersion}`);
-      
-      console.log(`\n✅ SDK de AFIP/ARCA inicializado correctamente\n`);
+      // Log simplificado solo en desarrollo
+      if (process.env.NODE_ENV === 'development') {
+        const ambiente = config.production ? 'PRODUCCIÓN' : 'HOMOLOGACIÓN';
+        const cuit = config.CUIT || 'No configurado';
+        console.log(`✅ ARCA SDK inicializado (${ambiente}, CUIT: ${cuit})`);
+      }
     } catch (error) {
-      console.error(`\n❌ ERROR al inicializar SDK de AFIP/ARCA:`);
-      console.error(`   ${error.message}`);
+      console.error(`❌ Error al inicializar SDK de AFIP/ARCA: ${error.message}`);
       throw error;
     }
   }

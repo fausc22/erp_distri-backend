@@ -14,9 +14,36 @@ const obtenerIpCliente = (req) => {
 };
 
 /**
- * Registra un evento de auditoría en la base de datos
+ * ✅ FASE 1: Optimización - Cola asíncrona para auditoría
+ * Evita bloquear la respuesta principal
  */
-const registrarAuditoria = async ({
+const auditoriaQueue = [];
+let isProcessingQueue = false;
+
+const procesarColaAuditoria = async () => {
+    if (isProcessingQueue || auditoriaQueue.length === 0) {
+        return;
+    }
+
+    isProcessingQueue = true;
+
+    while (auditoriaQueue.length > 0) {
+        const auditoriaData = auditoriaQueue.shift();
+        try {
+            await registrarAuditoriaDirecta(auditoriaData);
+        } catch (error) {
+            // No queremos que fallos de auditoría afecten la operación principal
+            console.error('Error registrando auditoría (cola):', error);
+        }
+    }
+
+    isProcessingQueue = false;
+};
+
+/**
+ * Registra un evento de auditoría en la base de datos (llamada directa)
+ */
+const registrarAuditoriaDirecta = async ({
     usuarioId = null,
     usuarioNombre = null,
     accion,
@@ -32,37 +59,47 @@ const registrarAuditoria = async ({
     estado = 'EXITOSO',
     tiempoProcesamiento = null
 }) => {
-    try {
-        const query = `
-            INSERT INTO auditoria (
-                usuario_id, usuario_nombre, accion, tabla_afectada, registro_id,
-                datos_anteriores, datos_nuevos, ip_address, user_agent, endpoint,
-                metodo_http, detalles_adicionales, estado, tiempo_procesamiento
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
+    const query = `
+        INSERT INTO auditoria (
+            usuario_id, usuario_nombre, accion, tabla_afectada, registro_id,
+            datos_anteriores, datos_nuevos, ip_address, user_agent, endpoint,
+            metodo_http, detalles_adicionales, estado, tiempo_procesamiento
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
 
-        const valores = [
-            usuarioId,
-            usuarioNombre,
-            accion,
-            tablaAfectada,
-            registroId,
-            datosAnteriores ? JSON.stringify(datosAnteriores) : null,
-            datosNuevos ? JSON.stringify(datosNuevos) : null,
-            ipAddress,
-            userAgent,
-            endpoint,
-            metodoHttp,
-            detallesAdicionales,
-            estado,
-            tiempoProcesamiento
-        ];
+    const valores = [
+        usuarioId,
+        usuarioNombre,
+        accion,
+        tablaAfectada,
+        registroId,
+        datosAnteriores ? JSON.stringify(datosAnteriores) : null,
+        datosNuevos ? JSON.stringify(datosNuevos) : null,
+        ipAddress,
+        userAgent,
+        endpoint,
+        metodoHttp,
+        detallesAdicionales,
+        estado,
+        tiempoProcesamiento
+    ];
 
-        await db.execute(query, valores);
-    } catch (error) {
-        // No queremos que fallos de auditoría afecten la operación principal
-        console.error('Error registrando auditoría:', error);
-    }
+    await db.execute(query, valores);
+};
+
+/**
+ * Registra un evento de auditoría usando cola asíncrona (no bloquea)
+ */
+const registrarAuditoria = async (auditoriaData) => {
+    // ✅ Agregar a cola y procesar de forma asíncrona
+    auditoriaQueue.push(auditoriaData);
+    
+    // ✅ Procesar cola en el siguiente tick del event loop (no bloquea)
+    setImmediate(() => {
+        procesarColaAuditoria().catch(err => {
+            console.error('Error procesando cola de auditoría:', err);
+        });
+    });
 };
 
 /**
@@ -102,21 +139,19 @@ const middlewareAuditoria = (opciones = {}) => {
             }
             detallesAdicionales += `Status: ${res.statusCode}`;
 
-            // Registrar auditoría de forma asíncrona
-            setImmediate(() => {
-                registrarAuditoria({
-                    usuarioId: usuario.id,
-                    usuarioNombre: usuario.nombre ? `${usuario.nombre} ${usuario.apellido}` : null,
-                    accion,
-                    tablaAfectada: tabla,
-                    ipAddress,
-                    userAgent,
-                    endpoint: req.originalUrl,
-                    metodoHttp: req.method,
-                    detallesAdicionales,
-                    estado,
-                    tiempoProcesamiento
-                });
+            // ✅ FASE 1: Registrar auditoría usando cola asíncrona (no bloquea respuesta)
+            registrarAuditoria({
+                usuarioId: usuario.id,
+                usuarioNombre: usuario.nombre ? `${usuario.nombre} ${usuario.apellido}` : null,
+                accion,
+                tablaAfectada: tabla,
+                ipAddress,
+                userAgent,
+                endpoint: req.originalUrl,
+                metodoHttp: req.method,
+                detallesAdicionales,
+                estado,
+                tiempoProcesamiento
             });
 
             originalSend.call(this, data);

@@ -1,8 +1,19 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const productosController = require('../controllers/productosController');
 const { requireEmployee } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
+const { cacheMiddleware, invalidate } = require('../utils/cache');
 const router = express.Router();
+
+// ✅ FASE 3: Rate limiting para búsquedas (protección contra scraping)
+const searchLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 100, // 100 búsquedas por IP cada 15 minutos
+    message: 'Demasiadas búsquedas desde esta IP, por favor intenta más tarde.',
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 router.post('/crear-producto', 
     requireEmployee,
@@ -12,7 +23,16 @@ router.post('/crear-producto',
 
 router.get('/buscar-producto', 
     requireEmployee,
+    searchLimiter, // ✅ FASE 3: Rate limiting para búsquedas
     middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
+    // ✅ FASE 2: Caché con key dinámica basada en query params
+    (req, res, next) => {
+        const searchTerm = req.query.search || '';
+        const limit = req.query.limit || '100';
+        const offset = req.query.offset || '0';
+        const cacheKey = `productos:buscar:${searchTerm}:${limit}:${offset}`;
+        return cacheMiddleware(cacheKey, 120)(req, res, next);
+    },
     productosController.buscarProducto
 );
 
@@ -49,6 +69,8 @@ router.post('/generarpdf-remito',
 router.get('/categorias', 
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'categorias' }),
+    // ✅ FASE 2: Caché para categorías (cambian poco, TTL más largo)
+    cacheMiddleware('categorias:all', 300),
     productosController.obtenerCategorias
 );
 
@@ -67,6 +89,12 @@ router.get('/stock/:id',
 router.get('/obtener-todos-productos',
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
+    // ✅ FASE 2: Caché con key dinámica
+    (req, res, next) => {
+        const searchTerm = req.query.search || '';
+        const cacheKey = `productos:todos:${searchTerm}`;
+        return cacheMiddleware(cacheKey, 120)(req, res, next);
+    },
     productosController.obtenerTodosProductos
 );
 

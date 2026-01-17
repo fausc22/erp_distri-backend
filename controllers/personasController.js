@@ -1,5 +1,6 @@
 const db = require('./db');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
+const { invalidate } = require('../utils/cache');
 
 const nuevoCliente = async (req, res) => {
     const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id } = req.body;
@@ -155,6 +156,9 @@ const actualizarCliente = async (req, res) => {
                     },
                     detallesAdicionales: `Cliente actualizado: ${nombre}`
                 });
+
+                // ✅ FASE 2: Invalidar caché después de actualizar
+                invalidate('clientes:*');
 
                 res.json({ success: true, message: "Cliente actualizado correctamente" });
             });

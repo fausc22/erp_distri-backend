@@ -20,33 +20,8 @@ let billingTypes;
     billingController = billingModule.default;
     afipConfig = configModule.default;
     billingTypes = typesModule;
-    
-    // Mostrar información de configuración AFIP
-    const ambienteAFIP = afipConfig.environment === 'prod' ? '🚀 PRODUCCIÓN' : '🧪 HOMOLOGACIÓN/TESTING';
-    const cuit = afipConfig.CUIT || 'No configurado';
-    const puntoVenta = afipConfig.puntoVentaDefault || 1;
-    const tieneCertificados = !!(process.env.AFIP_CERT_PATH && process.env.AFIP_KEY_PATH);
-    
-    console.log('\n╔══════════════════════════════════════════╗');
-    console.log('║   ✅ MICROSERVICIO ARCA CARGADO          ║');
-    console.log('╚══════════════════════════════════════════╝');
-    console.log(`📋 Configuración AFIP:`);
-    console.log(`   - Ambiente: ${ambienteAFIP}`);
-    console.log(`   - CUIT: ${cuit}`);
-    console.log(`   - Punto de Venta: ${puntoVenta}`);
-    console.log(`   - Certificados: ${tieneCertificados ? '✅ Configurados' : '❌ No configurados'}`);
-    if (tieneCertificados) {
-      console.log(`     • Certificado: ${process.env.AFIP_CERT_PATH || 'N/A'}`);
-      console.log(`     • Clave: ${process.env.AFIP_KEY_PATH || 'N/A'}`);
-    }
-    console.log(`   - Método: SOAP Nativo (sin SDK paga)`);
-    console.log(`   - WSAA: ${afipConfig.urls?.wsaa || 'N/A'}`);
-    console.log(`   - WSFEv1: ${afipConfig.urls?.wsfev1 || 'N/A'}`);
-    console.log(``);
   } catch (error) {
-    console.error('❌ Error cargando microservicio ARCA:', error);
-    console.error('   Detalles:', error.message);
-    console.error('   Stack:', error.stack);
+    console.error('❌ Error cargando microservicio ARCA:', error.message);
   }
 })();
 

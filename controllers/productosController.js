@@ -6,6 +6,7 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
+const { invalidate } = require('../utils/cache');
 const pdfGenerator = require('../utils/pdfGenerator');
 
 const formatearFecha = (fechaBD) => {
@@ -83,7 +84,10 @@ const nuevoProducto = async (req, res) => {
 };
 
 const buscarProducto = (req, res) => {
+    // ✅ FASE 1: Agregar límite y paginación sin cambiar formato de respuesta
     const searchTerm = req.query.search ? `%${req.query.search}%` : '%';
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Límite por defecto 100, máximo 500
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
 
     const query = `
         SELECT p.*, c.nombre as categoria_nombre
@@ -91,17 +95,18 @@ const buscarProducto = (req, res) => {
         LEFT JOIN categorias c ON p.categoria_id = c.id
         WHERE p.nombre LIKE ? OR c.nombre LIKE ? OR CAST(p.id AS CHAR) LIKE ?
         ORDER BY p.nombre ASC
+        LIMIT ? OFFSET ?
     `;
 
-    db.query(query, [searchTerm, searchTerm, searchTerm], (err, results) => {
+    db.query(query, [searchTerm, searchTerm, searchTerm, limit, offset], (err, results) => {
         if (err) {
             console.error('Error al obtener los productos:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los productos" });
         }
-        console.log(`✅ Productos encontrados: ${results.length}`);
+        console.log(`✅ Productos encontrados: ${results.length} (límite: ${limit}, offset: ${offset})`);
         
-        // Debug: verificar que el IVA esté presente
-        if (results.length > 0) {
+        // Debug: verificar que el IVA esté presente (solo en desarrollo)
+        if (results.length > 0 && process.env.NODE_ENV === 'development') {
             console.log('📊 Ejemplo de producto con IVA:', {
                 id: results[0].id,
                 nombre: results[0].nombre,
@@ -110,6 +115,7 @@ const buscarProducto = (req, res) => {
             });
         }
         
+        // ✅ Mantener formato de respuesta exactamente igual
         res.json({ success: true, data: results });
     });
 };
@@ -195,6 +201,9 @@ const actualizarProducto = async (req, res) => {
                     },
                     detallesAdicionales: `Producto actualizado: ${nombre}${detalleStock}`
                 });
+
+                // ✅ FASE 2: Invalidar caché después de actualizar
+                invalidate('productos:*');
 
                 res.json({ success: true, message: "Producto actualizado correctamente" });
             });
@@ -671,6 +680,9 @@ const actualizarProductoBasico = async (req, res) => {
                 },
                 detallesAdicionales: `Producto actualizado (básico): ${nombre}${detalleStock}`
             });
+
+            // ✅ FASE 2: Invalidar caché después de actualizar
+            invalidate('productos:*');
 
             res.json({ success: true, message: "Producto actualizado correctamente" });
         });

@@ -1,8 +1,19 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const personasController = require('../controllers/personasController');
 const { requireEmployee } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
+const { cacheMiddleware, invalidate } = require('../utils/cache');
 const router = express.Router();
+
+// ✅ FASE 3: Rate limiting para búsquedas (protección contra scraping)
+const searchLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 100, // 100 búsquedas por IP cada 15 minutos
+    message: 'Demasiadas búsquedas desde esta IP, por favor intenta más tarde.',
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 router.post('/crear-cliente', 
     requireEmployee,
@@ -12,7 +23,16 @@ router.post('/crear-cliente',
 
 router.get('/buscar-cliente', 
     requireEmployee,
+    searchLimiter, // ✅ FASE 3: Rate limiting para búsquedas
     middlewareAuditoria({ accion: 'VIEW', tabla: 'clientes', incluirQuery: true }),
+    // ✅ FASE 2: Caché con key dinámica basada en query params
+    (req, res, next) => {
+        const searchTerm = req.query.q || req.query.search || '';
+        const limit = req.query.limit || '100';
+        const offset = req.query.offset || '0';
+        const cacheKey = `clientes:buscar:${searchTerm}:${limit}:${offset}`;
+        return cacheMiddleware(cacheKey, 120)(req, res, next);
+    },
     personasController.buscarCliente
 );
 

@@ -17,7 +17,7 @@ import {
 
 class BillingService {
   constructor() {
-    console.log('✓ Servicio de Facturación inicializado');
+    // Log silenciado - el servicio se inicializa junto con AfipService
   }
 
   /**

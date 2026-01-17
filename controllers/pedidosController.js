@@ -118,38 +118,44 @@ const formatearFecha = (fechaBD) => {
 const buscarCliente = (req, res) => {
     const rawSearch = req.query.q || req.query.search || '';
     
-    // ✅ SI NO HAY BÚSQUEDA, DEVOLVER TODOS (para PWA)
+    // ✅ FASE 1: Agregar límite y paginación sin cambiar formato de respuesta
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Límite por defecto 100, máximo 500
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    
+    // ✅ SI NO HAY BÚSQUEDA, DEVOLVER TODOS (para PWA) con límite
     if (!rawSearch || rawSearch.trim() === '') {
         const queryTodos = `
             SELECT * FROM clientes
             ORDER BY nombre ASC
+            LIMIT ? OFFSET ?
         `;
         
-        db.query(queryTodos, (err, results) => {
+        db.query(queryTodos, [limit, offset], (err, results) => {
             if (err) {
                 console.error('Error al obtener todos los clientes:', err);
                 return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
             }
-            console.log(`📦 Enviando TODOS los clientes: ${results.length}`);
+            console.log(`📦 Enviando clientes: ${results.length} (límite: ${limit}, offset: ${offset})`);
             res.json({ success: true, data: results });
         });
         return;
     }
     
-    // ✅ CON BÚSQUEDA, FILTRAR PERO SIN LÍMITE DE 10
+    // ✅ CON BÚSQUEDA, FILTRAR CON LÍMITE
     const searchTerm = `%${rawSearch}%`;
     const query = `
         SELECT * FROM clientes
         WHERE nombre LIKE ?
         ORDER BY nombre ASC
+        LIMIT ? OFFSET ?
     `;
 
-    db.query(query, [searchTerm], (err, results) => {
+    db.query(query, [searchTerm, limit, offset], (err, results) => {
         if (err) {
             console.error('Error al obtener los clientes:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
         }
-        console.log(`🔍 Búsqueda clientes "${rawSearch}": ${results.length} resultados`);
+        console.log(`🔍 Búsqueda clientes "${rawSearch}": ${results.length} resultados (límite: ${limit}, offset: ${offset})`);
         res.json({ success: true, data: results });
     });
 };

@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const multer = require('multer');
+const crypto = require('crypto'); // ✅ Para generar hash SHA-256
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
@@ -708,8 +709,89 @@ const obtenerCuentasFondos = (req, res) => {
     });
 };
 
+// ✅ FUNCIÓN PARA GENERAR HASH DETERMINÍSTICO DE FACTURACIÓN
+const generarHashFacturacion = (pedidoId, tipoFiscal, datosFacturacion) => {
+    try {
+        const datosNormalizados = {
+            pedidoId: parseInt(pedidoId),
+            tipoFiscal: tipoFiscal,
+            subtotalSinIva: parseFloat(datosFacturacion.subtotalSinIva || 0).toFixed(2),
+            ivaTotal: parseFloat(datosFacturacion.ivaTotal || 0).toFixed(2),
+            totalConIva: parseFloat(datosFacturacion.totalConIva || 0).toFixed(2),
+            cuentaId: parseInt(datosFacturacion.cuentaId || 0)
+        };
+        
+        const orderedJsonString = JSON.stringify(datosNormalizados, Object.keys(datosNormalizados).sort());
+        return crypto.createHash('sha256').update(orderedJsonString).digest('hex');
+    } catch (error) {
+        console.error('❌ Error generando hash de facturación:', error);
+        return null;
+    }
+};
 
-// Facturar pedido (convierte pedido a venta)
+// ✅ FUNCIÓN PARA VERIFICAR VENTA EXISTENTE POR PEDIDO (dentro de transacción)
+const verificarVentaExistentePorPedido = async (connection, pedidoId) => {
+    try {
+        // Buscar venta relacionada al pedido por datos coincidentes
+        // Como no hay columna pedido_id directa, buscamos por cliente y datos del pedido
+        const query = `
+            SELECT v.id, v.numero_factura, v.fecha, v.cliente_nombre, v.total, v.tipo_f, v.estado
+            FROM ventas v
+            INNER JOIN pedidos p ON v.cliente_id = p.cliente_id 
+                AND v.cliente_nombre = p.cliente_nombre
+                AND ABS(v.total - p.total) < 0.01
+            WHERE p.id = ?
+            AND v.tipo_doc = 'FACTURA'
+            AND v.fecha >= DATE_SUB(NOW(), INTERVAL 1 DAY)
+            ORDER BY v.fecha DESC
+            LIMIT 1
+        `;
+        
+        const results = await queryPromiseWithConnection(connection, query, [pedidoId]);
+        
+        if (results.length > 0) {
+            console.log(`⚠️ Venta existente encontrada para pedido ${pedidoId}: Venta ID ${results[0].id}`);
+            return results[0];
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('❌ Error verificando venta existente por pedido:', error);
+        return null;
+    }
+};
+
+// ✅ FUNCIÓN PARA VERIFICAR VENTA EXISTENTE POR HASH (dentro de transacción)
+const verificarVentaExistentePorHash = async (connection, hashFacturacion) => {
+    try {
+        if (!hashFacturacion) {
+            return null;
+        }
+        
+        const query = `
+            SELECT id, numero_factura, fecha, cliente_nombre, total, tipo_f, estado
+            FROM ventas
+            WHERE hash_venta = ?
+            AND fecha >= DATE_SUB(NOW(), INTERVAL 1 DAY)
+            ORDER BY fecha DESC
+            LIMIT 1
+        `;
+        
+        const results = await queryPromiseWithConnection(connection, query, [hashFacturacion]);
+        
+        if (results.length > 0) {
+            console.log(`⚠️ Venta existente encontrada por hash ${hashFacturacion}: Venta ID ${results[0].id}`);
+            return results[0];
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('❌ Error verificando venta existente por hash:', error);
+        return null;
+    }
+};
+
+// Facturar pedido (convierte pedido a venta) - ✅ CON IDEMPOTENCIA COMPLETA
 const facturarPedido = async (req, res) => {
     const { 
         pedidoId,
@@ -738,8 +820,8 @@ const facturarPedido = async (req, res) => {
         }
 
         try {
-            // 1. Obtener datos del pedido
-            const pedidoQuery = `SELECT * FROM pedidos WHERE id = ?`;
+            // ✅ 1. BLOQUEAR PEDIDO CON SELECT ... FOR UPDATE (previene race conditions)
+            const pedidoQuery = `SELECT * FROM pedidos WHERE id = ? FOR UPDATE`;
             const pedidoResult = await queryPromiseWithConnection(connection, pedidoQuery, [pedidoId]);
             
             if (pedidoResult.length === 0) {
@@ -747,9 +829,87 @@ const facturarPedido = async (req, res) => {
             }
             
             const pedido = pedidoResult[0];
-            console.log('📋 Pedido obtenido:', pedido.id, '-', pedido.cliente_nombre);
+            console.log('📋 Pedido obtenido y bloqueado:', pedido.id, '-', pedido.cliente_nombre, '- Estado:', pedido.estado);
+            
+            // ✅ 2. VERIFICAR ESTADO DENTRO DE LA TRANSACCIÓN
+            if (pedido.estado === 'Facturado') {
+                console.log(`⚠️ Pedido ${pedidoId} ya está facturado. Buscando venta existente...`);
+                
+                // Buscar la venta existente asociada a este pedido
+                const ventaExistente = await verificarVentaExistentePorPedido(connection, pedidoId);
+                
+                if (ventaExistente) {
+                    // Obtener productos de la venta existente
+                    const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
+                    const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistente.id]);
+                    
+                    // Obtener remito asociado si existe
+                    const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
+                    const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistente.id]);
+                    const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
+                    
+                    // Confirmar transacción antes de responder
+                    await new Promise((resolve, reject) => {
+                        connection.commit((err) => {
+                            if (err) {
+                                console.error('❌ Error confirmando transacción:', err);
+                                return reject(err);
+                            }
+                            connection.release();
+                            resolve();
+                        });
+                    });
+                    
+                    console.log(`✅ Retornando venta existente ID ${ventaExistente.id} para pedido ${pedidoId}`);
+                    
+                    // Auditar detección de duplicado
+                    try {
+                        await auditarOperacion(req, {
+                            accion: 'DUPLICATE_DETECTED',
+                            tabla: 'ventas',
+                            registroId: ventaExistente.id,
+                            detallesAdicionales: `Intento de facturar pedido ya facturado - Pedido: ${pedidoId} - Venta existente: ID ${ventaExistente.id} - Factura: ${ventaExistente.numero_factura}`
+                        });
+                    } catch (auditError) {
+                        console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
+                    }
+                    
+                    return res.json({
+                        success: true,
+                        message: 'Este pedido ya fue facturado anteriormente',
+                        existing: true,
+                        data: {
+                            ventaId: ventaExistente.id,
+                            numeroFactura: ventaExistente.numero_factura,
+                            tipoFactura: ventaExistente.tipo_f,
+                            remitoId: remitoId,
+                            pedidoId: pedidoId,
+                            total: ventaExistente.total,
+                            productosCount: productosVenta.length,
+                            requiereCAE: ventaExistente.tipo_f !== 'X'
+                        }
+                    });
+                } else {
+                    // Pedido marcado como facturado pero no encontramos la venta
+                    // Esto es un estado inconsistente, pero retornamos error para evitar duplicados
+                    await new Promise((resolve, reject) => {
+                        connection.rollback((rollbackErr) => {
+                            if (rollbackErr) {
+                                console.error('❌ Error en rollback:', rollbackErr);
+                            }
+                            connection.release();
+                            resolve();
+                        });
+                    });
+                    
+                    return res.status(400).json({
+                        success: false,
+                        message: 'El pedido está marcado como facturado pero no se encontró la venta asociada'
+                    });
+                }
+            }
 
-            // 2. Obtener productos del pedido
+            // ✅ 3. Obtener productos del pedido
             const productosQuery = `SELECT * FROM pedidos_cont WHERE pedido_id = ?`;
             const productos = await queryPromiseWithConnection(connection, productosQuery, [pedidoId]);
 
@@ -758,8 +918,132 @@ const facturarPedido = async (req, res) => {
             }
             
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
+            
+            // ✅ 4. GENERAR HASH DETERMINÍSTICO PARA IDEMPOTENCIA
+            const hashFacturacion = generarHashFacturacion(pedidoId, tipoFiscal, {
+                subtotalSinIva,
+                ivaTotal,
+                totalConIva,
+                cuentaId
+            });
+            console.log(`🔐 Hash de facturación generado: ${hashFacturacion}`);
+            
+            // ✅ 5. VERIFICAR VENTA EXISTENTE POR HASH (idempotencia explícita)
+            const ventaExistentePorHash = await verificarVentaExistentePorHash(connection, hashFacturacion);
+            if (ventaExistentePorHash) {
+                // Obtener productos y remito de la venta existente
+                const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
+                const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistentePorHash.id]);
+                
+                const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
+                const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorHash.id]);
+                const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
+                
+                // Confirmar transacción antes de responder
+                await new Promise((resolve, reject) => {
+                    connection.commit((err) => {
+                        if (err) {
+                            console.error('❌ Error confirmando transacción:', err);
+                            return reject(err);
+                        }
+                        connection.release();
+                        resolve();
+                    });
+                });
+                
+                console.log(`✅ Retornando venta existente por hash ID ${ventaExistentePorHash.id}`);
+                
+                // Auditar detección de duplicado
+                try {
+                    await auditarOperacion(req, {
+                        accion: 'DUPLICATE_DETECTED',
+                        tabla: 'ventas',
+                        registroId: ventaExistentePorHash.id,
+                        detallesAdicionales: `Intento de facturación duplicada detectado por hash - Hash: ${hashFacturacion} - Venta existente: ID ${ventaExistentePorHash.id} - Factura: ${ventaExistentePorHash.numero_factura}`
+                    });
+                } catch (auditError) {
+                    console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
+                }
+                
+                return res.json({
+                    success: true,
+                    message: 'Esta facturación ya fue procesada anteriormente',
+                    existing: true,
+                    data: {
+                        ventaId: ventaExistentePorHash.id,
+                        numeroFactura: ventaExistentePorHash.numero_factura,
+                        tipoFactura: ventaExistentePorHash.tipo_f,
+                        remitoId: remitoId,
+                        pedidoId: pedidoId,
+                        total: ventaExistentePorHash.total,
+                        productosCount: productosVenta.length,
+                        requiereCAE: ventaExistentePorHash.tipo_f !== 'X'
+                    }
+                });
+            }
+            
+            // ✅ 6. VERIFICAR VENTA EXISTENTE POR PEDIDO (idempotencia por entidad)
+            const ventaExistentePorPedido = await verificarVentaExistentePorPedido(connection, pedidoId);
+            if (ventaExistentePorPedido) {
+                // Obtener productos y remito de la venta existente
+                const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
+                const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistentePorPedido.id]);
+                
+                const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
+                const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorPedido.id]);
+                const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
+                
+                // Actualizar estado del pedido si no está actualizado
+                if (pedido.estado !== 'Facturado') {
+                    const actualizarPedidoQuery = `UPDATE pedidos SET estado = 'Facturado' WHERE id = ?`;
+                    await queryPromiseWithConnection(connection, actualizarPedidoQuery, [pedidoId]);
+                    console.log('📋 Estado del pedido actualizado a "Facturado"');
+                }
+                
+                // Confirmar transacción antes de responder
+                await new Promise((resolve, reject) => {
+                    connection.commit((err) => {
+                        if (err) {
+                            console.error('❌ Error confirmando transacción:', err);
+                            return reject(err);
+                        }
+                        connection.release();
+                        resolve();
+                    });
+                });
+                
+                console.log(`✅ Retornando venta existente por pedido ID ${ventaExistentePorPedido.id}`);
+                
+                // Auditar detección de duplicado
+                try {
+                    await auditarOperacion(req, {
+                        accion: 'DUPLICATE_DETECTED',
+                        tabla: 'ventas',
+                        registroId: ventaExistentePorPedido.id,
+                        detallesAdicionales: `Intento de facturar pedido ya facturado - Pedido: ${pedidoId} - Venta existente: ID ${ventaExistentePorPedido.id} - Factura: ${ventaExistentePorPedido.numero_factura}`
+                    });
+                } catch (auditError) {
+                    console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
+                }
+                
+                return res.json({
+                    success: true,
+                    message: 'Este pedido ya fue facturado anteriormente',
+                    existing: true,
+                    data: {
+                        ventaId: ventaExistentePorPedido.id,
+                        numeroFactura: ventaExistentePorPedido.numero_factura,
+                        tipoFactura: ventaExistentePorPedido.tipo_f,
+                        remitoId: remitoId,
+                        pedidoId: pedidoId,
+                        total: ventaExistentePorPedido.total,
+                        productosCount: productosVenta.length,
+                        requiereCAE: ventaExistentePorPedido.tipo_f !== 'X'
+                    }
+                });
+            }
 
-            // ✅ 3. OBTENER SIGUIENTE NÚMERO DE FACTURA
+            // ✅ 7. OBTENER SIGUIENTE NÚMERO DE FACTURA (solo si no existe venta)
             const { numeroFactura, numeroCompleto, puntoVenta } = await obtenerSiguienteNumeroFactura(
                 connection, 
                 tipoFiscal
@@ -814,13 +1098,13 @@ const facturarPedido = async (req, res) => {
                 (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
                  cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
                  cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, exento, total, estado, 
-                 observaciones, empleado_id, empleado_nombre)
+                 observaciones, empleado_id, empleado_nombre, hash_venta)
                 VALUES 
-                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?)
+                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?, ?)
             `;
 
             const ventaValues = [
-                numeroCompleto,  // ✅ NUEVO: número_factura
+                numeroCompleto,  // ✅ número_factura
                 pedido.cliente_id,
                 pedido.cliente_nombre,
                 pedido.cliente_telefono,
@@ -838,7 +1122,8 @@ const facturarPedido = async (req, res) => {
                 totalConIva,
                 pedido.observaciones,
                 pedido.empleado_id,
-                pedido.empleado_nombre
+                pedido.empleado_nombre,
+                hashFacturacion  // ✅ Hash para idempotencia
             ];
             
             console.log(`💾 [Facturar Pedido] Valores a insertar en venta:`);
