@@ -1,6 +1,7 @@
 const db = require('./db');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 const axios = require('axios');
+const { roundFacturacion } = require('../utils/rounding');
 
 /**
  * ✅ OBTENER SIGUIENTE NÚMERO DE NOTA (NUMERACIÓN LOCAL)
@@ -151,6 +152,29 @@ const crearNota = async (req, res) => {
         });
     }
 
+    const productoInvalido = productos.find((producto) => {
+        const nombre = (producto?.nombre || producto?.producto_nombre || '').toString().trim();
+        const cantidad = parseFloat(producto?.cantidad);
+        const precio = parseFloat(producto?.precio);
+        const subtotal = parseFloat(producto?.subtotal);
+        const iva = parseFloat(producto?.iva ?? producto?.iva_calculado ?? 0);
+
+        return !(
+            nombre &&
+            Number.isFinite(cantidad) && cantidad > 0 &&
+            Number.isFinite(precio) && precio >= 0 &&
+            Number.isFinite(subtotal) && subtotal > 0 &&
+            Number.isFinite(iva) && iva >= 0
+        );
+    });
+
+    if (productoInvalido) {
+        return res.status(400).json({
+            success: false,
+            message: 'Se detectaron líneas de productos inválidas en la nota'
+        });
+    }
+
     // ✅ Si no hay venta de referencia, debe tener cliente
     if (!ventaReferenciaId && !cliente_id) {
         return res.status(400).json({
@@ -216,53 +240,16 @@ const crearNota = async (req, res) => {
 
             console.log(`📄 Número de nota asignado: ${numeroCompleto}`);
 
-            // ✅ 3. Calcular monto exento si el cliente es exento
-            let montoExento = parseFloat(exento) || 0;
+            // ✅ 3. Política fiscal unificada:
+            // EXENTO => exento = iva_total
+            // NO EXENTO => exento = 0
             const esClienteExento = clienteFinal.condicion?.toUpperCase() === 'EXENTO';
-            
-            if (esClienteExento && montoExento === 0 && productos.length > 0) {
-                console.log('🔄 Calculando monto exento para cliente exento...');
-                
-                // Obtener porcentajes de IVA de los productos
-                const productoIds = productos
-                    .filter(p => p.id && !p.esManual) // Solo productos reales
-                    .map(p => p.id);
-                
-                if (productoIds.length > 0) {
-                    const placeholders = productoIds.map(() => '?').join(',');
-                    const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
-                    
-                    const productosIva = await new Promise((resolve, reject) => {
-                        connection.query(queryProductos, productoIds, (err, results) => {
-                            if (err) reject(err);
-                            else resolve(results);
-                        });
-                    });
-                    
-                    const ivaMap = {};
-                    productosIva.forEach(row => {
-                        ivaMap[row.id] = parseFloat(row.iva) || 21;
-                    });
-                    
-                    // Calcular monto exento
-                    montoExento = productos.reduce((acc, prod) => {
-                        if (prod.esManual) {
-                            // Para productos manuales, usar el porcentaje_iva del producto
-                            const porcentajeIva = prod.porcentaje_iva || 21;
-                            const subtotalProducto = parseFloat(prod.subtotal) || 0;
-                            return acc + parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
-                        } else {
-                            const porcentajeIva = ivaMap[prod.id] || 21;
-                            const subtotalProducto = parseFloat(prod.subtotal) || 0;
-                            return acc + parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
-                        }
-                    }, 0);
-                    
-                    console.log(`✅ Monto exento calculado: $${montoExento.toFixed(2)}`);
-                }
-            }
 
-            montoExento = Number(montoExento);
+            // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
+            const subtotalR = roundFacturacion(subtotalSinIva);
+            const ivaTotalR = roundFacturacion(ivaTotal);
+            const exentoR = esClienteExento ? ivaTotalR : 0;
+            const totalR = roundFacturacion(totalConIva);
 
             // ✅ 4. CREAR LA NOTA EN LA TABLA VENTAS
             // ✅ Incluir venta_referencia_id si existe
@@ -290,10 +277,10 @@ const crearNota = async (req, res) => {
                 tipoNota,  // tipo_doc: 'NOTA_DEBITO' o 'NOTA_CREDITO'
                 tipoFiscal,
                 ventaReferenciaId || null,  // ✅ ID de la venta de referencia (si existe)
-                subtotalSinIva,
-                ivaTotal,
-                montoExento,
-                totalConIva,
+                subtotalR,
+                ivaTotalR,
+                exentoR,
+                totalR,
                 observaciones || 'sin observaciones',
                 empleado_id,
                 empleado_nombre
@@ -325,6 +312,12 @@ const crearNota = async (req, res) => {
                 const iva = parseFloat(producto.iva || producto.iva_calculado) || 0;
                 const subtotal = parseFloat(producto.subtotal) || 0;
 
+                const tipoLinea = producto.esManual ? 'manual' : 'referencia';
+                console.log(
+                    `🧾 Línea ${tipoLinea} en nota ${numeroCompleto}: ` +
+                    `${productoNombre} | cant=${cantidad} | precio=${precio} | subtotal=${subtotal} | iva=${iva}`
+                );
+
                 await new Promise((resolve, reject) => {
                     connection.query(
                         productoQuery,
@@ -343,9 +336,7 @@ const crearNota = async (req, res) => {
             // Nota de Débito: suma (aumenta saldo)
             // Nota de Crédito: resta (disminuye saldo)
             if (cuentaId) {
-                // ✅ Convertir totalConIva a número para asegurar que sea un número
-                const totalConIvaNum = parseFloat(totalConIva) || 0;
-                const monto = tipoNota === 'NOTA_DEBITO' ? totalConIvaNum : -totalConIvaNum;
+                const monto = tipoNota === 'NOTA_DEBITO' ? totalR : -totalR;
                 
                 const updateCuentaQuery = `
                     UPDATE cuenta_fondos 
@@ -384,9 +375,9 @@ const crearNota = async (req, res) => {
                         tipo_doc: tipoNota,
                         numero_factura: numeroCompleto,
                         cliente_nombre: clienteFinal.nombre,
-                        total: totalConIva
+                        total: totalR
                     },
-                    detallesAdicionales: `${tipoNota} creada - Cliente: ${clienteFinal.nombre} - Total: $${totalConIva}`
+                    detallesAdicionales: `${tipoNota} creada - Cliente: ${clienteFinal.nombre} - Total: $${totalR}`
                 });
 
                 res.json({

@@ -346,6 +346,59 @@
         </table>
     </div>
 
+    <!-- CLIENTES -->
+    <div class="seccion">
+        <div class="seccion-titulo">🤝 Mejores Clientes</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Cliente</th>
+                    <th class="text-center">Ventas</th>
+                    <th class="text-right">Monto Total</th>
+                    <th class="text-right">Ticket Promedio</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{clientes_rows}}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- CIUDADES -->
+    <div class="seccion">
+        <div class="seccion-titulo">📍 Zonas y Ciudades</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Ciudad</th>
+                    <th>Provincia</th>
+                    <th class="text-center">Clientes</th>
+                    <th class="text-right">Facturación</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{ciudades_rows}}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- CUENTAS -->
+    <div class="seccion">
+        <div class="seccion-titulo">🏦 Participación por Cuenta</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Cuenta</th>
+                    <th class="text-right">Facturación Neta</th>
+                    <th class="text-right">Participación</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{cuentas_rows}}
+            </tbody>
+        </table>
+    </div>
+
     <!-- FOOTER -->
     <div class="footer">
         <p><strong>VERTIMAR</strong> | Reporte generado el {{fecha_generacion}}</p>

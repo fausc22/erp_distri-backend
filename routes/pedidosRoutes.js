@@ -109,6 +109,11 @@ router.get('/datos-filtros',
     pedidosController.obtenerDatosFiltros
 );
 
+router.get('/sugerencias-filtros',
+    requireEmployee,
+    pedidosController.obtenerSugerenciasFiltros
+);
+
 router.get('/catalogo-completo', 
     requireEmployee,
     middlewareAuditoria({ accion: 'EXPORT', tabla: 'catalogo_completo' }),

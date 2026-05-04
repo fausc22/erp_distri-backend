@@ -1,6 +1,19 @@
+import { createRequire } from 'module';
 import afipService from './afip.service.js';
 import afipConfig from '../config/afip.config.js';
 import { validarDatosEntrada, validarDatosComprobante } from '../utils/validators.js';
+
+const require = createRequire(import.meta.url);
+const discordLogger = require('../../utils/discordLogger.js');
+
+function arcaLog(msg, ctx = {}) {
+  console.log(msg);
+  discordLogger.sendArcaAfip(msg, ctx);
+}
+function arcaErr(msg, ctx = {}) {
+  console.error(msg);
+  discordLogger.sendArcaAfip(msg, ctx);
+}
 import { transformarAFormatoARCA, formatearRespuestaARCA } from '../utils/formatters.js';
 import { 
   getNombreComprobante, 
@@ -17,7 +30,7 @@ import {
 
 class BillingService {
   constructor() {
-    console.log('✓ Servicio de Facturación inicializado');
+    // Log silenciado - el servicio se inicializa junto con AfipService
   }
 
   /**
@@ -26,39 +39,29 @@ class BillingService {
    */
   async crearFactura(datosFactura) {
     try {
-      console.log('\n╔══════════════════════════════════════════╗');
-      console.log('║   INICIANDO CREACIÓN DE FACTURA          ║');
-      console.log('╚══════════════════════════════════════════╝');
+      arcaLog('INICIANDO CREACIÓN DE FACTURA');
       
       // PASO 1: Validar datos de entrada
-      console.log('\n📋 PASO 1: Validando datos...');
       const validacion = validarDatosEntrada(datosFactura);
       
       if (!validacion.valido) {
-        console.error('❌ Errores de validación:', validacion.errores);
+        arcaErr('❌ Errores de validación: ' + validacion.errores.join('; '));
         throw new Error('Datos inválidos:\n' + validacion.errores.join('\n'));
       }
       
       const condicionIVA = datosFactura.cliente.condicionIVA;
       const esClienteExento = esExento(condicionIVA);
       
-      console.log('✓ Datos válidos');
-      console.log(`  - Condición IVA: ${condicionIVA} ${esClienteExento ? '(EXENTO)' : ''}`);
+      arcaLog(`✓ Datos válidos | Condición IVA: ${condicionIVA} ${esClienteExento ? '(EXENTO)' : ''}`);
       
       // PASO 2: Obtener punto de venta
       const puntoVenta = datosFactura.puntoVenta || afipConfig.puntoVentaDefault;
-      console.log(`\n📍 PASO 2: Punto de venta: ${puntoVenta}`);
       
       // PASO 3: Obtener siguiente número de comprobante
-      console.log('\n🔢 PASO 3: Obteniendo número de comprobante...');
-      
-      // ✅ Si se proporciona numeroComprobante (para notas), usarlo directamente
-      // Si no, obtener el siguiente desde ARCA (para facturas)
       let numeroComprobante;
       if (datosFactura.numeroComprobante !== undefined && datosFactura.numeroComprobante !== null) {
         numeroComprobante = parseInt(datosFactura.numeroComprobante);
-        console.log(`✓ Número de comprobante proporcionado: ${numeroComprobante}`);
-        console.log(`  Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
+        arcaLog(`✓ Número de comprobante proporcionado: ${numeroComprobante} | Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
       } else {
         const ultimoNumero = await afipService.obtenerUltimoComprobante(
           puntoVenta,
@@ -66,43 +69,31 @@ class BillingService {
         );
         
         numeroComprobante = ultimoNumero + 1;
-        console.log(`✓ Número de comprobante: ${numeroComprobante}`);
-        console.log(`  Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
+        arcaLog(`✓ Número de comprobante: ${numeroComprobante} | Tipo: ${getNombreComprobante(datosFactura.tipoComprobante)}`);
       }
       
       // PASO 4: Transformar datos al formato ARCA
-      console.log('\n🔄 PASO 4: Transformando datos al formato ARCA...');
       const datosARCA = transformarAFormatoARCA(
         datosFactura,
         numeroComprobante,
         puntoVenta
       );
       
-      console.log('✓ Datos transformados:');
-      console.log(`  - Importe Neto: $${datosARCA.ImpNeto}`);
-      console.log(`  - IVA: $${datosARCA.ImpIVA} ${esClienteExento ? '(EXENTO - Sin IVA)' : ''}`);
-      console.log(`  - Total: $${datosARCA.ImpTotal}`);
+      arcaLog(`✓ Datos transformados | Neto: $${datosARCA.ImpNeto} | IVA: $${datosARCA.ImpIVA} | Total: $${datosARCA.ImpTotal}`);
       
       // PASO 5: Validar estructura final
-      console.log('\n✅ PASO 5: Validación final de estructura...');
       const validacionFinal = validarDatosComprobante(datosARCA);
       
       if (!validacionFinal.valido) {
-        console.error('❌ Errores en estructura ARCA:', validacionFinal.errores);
+        arcaErr('❌ Errores en estructura ARCA: ' + validacionFinal.errores.join('; '));
         throw new Error('Estructura ARCA inválida:\n' + validacionFinal.errores.join('\n'));
       }
-      console.log('✓ Estructura validada correctamente');
       
       // PASO 6: Enviar a ARCA y obtener CAE
-      console.log('\n📤 PASO 6: Enviando a ARCA...');
+      arcaLog('📤 Enviando a ARCA...');
       const respuestaARCA = await afipService.crearComprobante(datosARCA, false);
       
-      console.log('\n╔══════════════════════════════════════════╗');
-      console.log('║   ✓ FACTURA CREADA EXITOSAMENTE          ║');
-      console.log('╚══════════════════════════════════════════╝');
-      console.log(`\n🎉 CAE: ${respuestaARCA.CAE}`);
-      console.log(`📅 Vencimiento CAE: ${respuestaARCA.CAEFchVto}`);
-      console.log(`📄 Comprobante: ${puntoVenta.toString().padStart(4, '0')}-${numeroComprobante.toString().padStart(8, '0')}\n`);
+      arcaLog(`✓ FACTURA CREADA EXITOSAMENTE | CAE: ${respuestaARCA.CAE} | Vto CAE: ${respuestaARCA.CAEFchVto} | Comprobante: ${puntoVenta.toString().padStart(4, '0')}-${numeroComprobante.toString().padStart(8, '0')}`);
       
       // PASO 7: Formatear respuesta para el usuario
       const respuestaFormateada = formatearRespuestaARCA(
@@ -116,7 +107,7 @@ class BillingService {
       return respuestaFormateada;
       
     } catch (error) {
-      console.error('\n❌ ERROR AL CREAR FACTURA:', error.message);
+      arcaErr('❌ ERROR AL CREAR FACTURA: ' + error.message);
       throw error;
     }
   }
@@ -212,7 +203,7 @@ class BillingService {
    */
   async consultarFactura(numeroComprobante, puntoVenta, tipoComprobante) {
     try {
-      console.log(`\n🔍 Consultando factura ${puntoVenta}-${numeroComprobante}...`);
+      arcaLog(`🔍 Consultando factura ${puntoVenta}-${numeroComprobante}...`);
       
       const info = await afipService.obtenerInfoComprobante(
         numeroComprobante,
@@ -221,19 +212,21 @@ class BillingService {
       );
       
       if (!info) {
+        arcaLog('ℹ Comprobante no encontrado');
         return {
           encontrada: false,
           mensaje: 'Comprobante no encontrado'
         };
       }
       
+      arcaLog('✓ Factura consultada correctamente');
       return {
         encontrada: true,
         datos: info
       };
       
     } catch (error) {
-      console.error('❌ Error al consultar factura:', error.message);
+      arcaErr('❌ Error al consultar factura: ' + error.message);
       throw error;
     }
   }
@@ -259,11 +252,8 @@ async crearNotaCreditoA(
   opciones = {}
 ) {
   try {
-    console.log('\n╔══════════════════════════════════════════╗');
-    console.log('║   CREANDO NOTA DE CRÉDITO A              ║');
-    console.log('╚══════════════════════════════════════════╝');
-    
-    console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+    arcaLog('CREANDO NOTA DE CRÉDITO A');
+    arcaLog(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
     
     const datosNota = {
       tipoComprobante: TIPOS_COMPROBANTE.NOTA_CREDITO_A,
@@ -278,16 +268,15 @@ async crearNotaCreditoA(
       ...opciones
     };
     
-    console.log(`💰 Items: ${items.length} productos`);
-    console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+    arcaLog(`💰 Items: ${items.length} productos | Condición IVA: ${datosNota.cliente.condicionIVA}`);
     
     const resultado = await this.crearFactura(datosNota);
     
-    console.log('✅ Nota de Crédito A creada exitosamente\n');
+    arcaLog('✅ Nota de Crédito A creada exitosamente');
     return resultado;
     
   } catch (error) {
-    console.error('❌ Error creando Nota de Crédito A:', error.message);
+    arcaErr('❌ Error creando Nota de Crédito A: ' + error.message);
     throw error;
   }
 }
@@ -302,11 +291,8 @@ async crearNotaCreditoB(
   opciones = {}
 ) {
   try {
-    console.log('\n╔══════════════════════════════════════════╗');
-    console.log('║   CREANDO NOTA DE CRÉDITO B              ║');
-    console.log('╚══════════════════════════════════════════╝');
-    
-    console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+    arcaLog('CREANDO NOTA DE CRÉDITO B');
+    arcaLog(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
     
     // Determinar documento del cliente
     const tipoDoc = opciones.dni ? determinarTipoDocumento(opciones.dni) : 99;
@@ -325,16 +311,15 @@ async crearNotaCreditoB(
       ...opciones
     };
     
-    console.log(`💰 Items: ${items.length} productos`);
-    console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+    arcaLog(`💰 Items: ${items.length} productos | Condición IVA: ${datosNota.cliente.condicionIVA}`);
     
     const resultado = await this.crearFactura(datosNota);
     
-    console.log('✅ Nota de Crédito B creada exitosamente\n');
+    arcaLog('✅ Nota de Crédito B creada exitosamente');
     return resultado;
     
   } catch (error) {
-    console.error('❌ Error creando Nota de Crédito B:', error.message);
+    arcaErr('❌ Error creando Nota de Crédito B: ' + error.message);
     throw error;
   }
 }
@@ -377,7 +362,7 @@ async crearNotaCredito(
     }
     
   } catch (error) {
-    console.error('❌ Error creando Nota de Crédito:', error.message);
+    arcaErr('❌ Error creando Nota de Crédito: ' + error.message);
     throw error;
   }
 }
@@ -393,11 +378,8 @@ async crearNotaCredito(
     opciones = {}
   ) {
     try {
-      console.log('\n╔══════════════════════════════════════════╗');
-      console.log('║   CREANDO NOTA DE DÉBITO A              ║');
-      console.log('╚══════════════════════════════════════════╝');
-      
-      console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+      arcaLog('CREANDO NOTA DE DÉBITO A');
+      arcaLog(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
       
       const datosNota = {
         tipoComprobante: TIPOS_COMPROBANTE.NOTA_DEBITO_A,
@@ -412,16 +394,15 @@ async crearNotaCredito(
         ...opciones
       };
       
-      console.log(`💰 Items: ${items.length} productos`);
-      console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+      arcaLog(`💰 Items: ${items.length} productos | Condición IVA: ${datosNota.cliente.condicionIVA}`);
       
       const resultado = await this.crearFactura(datosNota);
       
-      console.log('✅ Nota de Débito A creada exitosamente\n');
+      arcaLog('✅ Nota de Débito A creada exitosamente');
       return resultado;
       
     } catch (error) {
-      console.error('❌ Error creando Nota de Débito A:', error.message);
+      arcaErr('❌ Error creando Nota de Débito A: ' + error.message);
       throw error;
     }
   }
@@ -436,11 +417,8 @@ async crearNotaCredito(
     opciones = {}
   ) {
     try {
-      console.log('\n╔══════════════════════════════════════════╗');
-      console.log('║   CREANDO NOTA DE DÉBITO B              ║');
-      console.log('╚══════════════════════════════════════════╝');
-      
-      console.log(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
+      arcaLog('CREANDO NOTA DE DÉBITO B');
+      arcaLog(`📄 Factura asociada: ${facturaAsociada.puntoVenta}-${facturaAsociada.numero}`);
       
       // Determinar documento del cliente
       const tipoDoc = opciones.dni ? determinarTipoDocumento(opciones.dni) : 99;
@@ -459,16 +437,15 @@ async crearNotaCredito(
         ...opciones
       };
       
-      console.log(`💰 Items: ${items.length} productos`);
-      console.log(`📋 Condición IVA: ${datosNota.cliente.condicionIVA}`);
+      arcaLog(`💰 Items: ${items.length} productos | Condición IVA: ${datosNota.cliente.condicionIVA}`);
       
       const resultado = await this.crearFactura(datosNota);
       
-      console.log('✅ Nota de Débito B creada exitosamente\n');
+      arcaLog('✅ Nota de Débito B creada exitosamente');
       return resultado;
       
     } catch (error) {
-      console.error('❌ Error creando Nota de Débito B:', error.message);
+      arcaErr('❌ Error creando Nota de Débito B: ' + error.message);
       throw error;
     }
   }
@@ -511,7 +488,7 @@ async crearNotaCredito(
       }
       
     } catch (error) {
-      console.error('❌ Error creando Nota de Débito:', error.message);
+      arcaErr('❌ Error creando Nota de Débito: ' + error.message);
       throw error;
     }
   }
@@ -521,7 +498,7 @@ async crearNotaCredito(
    */
   async verificarSalud() {
     try {
-      console.log('\n🏥 Verificando salud del servicio...');
+      arcaLog('🏥 Verificando salud del servicio...');
       
       const estadoServidor = await afipService.verificarEstadoServidor();
       const ultimoComprobante = await afipService.obtenerUltimoComprobante(1, 6);
@@ -536,6 +513,7 @@ async crearNotaCredito(
       };
       
     } catch (error) {
+      arcaErr('❌ Error al verificar salud: ' + error.message);
       return {
         estado: 'ERROR',
         error: error.message,

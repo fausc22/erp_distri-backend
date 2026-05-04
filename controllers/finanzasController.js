@@ -885,25 +885,38 @@ const registrarEgreso = (req, res) => {
 
 
 const obtenerBalanceGeneral = (req, res) => {
-  const { anio } = req.query;
-  
-  // Si se proporciona un año, filtramos por ese año
-  const filtroAnio = anio ? `WHERE YEAR(fecha) = ${anio}` : '';
-  
+  const { anio, desde, hasta } = req.query;
+  const params = [];
+  const where = [];
+
+  if (anio) {
+    where.push('YEAR(fecha) = ?');
+    params.push(anio);
+  }
+  if (desde) {
+    where.push('DATE(fecha) >= ?');
+    params.push(desde);
+  }
+  if (hasta) {
+    where.push('DATE(fecha) <= ?');
+    params.push(hasta);
+  }
+
+  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
   const query = `
-    SELECT 
+    SELECT
       DATE_FORMAT(fecha, '%Y-%m') AS mes,
-      SUM(CASE WHEN tipo = 'INGRESO' THEN monto ELSE 0 END) AS ingresos,
-      SUM(CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END) AS egresos,
-      SUM(CASE WHEN tipo = 'INGRESO' THEN monto ELSE 0 END) - 
-      SUM(CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END) AS balance
+      ROUND(SUM(CASE WHEN tipo = 'INGRESO' THEN monto ELSE 0 END), 2) AS ingresos,
+      ROUND(SUM(CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END), 2) AS egresos,
+      ROUND(SUM(CASE WHEN tipo = 'INGRESO' THEN monto ELSE 0 END) - SUM(CASE WHEN tipo = 'EGRESO' THEN monto ELSE 0 END), 2) AS balance
     FROM movimiento_fondos
-    ${filtroAnio}
+    ${whereSql}
     GROUP BY mes
     ORDER BY mes
   `;
-  
-  db.query(query, (err, results) => {
+
+  db.query(query, params, (err, results) => {
     if (err) {
       console.error('Error al obtener balance general:', err);
       return res.status(500).json({ 
@@ -985,28 +998,38 @@ const obtenerBalancePorCuenta = (req, res) => {
 const obtenerDistribucionIngresos = (req, res) => {
   const { desde, hasta } = req.query;
   
-  let filtroFecha = '';
-  let params = [];
+  let filtroFechaVentas = '';
+  let filtroFechaMovs = '';
+  const paramsVentas = [];
+  const paramsMovs = [];
   
   if (desde && hasta) {
-    filtroFecha = 'AND fecha BETWEEN ? AND ?';
-    params.push(desde, hasta);
+    filtroFechaVentas = 'AND DATE(COALESCE(fecha_fiscal, fecha)) BETWEEN ? AND ?';
+    filtroFechaMovs = 'AND DATE(fecha) BETWEEN ? AND ?';
+    paramsVentas.push(desde, hasta);
+    paramsMovs.push(desde, hasta);
   } else if (desde) {
-    filtroFecha = 'AND fecha >= ?';
-    params.push(desde);
+    filtroFechaVentas = 'AND DATE(COALESCE(fecha_fiscal, fecha)) >= ?';
+    filtroFechaMovs = 'AND DATE(fecha) >= ?';
+    paramsVentas.push(desde);
+    paramsMovs.push(desde);
   } else if (hasta) {
-    filtroFecha = 'AND fecha <= ?';
-    params.push(hasta);
+    filtroFechaVentas = 'AND DATE(COALESCE(fecha_fiscal, fecha)) <= ?';
+    filtroFechaMovs = 'AND DATE(fecha) <= ?';
+    paramsVentas.push(hasta);
+    paramsMovs.push(hasta);
   }
   
-  // Primero obtenemos el total de ventas
   const queryVentas = `
-    SELECT SUM(total) AS total
+    SELECT 
+      ROUND(COALESCE(SUM((CASE WHEN tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * total), 0), 2) AS total
     FROM ventas
-    WHERE 1=1 ${filtroFecha}
+    WHERE estado = 'Facturada'
+      AND tipo_doc IN ('FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO')
+      ${filtroFechaVentas}
   `;
   
-  db.query(queryVentas, params, (err, ventasResults) => {
+  db.query(queryVentas, paramsVentas, (err, ventasResults) => {
     if (err) {
       console.error('Error al obtener total de ventas:', err);
       return res.status(500).json({ 
@@ -1017,14 +1040,21 @@ const obtenerDistribucionIngresos = (req, res) => {
     
     const totalVentas = ventasResults[0].total || 0;
     
-    // Luego obtenemos el total de ingresos manuales
     const queryIngresos = `
-      SELECT SUM(monto) AS total
+      SELECT ROUND(COALESCE(SUM(monto), 0), 2) AS total
       FROM movimiento_fondos
-      WHERE tipo = 'INGRESO' ${filtroFecha}
+      WHERE tipo = 'INGRESO'
+        ${filtroFechaMovs}
+        AND (
+          referencia_id IS NULL
+          OR (
+            LOWER(COALESCE(origen, '')) NOT LIKE '%facturacion%'
+            AND LOWER(COALESCE(origen, '')) NOT LIKE '%venta directa%'
+          )
+        )
     `;
     
-    db.query(queryIngresos, params, (err, ingresosResults) => {
+    db.query(queryIngresos, paramsMovs, (err, ingresosResults) => {
       if (err) {
         console.error('Error al obtener total de ingresos manuales:', err);
         return res.status(500).json({ 
@@ -1070,21 +1100,35 @@ const obtenerGastosPorCategoria = (req, res) => {
     params.push(hasta);
   }
   
-  // Asumiendo que se ha agregado el campo 'categoria' a la tabla GASTOS
-  // y que también queremos considerar los egresos de MOVIMIENTO_FONDOS
   const queryGastos = `
-    SELECT 
-      origen AS categoria,
-      SUM(monto) AS total
-    FROM movimiento_fondos
-    WHERE tipo = 'EGRESO' 
-    ${filtroFecha ? 'AND ' + filtroFecha.substring(6) : ''}
-    GROUP BY origen
+    SELECT categoria, ROUND(SUM(total), 2) AS total
+    FROM (
+      SELECT
+        COALESCE(NULLIF(g.descripcion, ''), 'Gasto operativo') AS categoria,
+        g.monto AS total
+      FROM gastos g
+      ${filtroFecha.replace(/fecha/g, 'g.fecha')}
+      UNION ALL
+      SELECT
+        'Compras' AS categoria,
+        c.total AS total
+      FROM compras c
+      ${filtroFecha.replace(/fecha/g, 'c.fecha')}
+      ${filtroFecha ? 'AND c.estado != \'Anulada\'' : 'WHERE c.estado != \'Anulada\''}
+      UNION ALL
+      SELECT
+        COALESCE(NULLIF(mf.origen, ''), 'Egreso manual') AS categoria,
+        mf.monto AS total
+      FROM movimiento_fondos mf
+      ${filtroFecha.replace(/fecha/g, 'mf.fecha')}
+      ${filtroFecha ? 'AND mf.tipo = \'EGRESO\'' : 'WHERE mf.tipo = \'EGRESO\''}
+    ) egresos_unificados
+    GROUP BY categoria
     ORDER BY total DESC
-    
+    LIMIT ?
   `;
   
-  db.query(queryGastos, params, (err, results) => {
+  db.query(queryGastos, [...params, parseInt(limite, 10)], (err, results) => {
     if (err) {
       console.error('Error al obtener gastos por categoría:', err);
       return res.status(500).json({ 
@@ -1209,230 +1253,233 @@ const obtenerAniosDisponibles = (req, res) => {
   });
 };
 
-const obtenerVentasPorVendedor = (req, res) => {
-  const { desde, hasta } = req.query;
-  const params = [];
-
-  let filtro = '';
-  if (desde && hasta) {
-    filtro = 'WHERE fecha BETWEEN ? AND ?';
-    params.push(desde, hasta);
-  } else if (desde) {
-    filtro = 'WHERE fecha >= ?';
-    params.push(desde);
-  } else if (hasta) {
-    filtro = 'WHERE fecha <= ?';
-    params.push(hasta);
-  }
-
-  const query = `
-    SELECT 
-      empleado_nombre,
-      COUNT(*) AS cantidad_ventas,
-      SUM(total) AS total_vendido
-    FROM ventas
-    ${filtro}
-    GROUP BY empleado_nombre
-    ORDER BY total_vendido DESC
-  `;
-
-  db.query(query, params, (err, results) => {
-    if (err) {
-      console.error('Error al obtener ventas por vendedor:', err);
-      return res.status(500).json({ 
-        success: false, 
-        message: "Error al obtener ventas por vendedor" 
-      });
-    }
-
-    res.json({ 
-      success: true, 
-      data: results 
+const ejecutarQuery = (query, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.query(query, params, (err, results) => {
+      if (err) reject(err);
+      else resolve(results);
     });
   });
 };
 
-const obtenerProductosMasVendidos = (req, res) => {
-  const { desde, hasta, limite = 10 } = req.query;
+const normalizarFiltrosReportes = (query = {}) => {
+  const hoy = new Date();
+  const primerDiaMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+  const desde = query.desde || primerDiaMes.toISOString().split('T')[0];
+  const hasta = query.hasta || hoy.toISOString().split('T')[0];
 
-  let filtroFecha = '';
-  const params = [];
-
-  if (desde && hasta) {
-    filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
-    params.push(desde, hasta);
-  } else if (desde) {
-    filtroFecha = 'WHERE v.fecha >= ?';
-    params.push(desde);
-  } else if (hasta) {
-    filtroFecha = 'WHERE v.fecha <= ?';
-    params.push(hasta);
-  }
-
-  const query = `
-    SELECT 
-      dv.producto_nombre,
-      SUM(dv.cantidad) AS total_vendida
-    FROM ventas_cont dv
-    JOIN ventas v ON dv.venta_id = v.id
-    ${filtroFecha}
-    GROUP BY dv.producto_nombre
-    ORDER BY total_vendida DESC
-    
-  `;
-
-  
-
-  db.query(query, params, (err, results) => {
-    if (err) {
-      console.error('Error al obtener productos más vendidos:', err);
-      return res.status(500).json({ 
-        success: false, 
-        message: "Error al obtener productos más vendidos" 
-      });
-    }
-
-    res.json({ 
-      success: true, 
-      data: results 
-    });
-  });
+  return {
+    desde,
+    hasta,
+    periodo: query.periodo || 'mensual',
+    cuenta_id: query.cuenta_id || '',
+    tipo_fiscal: query.tipo_fiscal || query.tipo_f || '',
+    empleado_id: query.empleado_id || '',
+    ciudad: query.ciudad || '',
+    cliente_id: query.cliente_id || '',
+    limite: Number(query.limite || 10),
+    comparativo: query.comparativo || 'periodo_anterior'
+  };
 };
 
+const validarRangoFechas = (desde, hasta) => {
+  const d = new Date(desde);
+  const h = new Date(hasta);
+  if (isNaN(d.getTime()) || isNaN(h.getTime())) {
+    return { ok: false, message: 'Formato de fecha inválido. Use YYYY-MM-DD' };
+  }
+  if (d > h) {
+    return { ok: false, message: 'La fecha "desde" no puede ser mayor que "hasta"' };
+  }
+  return { ok: true, d, h };
+};
 
+const construirWhereVentas = (filtros, alias = 'v') => {
+  const where = [
+    `${alias}.estado = 'Facturada'`,
+    `${alias}.tipo_doc IN ('FACTURA','NOTA_DEBITO','NOTA_CREDITO')`,
+    `DATE(COALESCE(${alias}.fecha_fiscal, ${alias}.fecha)) >= ?`,
+    `DATE(COALESCE(${alias}.fecha_fiscal, ${alias}.fecha)) <= ?`
+  ];
+  const params = [filtros.desde, filtros.hasta];
+
+  if (filtros.cuenta_id && filtros.cuenta_id !== 'todas') {
+    where.push(`${alias}.cuenta_id = ?`);
+    params.push(filtros.cuenta_id);
+  }
+  if (filtros.tipo_fiscal) {
+    where.push(`${alias}.tipo_f = ?`);
+    params.push(filtros.tipo_fiscal);
+  }
+  if (filtros.empleado_id) {
+    where.push(`${alias}.empleado_id = ?`);
+    params.push(filtros.empleado_id);
+  }
+  if (filtros.ciudad) {
+    where.push(`${alias}.cliente_ciudad = ?`);
+    params.push(filtros.ciudad);
+  }
+  if (filtros.cliente_id) {
+    where.push(`${alias}.cliente_id = ?`);
+    params.push(filtros.cliente_id);
+  }
+
+  return {
+    whereSql: where.join(' AND '),
+    params
+  };
+};
+
+const obtenerFormatoPeriodo = (periodo, fechaDesde, fechaHasta) => {
+  const dias = Math.ceil((fechaHasta - fechaDesde) / (1000 * 60 * 60 * 24)) + 1;
+  if (periodo === 'anual' || dias > 365) return { formato: '%Y', tipo: 'anual' };
+  if (periodo === 'mensual' || dias > 60) return { formato: '%Y-%m', tipo: 'mensual' };
+  return { formato: '%Y-%m-%d', tipo: 'diario' };
+};
+
+const obtenerVentasPorVendedor = async (req, res) => {
+  try {
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
+
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
+    const query = `
+      WITH ventas_filtradas AS (
+        SELECT
+          v.id,
+          v.empleado_id,
+          COALESCE(NULLIF(v.empleado_nombre, ''), 'Sin vendedor') AS empleado_nombre,
+          (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total AS total_neto
+        FROM ventas v
+        WHERE ${whereSql}
+      ),
+      costo_por_venta AS (
+        SELECT
+          v.id AS venta_id,
+          SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)) AS costo_neto
+        FROM ventas v
+        JOIN ventas_cont vc ON vc.venta_id = v.id
+        LEFT JOIN productos p ON p.id = vc.producto_id
+        WHERE ${whereSql}
+        GROUP BY v.id
+      )
+      SELECT
+        vf.empleado_id,
+        vf.empleado_nombre,
+        SUM(CASE WHEN vf.total_neto > 0 THEN 1 ELSE 0 END) AS cantidad_ventas,
+        ROUND(SUM(vf.total_neto), 2) AS total_vendido,
+        ROUND(AVG(CASE WHEN vf.total_neto > 0 THEN vf.total_neto END), 2) AS ticket_promedio,
+        ROUND(SUM(vf.total_neto - COALESCE(cv.costo_neto, 0)), 2) AS ganancia_generada
+      FROM ventas_filtradas vf
+      LEFT JOIN costo_por_venta cv ON cv.venta_id = vf.id
+      GROUP BY vf.empleado_id, vf.empleado_nombre
+      ORDER BY total_vendido DESC
+    `;
+
+    const data = await ejecutarQuery(query, [...params, ...params]);
+    res.json({ success: true, data, filtrosAplicados: filtros });
+  } catch (error) {
+    console.error('Error al obtener ventas por vendedor:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener ventas por vendedor' });
+  }
+};
+
+const obtenerProductosMasVendidos = async (req, res) => {
+  try {
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
+
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
+    const query = `
+      SELECT
+        vc.producto_id,
+        vc.producto_nombre,
+        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS total_vendida,
+        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ingresos_netos,
+        COUNT(DISTINCT v.id) AS documentos
+      FROM ventas v
+      JOIN ventas_cont vc ON vc.venta_id = v.id
+      WHERE ${whereSql}
+      GROUP BY vc.producto_id, vc.producto_nombre
+      HAVING total_vendida > 0
+      ORDER BY total_vendida DESC
+      LIMIT ?
+    `;
+
+    const data = await ejecutarQuery(query, [...params, filtros.limite]);
+    res.json({ success: true, data, filtrosAplicados: filtros });
+  } catch (error) {
+    console.error('Error al obtener productos más vendidos:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener productos más vendidos' });
+  }
+};
 
 const obtenerGananciasDetalladas = async (req, res) => {
   try {
-    let { desde, hasta, periodo = 'mensual' } = req.query;
-    
-    // ✅ AUTOCOMPLETAR FECHAS SI FALTAN
-    if (!desde || !hasta) {
-      const ahora = new Date();
-      const primerDiaDelMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
-      
-      desde = desde || primerDiaDelMes.toISOString().split('T')[0];
-      hasta = hasta || ahora.toISOString().split('T')[0];
-    }
-    
-    console.log('🔍 Obteniendo ganancias detalladas:', { desde, hasta, periodo });
-    
-    // ✅ VALIDACIÓN DE FECHAS
-    const fechaDesde = new Date(desde);
-    const fechaHasta = new Date(hasta);
-    
-    if (isNaN(fechaDesde.getTime()) || isNaN(fechaHasta.getTime())) {
-      return res.status(400).json({
-        success: false,
-        message: 'Formato de fecha inválido'
-      });
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
 
-    if (fechaDesde > fechaHasta) {
-      return res.status(400).json({
-        success: false,
-        message: 'La fecha desde no puede ser mayor que hasta'
-      });
-    }
-
-    // ✅ CONFIGURACIÓN MEJORADA PARA PERÍODO
-    let dateFormat, groupBy;
-    const diasEnPeriodo = Math.ceil((fechaHasta - fechaDesde) / (1000 * 60 * 60 * 24));
-    
-    // ✅ LÓGICA INTELIGENTE PARA PERÍODO
-    if (periodo === 'anual' || diasEnPeriodo > 365) {
-      // Para períodos muy largos, agrupar por año
-      dateFormat = '%Y';
-      groupBy = 'YEAR(v.fecha)';
-    } else if (periodo === 'mensual' || diasEnPeriodo > 60) {
-      // Para períodos medianos, agrupar por mes
-      dateFormat = '%Y-%m';
-      groupBy = 'DATE_FORMAT(v.fecha, \'%Y-%m\')';
-    } else {
-      // Para períodos cortos, agrupar por día
-      dateFormat = '%Y-%m-%d';
-      groupBy = 'DATE(v.fecha)';
-    }
-
-    // ✅ FILTRO DE FECHA CORREGIDO
-    const filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
+    const { formato, tipo } = obtenerFormatoPeriodo(filtros.periodo, validacion.d, validacion.h);
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
 
     const query = `
-      SELECT 
-        DATE_FORMAT(v.fecha, '${dateFormat}') as periodo,
-        COUNT(v.id) as total_ventas,
-        COALESCE(SUM(v.total), 0) as ingresos_totales,
-        COALESCE(SUM(
-          CASE 
-            WHEN p.costo > 0 AND p.costo IS NOT NULL 
-            THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.25
-          END
-        ), 0) as ganancia_estimada,
-        COALESCE(AVG(v.total), 0) as factura_promedio,
-        COUNT(CASE WHEN p.costo > 0 THEN 1 END) as productos_con_costo,
-        COUNT(CASE WHEN p.costo IS NULL OR p.costo = 0 THEN 1 END) as productos_sin_costo
-      FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
-      LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha}
-      GROUP BY DATE_FORMAT(v.fecha, '${dateFormat}')
-      ORDER BY DATE_FORMAT(v.fecha, '${dateFormat}') ASC
+      WITH ventas_filtradas AS (
+        SELECT
+          v.id,
+          DATE(COALESCE(v.fecha_fiscal, v.fecha)) AS fecha_ref,
+          (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total AS ingreso_neto
+        FROM ventas v
+        WHERE ${whereSql}
+      ),
+      costo_por_venta AS (
+        SELECT
+          v.id AS venta_id,
+          SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)) AS costo_neto
+        FROM ventas v
+        JOIN ventas_cont vc ON vc.venta_id = v.id
+        LEFT JOIN productos p ON p.id = vc.producto_id
+        WHERE ${whereSql}
+        GROUP BY v.id
+      )
+      SELECT
+        DATE_FORMAT(vf.fecha_ref, '${formato}') AS periodo,
+        SUM(CASE WHEN vf.ingreso_neto > 0 THEN 1 ELSE 0 END) AS total_ventas,
+        ROUND(SUM(vf.ingreso_neto), 2) AS ingresos_totales,
+        ROUND(SUM(vf.ingreso_neto - COALESCE(cv.costo_neto, 0)), 2) AS ganancia_estimada,
+        ROUND(AVG(CASE WHEN vf.ingreso_neto > 0 THEN vf.ingreso_neto END), 2) AS factura_promedio
+      FROM ventas_filtradas vf
+      LEFT JOIN costo_por_venta cv ON cv.venta_id = vf.id
+      GROUP BY DATE_FORMAT(vf.fecha_ref, '${formato}')
+      ORDER BY periodo ASC
     `;
 
-    // ✅ PARÁMETROS CORREGIDOS (SIN LÍMITE)
-    const params = [desde, hasta];
+    const data = await ejecutarQuery(query, [...params, ...params]);
+    const totales = data.reduce((acc, row) => {
+      acc.total_ventas += Number(row.total_ventas || 0);
+      acc.ingresos_totales += Number(row.ingresos_totales || 0);
+      acc.ganancia_estimada += Number(row.ganancia_estimada || 0);
+      return acc;
+    }, { total_ventas: 0, ingresos_totales: 0, ganancia_estimada: 0 });
 
-    console.log('📊 Ejecutando query con período:', periodo, 'Días:', diasEnPeriodo);
-
-    db.query(query, params, (err, results) => {
-      if (err) {
-        console.error('❌ Error obteniendo ganancias detalladas:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Error al obtener ganancias detalladas: ' + err.message
-        });
-      }
-
-      console.log(`✅ Resultados obtenidos: ${results.length} registros`);
-
-      if (results.length === 0) {
-        return res.json({
-          success: true,
-          data: [],
-          totales: {
-            total_ventas: 0,
-            ingresos_totales: 0,
-            ganancia_estimada: 0
-          },
-          periodo,
-          message: 'No se encontraron datos para el período seleccionado'
-        });
-      }
-
-      // ✅ CÁLCULO DE TOTALES
-      const totales = {
-        total_ventas: results.reduce((acc, row) => acc + parseInt(row.total_ventas || 0), 0),
-        ingresos_totales: results.reduce((acc, row) => acc + parseFloat(row.ingresos_totales || 0), 0),
-        ganancia_estimada: results.reduce((acc, row) => acc + parseFloat(row.ganancia_estimada || 0), 0),
-        productos_con_costo: results.reduce((acc, row) => acc + parseInt(row.productos_con_costo || 0), 0),
-        productos_sin_costo: results.reduce((acc, row) => acc + parseInt(row.productos_sin_costo || 0), 0)
-      };
-
-      res.json({
-        success: true,
-        data: results,
-        totales,
-        periodo: diasEnPeriodo > 365 ? 'anual' : diasEnPeriodo > 60 ? 'mensual' : 'diario',
-        filtros_aplicados: { desde, hasta, periodo }
-      });
+    res.json({
+      success: true,
+      data,
+      totales,
+      periodo: tipo,
+      filtrosAplicados: filtros
     });
-
   } catch (error) {
-    console.error('💥 Error en obtenerGananciasDetalladas:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor: ' + error.message
-    });
+    console.error('Error al obtener ganancias detalladas:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener ganancias detalladas' });
   }
 };
 
@@ -1440,21 +1487,13 @@ const obtenerGananciasDetalladas = async (req, res) => {
 
 const obtenerTopProductosTabla = async (req, res) => {
   try {
-    const { desde, hasta } = req.query;
-    
-    let filtroFecha = '';
-    const params = [];
-    
-    if (desde && hasta) {
-      filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
-      params.push(desde, hasta);
-    } else if (desde) {
-      filtroFecha = 'WHERE v.fecha >= ?';
-      params.push(desde);
-    } else if (hasta) {
-      filtroFecha = 'WHERE v.fecha <= ?';
-      params.push(hasta);
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
+
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
 
     const query = `
       SELECT 
@@ -1462,14 +1501,14 @@ const obtenerTopProductosTabla = async (req, res) => {
         vc.producto_nombre,
         c.nombre as categoria,
         p.costo,
-        AVG(vc.precio) as precio_promedio,
-        SUM(vc.cantidad) as cantidad_vendida,
-        SUM(vc.precio * vc.cantidad) as ingresos_producto,
+        ROUND(AVG(vc.precio), 2) as precio_promedio,
+        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) as cantidad_vendida,
+        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) as ingresos_producto,
         SUM(
           CASE 
-            WHEN p.costo > 0 AND p.costo IS NOT NULL 
-            THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.25
+            WHEN p.costo > 0 AND p.costo IS NOT NULL
+            THEN (vc.precio - p.costo) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)
+            ELSE vc.precio * vc.cantidad * 0.25 * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)
           END
         ) as ganancia_total,
         (
@@ -1483,7 +1522,7 @@ const obtenerTopProductosTabla = async (req, res) => {
       JOIN ventas v ON vc.venta_id = v.id
       LEFT JOIN productos p ON vc.producto_id = p.id
       LEFT JOIN categorias c ON p.categoria_id = c.id
-      ${filtroFecha}
+      WHERE ${whereSql}
       GROUP BY vc.producto_id, vc.producto_nombre, c.nombre, p.costo
       ORDER BY ganancia_total DESC
     `;
@@ -1499,7 +1538,8 @@ const obtenerTopProductosTabla = async (req, res) => {
 
       res.json({
         success: true,
-        data: results
+        data: results,
+        filtrosAplicados: filtros
       });
     });
 
@@ -1513,74 +1553,45 @@ const obtenerTopProductosTabla = async (req, res) => {
 };
 
 
-// ✅ OBTENER GANANCIAS POR PRODUCTO - Compatible con tu BD
 const obtenerGananciasPorProducto = async (req, res) => {
   try {
-    const { desde, hasta, limite = 20 } = req.query;
-    
-    let filtroFecha = '';
-    const params = [];
-    
-    if (desde && hasta) {
-      filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
-      params.push(desde, hasta);
-    } else if (desde) {
-      filtroFecha = 'WHERE v.fecha >= ?';
-      params.push(desde);
-    } else if (hasta) {
-      filtroFecha = 'WHERE v.fecha <= ?';
-      params.push(hasta);
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
 
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
     const query = `
       SELECT 
         vc.producto_id,
         vc.producto_nombre,
-        p.costo,
-        COUNT(vc.id) as veces_vendido,
-        SUM(vc.cantidad) as cantidad_total_vendida,
-        AVG(vc.precio) as precio_promedio,
-        SUM(vc.precio * vc.cantidad) as ingresos_producto,
-        SUM(
-          CASE 
-            WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.3
-          END
-        ) as ganancia_estimada,
-        (
-          SUM(
-            CASE 
-              WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-              ELSE vc.precio * vc.cantidad * 0.3
-            END
-          ) / SUM(vc.precio * vc.cantidad) * 100
-        ) as margen_ganancia_porcentaje
+        ROUND(AVG(vc.precio), 2) AS precio_promedio,
+        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS cantidad_total_vendida,
+        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ingresos_producto,
+        ROUND(SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS costo_producto,
+        ROUND(SUM((vc.precio - COALESCE(p.costo, 0)) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ganancia_estimada,
+        ROUND(
+          CASE WHEN SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)) = 0 THEN 0
+               ELSE (
+                 SUM((vc.precio - COALESCE(p.costo, 0)) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END))
+                 /
+                 SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END))
+               ) * 100
+          END, 2
+        ) AS margen_ganancia_porcentaje
       FROM ventas_cont vc
       JOIN ventas v ON vc.venta_id = v.id
       LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha}
-      GROUP BY vc.producto_id, vc.producto_nombre, p.costo
+      WHERE ${whereSql}
+      GROUP BY vc.producto_id, vc.producto_nombre
+      HAVING cantidad_total_vendida > 0
       ORDER BY ganancia_estimada DESC
-      
+      LIMIT ?
     `;
 
-    
-
-    db.query(query, params, (err, results) => {
-      if (err) {
-        console.error('Error obteniendo ganancias por producto:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Error al obtener ganancias por producto'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: results
-      });
-    });
-
+    const data = await ejecutarQuery(query, [...params, filtros.limite]);
+    res.json({ success: true, data, filtrosAplicados: filtros });
   } catch (error) {
     console.error('Error obteniendo ganancias por producto:', error);
     res.status(500).json({
@@ -1590,85 +1601,73 @@ const obtenerGananciasPorProducto = async (req, res) => {
   }
 };
 
-// ✅ OBTENER GANANCIAS POR CIUDAD - Compatible con tu BD
 const obtenerGananciasPorCiudad = async (req, res) => {
   try {
-    let { desde, hasta, limite = 10 } = req.query;
-    
-    if (!desde || !hasta) {
-      const ahora = new Date();
-      const hace30Dias = new Date();
-      hace30Dias.setDate(ahora.getDate() - 30);
-      
-      desde = desde || hace30Dias.toISOString().split('T')[0];
-      hasta = hasta || ahora.toISOString().split('T')[0];
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
 
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
     const query = `
-      SELECT 
-        COALESCE(v.cliente_ciudad, 'Sin ciudad') as ciudad,
-        COALESCE(v.cliente_provincia, 'Sin provincia') as provincia,
-        COUNT(v.id) as total_ventas,
-        COUNT(DISTINCT v.cliente_id) as clientes_unicos,
-        SUM(v.total) as ingresos_totales,
-        SUM(
-          CASE 
-            WHEN p.costo > 0 AND p.costo IS NOT NULL 
-            THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.25
-          END
-        ) as ganancia_estimada,
-        AVG(v.total) as factura_promedio,
+      WITH ventas_filtradas AS (
+        SELECT
+          v.id,
+          COALESCE(v.cliente_ciudad, 'Sin ciudad') AS ciudad,
+          COALESCE(v.cliente_provincia, 'Sin provincia') AS provincia,
+          v.cliente_id,
+          (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total AS ingreso_neto
+        FROM ventas v
+        WHERE ${whereSql}
+      ),
+      costo_por_venta AS (
+        SELECT
+          v.id AS venta_id,
+          SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)) AS costo_neto
+        FROM ventas v
+        JOIN ventas_cont vc ON vc.venta_id = v.id
+        LEFT JOIN productos p ON p.id = vc.producto_id
+        WHERE ${whereSql}
+        GROUP BY v.id
+      )
+      SELECT
+        vf.ciudad,
+        vf.provincia,
+        SUM(CASE WHEN vf.ingreso_neto > 0 THEN 1 ELSE 0 END) AS total_ventas,
+        COUNT(DISTINCT vf.cliente_id) AS clientes_unicos,
+        ROUND(SUM(vf.ingreso_neto), 2) AS ingresos_totales,
+        ROUND(SUM(vf.ingreso_neto - COALESCE(cv.costo_neto, 0)), 2) AS ganancia_estimada,
+        ROUND(AVG(CASE WHEN vf.ingreso_neto > 0 THEN vf.ingreso_neto END), 2) AS factura_promedio,
         ROUND(
-          (SUM(
-            CASE 
-              WHEN p.costo > 0 AND p.costo IS NOT NULL 
-              THEN (vc.precio - p.costo) * vc.cantidad
-              ELSE vc.precio * vc.cantidad * 0.25
-            END
-          ) / SUM(v.total) * 100), 2
-        ) as margen_promedio
-      FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
-      LEFT JOIN productos p ON vc.producto_id = p.id
-      WHERE v.fecha BETWEEN ? AND ?
-      GROUP BY COALESCE(v.cliente_ciudad, 'Sin ciudad'), COALESCE(v.cliente_provincia, 'Sin provincia')
+          CASE WHEN SUM(vf.ingreso_neto) = 0 THEN 0
+               ELSE (SUM(vf.ingreso_neto - COALESCE(cv.costo_neto, 0)) / SUM(vf.ingreso_neto)) * 100
+          END, 2
+        ) AS margen_promedio
+      FROM ventas_filtradas vf
+      LEFT JOIN costo_por_venta cv ON cv.venta_id = vf.id
+      GROUP BY vf.ciudad, vf.provincia
       ORDER BY ganancia_estimada DESC
-      
+      LIMIT ?
     `;
 
-    const params = [desde, hasta];
+    const data = await ejecutarQuery(query, [...params, ...params, filtros.limite]);
+    const ingresosTotales = data.reduce((acc, item) => acc + Number(item.ingresos_totales || 0), 0);
+    const dataConPorcentaje = data.map(item => ({
+      ...item,
+      porcentaje_ingresos: ingresosTotales > 0 ? Number((Number(item.ingresos_totales) / ingresosTotales) * 100).toFixed(1) : 0
+    }));
 
-    db.query(query, params, (err, results) => {
-      if (err) {
-        console.error('❌ Error obteniendo ganancias por ciudad:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Error al obtener ganancias por ciudad'
-        });
-      }
-
-      // Calcular totales para porcentajes
-      const totalIngresos = results.reduce((acc, item) => acc + parseFloat(item.ingresos_totales), 0);
-      
-      // Agregar porcentajes
-      const dataConPorcentaje = results.map(item => ({
-        ...item,
-        porcentaje_ingresos: totalIngresos > 0 ? 
-          (parseFloat(item.ingresos_totales) / totalIngresos * 100).toFixed(1) : 0
-      }));
-
-      res.json({
-        success: true,
-        data: dataConPorcentaje,
-        info: {
-          total_ciudades: results.length,
-          ciudad_top: results[0]?.ciudad || 'N/A',
-          ingresos_totales: totalIngresos
-        }
-      });
+    res.json({
+      success: true,
+      data: dataConPorcentaje,
+      info: {
+        total_ciudades: data.length,
+        ciudad_top: data[0]?.ciudad || 'N/A',
+        ingresos_totales: ingresosTotales
+      },
+      filtrosAplicados: filtros
     });
-
   } catch (error) {
     console.error('💥 Error en obtenerGananciasPorCiudad:', error);
     res.status(500).json({
@@ -1678,196 +1677,109 @@ const obtenerGananciasPorCiudad = async (req, res) => {
   }
 };
 
-// ✅ RESUMEN FINANCIERO CORREGIDO - Sin duplicación, datos reales
 const obtenerResumenFinanciero = async (req, res) => {
   try {
-    let { desde, hasta } = req.query;
-    
-    console.log('🔍 Obteniendo resumen financiero:', { desde, hasta });
-    
-    // ✅ Autocompletar fechas si no existen (últimos 30 días)
-    if (!desde || !hasta) {
-      const ahora = new Date();
-      const hace30Dias = new Date();
-      hace30Dias.setDate(ahora.getDate() - 30);
-      
-      desde = desde || hace30Dias.toISOString().split('T')[0];
-      hasta = hasta || ahora.toISOString().split('T')[0];
-      
-      console.log('📅 Usando fechas por defecto:', { desde, hasta });
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
-    
-    // Validar fechas
-    const fechaDesde = new Date(desde);
-    const fechaHasta = new Date(hasta);
-    
-    if (isNaN(fechaDesde.getTime()) || isNaN(fechaHasta.getTime())) {
-      return res.status(400).json({
-        success: false,
-        message: 'Formato de fecha inválido. Use YYYY-MM-DD'
-      });
-    }
-    
-    const filtroFecha = 'WHERE fecha BETWEEN ? AND ?';
-    const params = [desde, hasta];
 
-    // ✅ QUERY 1: Ventas (INGRESOS REALES)
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
+    const fechaParams = [filtros.desde, filtros.hasta];
+
     const queryVentas = `
-      SELECT 
-        COUNT(*) as cantidad_ventas,
-        COALESCE(SUM(total), 0) as monto_total_ventas,
-        COALESCE(SUM(subtotal), 0) as subtotal_ventas,
-        COALESCE(SUM(iva_total), 0) as iva_ventas,
-        COALESCE(AVG(total), 0) as ticket_promedio
-      FROM ventas 
-      ${filtroFecha}
-      AND estado = 'Facturada'
+      SELECT
+        SUM(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN 1 ELSE 0 END) AS cantidad_ventas,
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS monto_total_ventas,
+        ROUND(AVG(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN v.total END), 2) AS ticket_promedio
+      FROM ventas v
+      WHERE ${whereSql}
     `;
 
-    // ✅ QUERY 2: Compras (EGRESOS REALES - proveedo res)
+    const queryCostos = `
+      SELECT
+        ROUND(SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS costo_total,
+        COUNT(DISTINCT CASE WHEN p.costo > 0 THEN p.id END) AS productos_con_costo,
+        COUNT(DISTINCT p.id) AS productos_totales
+      FROM ventas v
+      JOIN ventas_cont vc ON vc.venta_id = v.id
+      LEFT JOIN productos p ON p.id = vc.producto_id
+      WHERE ${whereSql}
+    `;
+
     const queryCompras = `
-      SELECT 
-        COUNT(*) as cantidad_compras,
-        COALESCE(SUM(total), 0) as monto_total_compras
-      FROM compras 
-      ${filtroFecha}
+      SELECT
+        COUNT(*) AS cantidad_compras,
+        ROUND(COALESCE(SUM(total), 0), 2) AS monto_total_compras
+      FROM compras
+      WHERE DATE(fecha) >= ? AND DATE(fecha) <= ?
       AND estado != 'Anulada'
     `;
 
-    // ✅ QUERY 3: Gastos (EGRESOS REALES - operativos)
     const queryGastos = `
-      SELECT 
-        COUNT(*) as cantidad_gastos,
-        COALESCE(SUM(monto), 0) as monto_total_gastos
-      FROM gastos 
-      ${filtroFecha}
+      SELECT
+        COUNT(*) AS cantidad_gastos,
+        ROUND(COALESCE(SUM(monto), 0), 2) AS monto_total_gastos
+      FROM gastos
+      WHERE DATE(fecha) >= ? AND DATE(fecha) <= ?
     `;
 
-    // ✅ QUERY 4: Ganancias por producto (solo productos con costo conocido)
-    const queryGanancias = `
-      SELECT 
-        COALESCE(SUM(
-          (vc.precio - COALESCE(p.costo, 0)) * vc.cantidad
-        ), 0) as ganancia_bruta_real,
-        COUNT(DISTINCT CASE WHEN p.costo > 0 THEN p.id END) as productos_con_costo,
-        COUNT(DISTINCT p.id) as productos_totales
-      FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
-      LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha.replace('fecha', 'v.fecha')}
-      AND v.estado = 'Facturada'
-    `;
-
-    // ✅ Ejecutar queries en paralelo
-    const [ventasRes, comprasRes, gastosRes, gananciasRes] = await Promise.all([
-      new Promise((resolve) => {
-        db.query(queryVentas, params, (err, results) => {
-          if (err) {
-            console.error('❌ Error query ventas:', err);
-            resolve({ cantidad_ventas: 0, monto_total_ventas: 0, subtotal_ventas: 0, iva_ventas: 0, ticket_promedio: 0 });
-          } else {
-            resolve(results[0]);
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryCompras, params, (err, results) => {
-          if (err) {
-            console.error('❌ Error query compras:', err);
-            resolve({ cantidad_compras: 0, monto_total_compras: 0 });
-          } else {
-            resolve(results[0]);
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryGastos, params, (err, results) => {
-          if (err) {
-            console.error('❌ Error query gastos:', err);
-            resolve({ cantidad_gastos: 0, monto_total_gastos: 0 });
-          } else {
-            resolve(results[0]);
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryGanancias, params, (err, results) => {
-          if (err) {
-            console.error('❌ Error query ganancias:', err);
-            resolve({ ganancia_bruta_real: 0, productos_con_costo: 0, productos_totales: 0 });
-          } else {
-            resolve(results[0]);
-          }
-        });
-      })
+    const [ventasRow, costosRow, comprasRow, gastosRow] = await Promise.all([
+      ejecutarQuery(queryVentas, params).then(r => r[0] || {}),
+      ejecutarQuery(queryCostos, params).then(r => r[0] || {}),
+      ejecutarQuery(queryCompras, fechaParams).then(r => r[0] || {}),
+      ejecutarQuery(queryGastos, fechaParams).then(r => r[0] || {})
     ]);
 
-    // ✅ CALCULAR MÉTRICAS REALES
-    const ingresos_totales = parseFloat(ventasRes.monto_total_ventas) || 0;
-    const compras_totales = parseFloat(comprasRes.monto_total_compras) || 0;
-    const gastos_totales = parseFloat(gastosRes.monto_total_gastos) || 0;
-    const ganancia_bruta = parseFloat(gananciasRes.ganancia_bruta_real) || 0;
-    
-    // ✅ Total egresos = Compras + Gastos (NO sumar movimientos_fondos porque ya están incluidos)
-    const egresos_totales = compras_totales + gastos_totales;
-    
-    // ✅ Resultado neto = Ingresos - Egresos
-    const resultado_neto = ingresos_totales - egresos_totales;
-    
-    // ✅ Ganancia neta = Ganancia bruta - Gastos operativos
-    const ganancia_neta = ganancia_bruta - gastos_totales;
+    const ingresosTotales = Number(ventasRow.monto_total_ventas || 0);
+    const costoVentas = Number(costosRow.costo_total || 0);
+    const comprasTotales = Number(comprasRow.monto_total_compras || 0);
+    const gastosTotales = Number(gastosRow.monto_total_gastos || 0);
+    const egresosTotales = comprasTotales + gastosTotales;
 
-    // ✅ Respuesta simplificada y clara
+    const gananciaBruta = ingresosTotales - costoVentas;
+    const gananciaNeta = gananciaBruta - gastosTotales;
+    const resultadoNeto = ingresosTotales - egresosTotales;
+
     const resumen = {
       periodo: {
-        desde,
-        hasta,
-        dias: Math.ceil((fechaHasta - fechaDesde) / (1000 * 60 * 60 * 24))
+        desde: filtros.desde,
+        hasta: filtros.hasta,
+        dias: Math.ceil((validacion.h - validacion.d) / (1000 * 60 * 60 * 24)) + 1
       },
       ventas: {
-        cantidad: parseInt(ventasRes.cantidad_ventas) || 0,
-        monto_total: ingresos_totales,
-        subtotal: parseFloat(ventasRes.subtotal_ventas) || 0,
-        iva: parseFloat(ventasRes.iva_ventas) || 0,
-        ticket_promedio: parseFloat(ventasRes.ticket_promedio) || 0
+        cantidad: Number(ventasRow.cantidad_ventas || 0),
+        monto_total: ingresosTotales,
+        ticket_promedio: Number(ventasRow.ticket_promedio || 0)
       },
       egresos: {
         compras: {
-          cantidad: parseInt(comprasRes.cantidad_compras) || 0,
-          monto: compras_totales
+          cantidad: Number(comprasRow.cantidad_compras || 0),
+          monto: comprasTotales
         },
         gastos: {
-          cantidad: parseInt(gastosRes.cantidad_gastos) || 0,
-          monto: gastos_totales
+          cantidad: Number(gastosRow.cantidad_gastos || 0),
+          monto: gastosTotales
         },
-        total: egresos_totales
+        total: egresosTotales
       },
       ganancias: {
-        ganancia_bruta: ganancia_bruta,
-        ganancia_neta: ganancia_neta,
-        margen_bruto: ingresos_totales > 0 ? (ganancia_bruta / ingresos_totales * 100) : 0,
-        margen_neto: ingresos_totales > 0 ? (ganancia_neta / ingresos_totales * 100) : 0,
-        productos_con_costo: parseInt(gananciasRes.productos_con_costo) || 0,
-        productos_totales: parseInt(gananciasRes.productos_totales) || 0
+        ganancia_bruta: gananciaBruta,
+        ganancia_neta: gananciaNeta,
+        margen_bruto: ingresosTotales > 0 ? (gananciaBruta / ingresosTotales) * 100 : 0,
+        margen_neto: ingresosTotales > 0 ? (gananciaNeta / ingresosTotales) * 100 : 0,
+        productos_con_costo: Number(costosRow.productos_con_costo || 0),
+        productos_totales: Number(costosRow.productos_totales || 0)
       },
       resultado: {
-        resultado_neto,
-        rentabilidad: ingresos_totales > 0 ? (resultado_neto / ingresos_totales * 100) : 0,
-        estado: resultado_neto >= 0 ? 'POSITIVO' : 'NEGATIVO'
+        resultado_neto: resultadoNeto,
+        rentabilidad: ingresosTotales > 0 ? (resultadoNeto / ingresosTotales) * 100 : 0,
+        estado: resultadoNeto >= 0 ? 'POSITIVO' : 'NEGATIVO'
       }
     };
 
-    console.log('✅ Resumen financiero calculado:', {
-      ingresos: ingresos_totales,
-      egresos: egresos_totales,
-      resultado: resultado_neto
-    });
-
-    res.json({
-      success: true,
-      data: resumen
-    });
-
+    res.json({ success: true, data: resumen, filtrosAplicados: filtros });
   } catch (error) {
     console.error('💥 Error obteniendo resumen financiero:', error);
     res.status(500).json({
@@ -1878,73 +1790,68 @@ const obtenerResumenFinanciero = async (req, res) => {
 };
 
 
-// ✅ OBTENER GANANCIAS POR EMPLEADO - Compatible con tu BD
 const obtenerGananciasPorEmpleado = async (req, res) => {
   try {
-    let { desde, hasta } = req.query;
-    
-    if (!desde || !hasta) {
-      const ahora = new Date();
-      const primerDiaDelMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
-      
-      desde = desde || primerDiaDelMes.toISOString().split('T')[0];
-      hasta = hasta || ahora.toISOString().split('T')[0];
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
 
-    // ✅ QUERY CORREGIDA SIN DUPLICACIÓN
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
     const query = `
-      SELECT 
-        v.empleado_id,
-        v.empleado_nombre,
-        COUNT(v.id) as total_ventas,
-        SUM(v.total) as ingresos_generados,
-        SUM(ganancias_por_venta.ganancia_venta) as ganancia_generada,
-        AVG(v.total) as factura_promedio,
-        MIN(v.fecha) as primera_venta,
-        MAX(v.fecha) as ultima_venta,
-        COUNT(DISTINCT v.cliente_id) as clientes_atendidos,
-        (SUM(ganancias_por_venta.ganancia_venta) / SUM(v.total) * 100) as margen_promedio
-      FROM ventas v
-      JOIN (
-        SELECT 
-          vc.venta_id,
-          SUM(
-            CASE 
-              WHEN p.costo > 0 AND p.costo IS NOT NULL 
-              THEN (vc.precio - p.costo) * vc.cantidad
-              ELSE vc.precio * vc.cantidad * 0.25
-            END
-          ) as ganancia_venta
-        FROM ventas_cont vc
-        LEFT JOIN productos p ON vc.producto_id = p.id
-        GROUP BY vc.venta_id
-      ) as ganancias_por_venta ON v.id = ganancias_por_venta.venta_id
-      WHERE v.fecha BETWEEN ? AND ?
-      GROUP BY v.empleado_id, v.empleado_nombre
+      WITH ventas_filtradas AS (
+        SELECT
+          v.id,
+          v.empleado_id,
+          COALESCE(NULLIF(v.empleado_nombre, ''), 'Sin vendedor') AS empleado_nombre,
+          v.cliente_id,
+          DATE(COALESCE(v.fecha_fiscal, v.fecha)) AS fecha_ref,
+          (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total AS ingreso_neto
+        FROM ventas v
+        WHERE ${whereSql}
+      ),
+      costo_por_venta AS (
+        SELECT
+          v.id AS venta_id,
+          SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)) AS costo_neto
+        FROM ventas v
+        JOIN ventas_cont vc ON vc.venta_id = v.id
+        LEFT JOIN productos p ON p.id = vc.producto_id
+        WHERE ${whereSql}
+        GROUP BY v.id
+      )
+      SELECT
+        vf.empleado_id,
+        vf.empleado_nombre,
+        SUM(CASE WHEN vf.ingreso_neto > 0 THEN 1 ELSE 0 END) AS total_ventas,
+        ROUND(SUM(vf.ingreso_neto), 2) AS ingresos_generados,
+        ROUND(SUM(vf.ingreso_neto - COALESCE(cv.costo_neto, 0)), 2) AS ganancia_generada,
+        ROUND(AVG(CASE WHEN vf.ingreso_neto > 0 THEN vf.ingreso_neto END), 2) AS factura_promedio,
+        MIN(vf.fecha_ref) AS primera_venta,
+        MAX(vf.fecha_ref) AS ultima_venta,
+        COUNT(DISTINCT vf.cliente_id) AS clientes_atendidos,
+        ROUND(
+          CASE WHEN SUM(vf.ingreso_neto) = 0 THEN 0
+               ELSE (SUM(vf.ingreso_neto - COALESCE(cv.costo_neto, 0)) / SUM(vf.ingreso_neto)) * 100
+          END, 2
+        ) AS margen_promedio
+      FROM ventas_filtradas vf
+      LEFT JOIN costo_por_venta cv ON cv.venta_id = vf.id
+      GROUP BY vf.empleado_id, vf.empleado_nombre
       ORDER BY ganancia_generada DESC
     `;
 
-    const params = [desde, hasta];
-
-    db.query(query, params, (err, results) => {
-      if (err) {
-        console.error('❌ Error obteniendo ganancias por empleado:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Error al obtener ganancias por empleado'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: results,
-        info: {
-          total_empleados: results.length,
-          empleado_top: results[0]?.empleado_nombre || 'N/A'
-        }
-      });
+    const data = await ejecutarQuery(query, [...params, ...params]);
+    res.json({
+      success: true,
+      data,
+      info: {
+        total_empleados: data.length,
+        empleado_top: data[0]?.empleado_nombre || 'N/A'
+      },
+      filtrosAplicados: filtros
     });
-
   } catch (error) {
     console.error('💥 Error en obtenerGananciasPorEmpleado:', error);
     res.status(500).json({
@@ -1954,71 +1861,44 @@ const obtenerGananciasPorEmpleado = async (req, res) => {
   }
 };
 
-// ✅ OBTENER PRODUCTOS MÁS RENTABLES - Compatible con tu BD
 const obtenerProductosMasRentables = async (req, res) => {
   try {
-    const { desde, hasta, limite = 10 } = req.query;
-    
-    let filtroFecha = '';
-    const params = [];
-    
-    if (desde && hasta) {
-      filtroFecha = 'WHERE v.fecha BETWEEN ? AND ?';
-      params.push(desde, hasta);
-    } else if (desde) {
-      filtroFecha = 'WHERE v.fecha >= ?';
-      params.push(desde);
-    } else if (hasta) {
-      filtroFecha = 'WHERE v.fecha <= ?';
-      params.push(hasta);
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
     }
 
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
     const query = `
       SELECT 
         vc.producto_id,
         vc.producto_nombre,
-        p.costo,
-        AVG(vc.precio) as precio_promedio,
-        SUM(vc.cantidad) as cantidad_vendida,
-        SUM(vc.precio * vc.cantidad) as ingresos_producto,
-        SUM(
-          CASE 
-            WHEN p.costo > 0 THEN (vc.precio - p.costo) * vc.cantidad
-            ELSE vc.precio * vc.cantidad * 0.3
-          END
-        ) as ganancia_total,
-        (
-          CASE 
-            WHEN p.costo > 0 THEN AVG((vc.precio - p.costo) / vc.precio * 100)
-            ELSE 30.0
-          END
-        ) as margen_porcentaje
+        ROUND(AVG(vc.precio), 2) AS precio_promedio,
+        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS cantidad_vendida,
+        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ingresos_producto,
+        ROUND(SUM((vc.precio - COALESCE(p.costo, 0)) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ganancia_total,
+        ROUND(
+          CASE WHEN SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)) = 0 THEN 0
+               ELSE (
+                 SUM((vc.precio - COALESCE(p.costo, 0)) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END))
+                 /
+                 SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END))
+               ) * 100
+          END, 2
+        ) AS margen_porcentaje
       FROM ventas_cont vc
       JOIN ventas v ON vc.venta_id = v.id
       LEFT JOIN productos p ON vc.producto_id = p.id
-      ${filtroFecha}
-      GROUP BY vc.producto_id, vc.producto_nombre, p.costo
-      HAVING cantidad_vendida >= 2
+      WHERE ${whereSql}
+      GROUP BY vc.producto_id, vc.producto_nombre
+      HAVING cantidad_vendida > 0
       ORDER BY margen_porcentaje DESC, ganancia_total DESC
+      LIMIT ?
     `;
 
-    
-
-    db.query(query, params, (err, results) => {
-      if (err) {
-        console.error('Error obteniendo productos más rentables:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Error al obtener productos más rentables'
-        });
-      }
-
-      res.json({
-        success: true,
-        data: results
-      });
-    });
-
+    const data = await ejecutarQuery(query, [...params, filtros.limite]);
+    res.json({ success: true, data, filtrosAplicados: filtros });
   } catch (error) {
     console.error('Error obteniendo productos más rentables:', error);
     res.status(500).json({
@@ -2104,211 +1984,246 @@ const verificarDisponibilidadDatos = async (req, res) => {
   }
 };
 
-// ✅ NUEVO: Dashboard completo simplificado - UNA SOLA LLAMADA
 const obtenerDashboardSimplificado = async (req, res) => {
   try {
-    let { desde, hasta } = req.query;
-    
-    // ✅ Autocompletar fechas si no existen
-    const ahora = new Date();
-    const hace30Dias = new Date();
-    hace30Dias.setDate(ahora.getDate() - 30);
-    
-    desde = desde || hace30Dias.toISOString().split('T')[0];
-    hasta = hasta || ahora.toISOString().split('T')[0];
-    
-    console.log('📊 Generando dashboard completo:', { desde, hasta });
-    
-    const params = [desde, hasta];
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
 
-    // ✅ QUERY 1: Resumen General
-    const queryResumen = `
-      SELECT 
-        (SELECT COUNT(*) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as cant_ventas,
-        (SELECT COALESCE(SUM(total), 0) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as monto_ventas,
-        (SELECT COALESCE(SUM(total), 0) FROM compras WHERE fecha BETWEEN ? AND ? AND estado != 'Anulada') as monto_compras,
-        (SELECT COALESCE(SUM(monto), 0) FROM gastos WHERE fecha BETWEEN ? AND ?) as monto_gastos
+    const { whereSql, params } = construirWhereVentas(filtros, 'v');
+    const diasPeriodo = Math.ceil((validacion.h - validacion.d) / (1000 * 60 * 60 * 24)) + 1;
+    const fechaDesdeAnterior = new Date(validacion.d);
+    fechaDesdeAnterior.setDate(fechaDesdeAnterior.getDate() - diasPeriodo);
+    const fechaHastaAnterior = new Date(validacion.d);
+    fechaHastaAnterior.setDate(fechaHastaAnterior.getDate() - 1);
+    const filtrosAnterior = {
+      ...filtros,
+      desde: fechaDesdeAnterior.toISOString().split('T')[0],
+      hasta: fechaHastaAnterior.toISOString().split('T')[0]
+    };
+    const whereAnterior = construirWhereVentas(filtrosAnterior, 'v');
+
+    const queryVentas = `
+      SELECT
+        SUM(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN 1 ELSE 0 END) AS cantidad_ventas,
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS monto_ventas,
+        ROUND(AVG(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN v.total END), 2) AS ticket_promedio
+      FROM ventas v
+      WHERE ${whereSql}
     `;
 
-    // ✅ QUERY 2: Top 5 Productos Más Vendidos
-    const queryTopProductos = `
-      SELECT 
-        vc.producto_nombre,
-        SUM(vc.cantidad) as cantidad_vendida,
-        SUM(vc.precio * vc.cantidad) as ingresos_generados,
-        COUNT(DISTINCT v.id) as ventas_realizadas
+    const queryVentasAnterior = `
+      SELECT
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS monto_ventas
       FROM ventas v
-      JOIN ventas_cont vc ON v.id = vc.venta_id
-      WHERE v.fecha BETWEEN ? AND ?
-        AND v.estado = 'Facturada'
+      WHERE ${whereAnterior.whereSql}
+    `;
+
+    const queryCostos = `
+      SELECT
+        ROUND(SUM(COALESCE(p.costo, 0) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS costo_ventas
+      FROM ventas v
+      JOIN ventas_cont vc ON vc.venta_id = v.id
+      LEFT JOIN productos p ON p.id = vc.producto_id
+      WHERE ${whereSql}
+    `;
+
+    const queryComprasYGastos = `
+      SELECT
+        (SELECT ROUND(COALESCE(SUM(total), 0), 2) FROM compras WHERE DATE(fecha) >= ? AND DATE(fecha) <= ? AND estado != 'Anulada') AS compras_total,
+        (SELECT ROUND(COALESCE(SUM(monto), 0), 2) FROM gastos WHERE DATE(fecha) >= ? AND DATE(fecha) <= ?) AS gastos_total
+    `;
+
+    const queryTopProductos = `
+      SELECT
+        vc.producto_nombre,
+        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS cantidad_vendida,
+        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ingresos_generados,
+        ROUND(SUM((vc.precio - COALESCE(p.costo, 0)) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ganancia_generada
+      FROM ventas v
+      JOIN ventas_cont vc ON vc.venta_id = v.id
+      LEFT JOIN productos p ON p.id = vc.producto_id
+      WHERE ${whereSql}
       GROUP BY vc.producto_nombre
-      ORDER BY cantidad_vendida DESC
+      HAVING cantidad_vendida > 0
+      ORDER BY ganancia_generada DESC
       LIMIT 5
     `;
 
-    // ✅ QUERY 3: Ventas por Vendedor
     const queryVendedores = `
-      SELECT 
-        empleado_nombre,
-        COUNT(*) as cantidad_ventas,
-        SUM(total) as monto_total_ventas,
-        AVG(total) as ticket_promedio
-      FROM ventas
-      WHERE fecha BETWEEN ? AND ?
-        AND estado = 'Facturada'
-        AND empleado_nombre IS NOT NULL
-      GROUP BY empleado_nombre
+      SELECT
+        COALESCE(NULLIF(v.empleado_nombre, ''), 'Sin vendedor') AS empleado_nombre,
+        SUM(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN 1 ELSE 0 END) AS cantidad_ventas,
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS monto_total_ventas,
+        ROUND(AVG(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN v.total END), 2) AS ticket_promedio
+      FROM ventas v
+      WHERE ${whereSql}
+      GROUP BY COALESCE(NULLIF(v.empleado_nombre, ''), 'Sin vendedor')
       ORDER BY monto_total_ventas DESC
+      LIMIT 10
     `;
 
-    // ✅ QUERY 4: Comparación con Período Anterior
-    const diasPeriodo = Math.ceil((new Date(hasta) - new Date(desde)) / (1000 * 60 * 60 * 24));
-    const fechaDesdeAnterior = new Date(desde);
-    fechaDesdeAnterior.setDate(fechaDesdeAnterior.getDate() - diasPeriodo);
-    const fechaHastaAnterior = new Date(desde);
-    fechaHastaAnterior.setDate(fechaHastaAnterior.getDate() - 1);
-    
-    const queryComparacion = `
-      SELECT 
-        (SELECT COUNT(*) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as cant_ventas_anterior,
-        (SELECT COALESCE(SUM(total), 0) FROM ventas WHERE fecha BETWEEN ? AND ? AND estado = 'Facturada') as monto_ventas_anterior
+    const queryClientes = `
+      SELECT
+        COALESCE(NULLIF(v.cliente_nombre, ''), 'Sin cliente') AS cliente_nombre,
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS monto_total,
+        SUM(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN 1 ELSE 0 END) AS cantidad_ventas,
+        ROUND(AVG(CASE WHEN (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total > 0 THEN v.total END), 2) AS ticket_promedio
+      FROM ventas v
+      WHERE ${whereSql}
+      GROUP BY COALESCE(NULLIF(v.cliente_nombre, ''), 'Sin cliente')
+      ORDER BY monto_total DESC
+      LIMIT 10
     `;
 
-    // ✅ Ejecutar todas las queries en paralelo
-    const [resumenRes, topProductosRes, vendedoresRes, comparacionRes] = await Promise.all([
-      new Promise((resolve) => {
-        db.query(queryResumen, [...params, ...params, ...params, ...params], (err, results) => {
-          if (err) {
-            console.error('❌ Error query resumen:', err);
-            resolve([{ cant_ventas: 0, monto_ventas: 0, monto_compras: 0, monto_gastos: 0 }]);
-          } else {
-            resolve(results);
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryTopProductos, params, (err, results) => {
-          if (err) {
-            console.error('❌ Error query top productos:', err);
-            resolve([]);
-          } else {
-            resolve(results);
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        db.query(queryVendedores, params, (err, results) => {
-          if (err) {
-            console.error('❌ Error query vendedores:', err);
-            resolve([]);
-          } else {
-            resolve(results);
-          }
-        });
-      }),
-      new Promise((resolve) => {
-        const paramsComparacion = [
-          fechaDesdeAnterior.toISOString().split('T')[0],
-          fechaHastaAnterior.toISOString().split('T')[0],
-          fechaDesdeAnterior.toISOString().split('T')[0],
-          fechaHastaAnterior.toISOString().split('T')[0]
-        ];
-        db.query(queryComparacion, paramsComparacion, (err, results) => {
-          if (err) {
-            console.error('❌ Error query comparación:', err);
-            resolve([{ cant_ventas_anterior: 0, monto_ventas_anterior: 0 }]);
-          } else {
-            resolve(results);
-          }
-        });
-      })
+    const queryCiudades = `
+      SELECT
+        COALESCE(v.cliente_ciudad, 'Sin ciudad') AS ciudad,
+        COALESCE(v.cliente_provincia, 'Sin provincia') AS provincia,
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS monto_total,
+        COUNT(DISTINCT v.cliente_id) AS clientes_unicos
+      FROM ventas v
+      WHERE ${whereSql}
+      GROUP BY COALESCE(v.cliente_ciudad, 'Sin ciudad'), COALESCE(v.cliente_provincia, 'Sin provincia')
+      ORDER BY monto_total DESC
+      LIMIT 10
+    `;
+
+    const queryCuentas = `
+      SELECT
+        cf.id,
+        cf.nombre,
+        ROUND(SUM((CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END) * v.total), 2) AS facturacion_neta
+      FROM ventas v
+      JOIN cuenta_fondos cf ON cf.id = v.cuenta_id
+      WHERE ${whereSql}
+      GROUP BY cf.id, cf.nombre
+      ORDER BY facturacion_neta DESC
+    `;
+
+    const [ventasRow, ventasAnteriorRow, costosRow, comprasGastosRow, topProductos, vendedores, clientes, ciudades, cuentas] = await Promise.all([
+      ejecutarQuery(queryVentas, params).then(r => r[0] || {}),
+      ejecutarQuery(queryVentasAnterior, whereAnterior.params).then(r => r[0] || {}),
+      ejecutarQuery(queryCostos, params).then(r => r[0] || {}),
+      ejecutarQuery(queryComprasYGastos, [filtros.desde, filtros.hasta, filtros.desde, filtros.hasta]).then(r => r[0] || {}),
+      ejecutarQuery(queryTopProductos, params),
+      ejecutarQuery(queryVendedores, params),
+      ejecutarQuery(queryClientes, params),
+      ejecutarQuery(queryCiudades, params),
+      ejecutarQuery(queryCuentas, params)
     ]);
 
-    // ✅ Procesar resultados
-    const resumen = resumenRes[0];
-    const ingresos = parseFloat(resumen.monto_ventas) || 0;
-    const compras = parseFloat(resumen.monto_compras) || 0;
-    const gastos = parseFloat(resumen.monto_gastos) || 0;
-    const egresos = compras + gastos;
-    const resultado = ingresos - egresos;
+    const ventasMonto = Number(ventasRow.monto_ventas || 0);
+    const ventasCantidad = Number(ventasRow.cantidad_ventas || 0);
+    const costoVentas = Number(costosRow.costo_ventas || 0);
+    const comprasTotal = Number(comprasGastosRow.compras_total || 0);
+    const gastosTotal = Number(comprasGastosRow.gastos_total || 0);
+    const egresosTotal = comprasTotal + gastosTotal;
+    const margenBruto = ventasMonto - costoVentas;
+    const margenNeto = margenBruto - gastosTotal;
+    const resultadoNeto = ventasMonto - egresosTotal;
 
-    // ✅ Comparación
-    const comparacion = comparacionRes[0];
-    const montosAnterior = parseFloat(comparacion.monto_ventas_anterior) || 0;
-    const diferenciaVentas = ingresos - montosAnterior;
-    const porcentajeCambio = montosAnterior > 0 ? ((diferenciaVentas / montosAnterior) * 100) : 0;
+    const ventasAnterior = Number(ventasAnteriorRow.monto_ventas || 0);
+    const diferencia = ventasMonto - ventasAnterior;
+    const porcentajeCambio = ventasAnterior > 0 ? (diferencia / ventasAnterior) * 100 : 0;
 
-    // ✅ Respuesta unificada
     const dashboard = {
       periodo: {
-        desde,
-        hasta,
+        desde: filtros.desde,
+        hasta: filtros.hasta,
         dias: diasPeriodo
+      },
+      kpis: {
+        facturacion_neta: ventasMonto,
+        cantidad_ventas: ventasCantidad,
+        ticket_promedio: Number(ventasRow.ticket_promedio || 0),
+        margen_bruto: margenBruto,
+        margen_neto: margenNeto,
+        compras_total: comprasTotal,
+        gastos_total: gastosTotal,
+        resultado_neto: resultadoNeto
       },
       resumen: {
         ventas: {
-          cantidad: parseInt(resumen.cant_ventas) || 0,
-          monto: ingresos
+          cantidad: ventasCantidad,
+          monto: ventasMonto,
+          ticket_promedio: Number(ventasRow.ticket_promedio || 0)
         },
         egresos: {
-          compras: compras,
-          gastos: gastos,
-          total: egresos
+          compras: comprasTotal,
+          gastos: gastosTotal,
+          total: egresosTotal
         },
-        resultado_neto: resultado,
-        estado: resultado >= 0 ? 'GANANCIA' : 'PÉRDIDA'
+        ganancias: {
+          bruta: margenBruto,
+          neta: margenNeto,
+          margen_bruto: ventasMonto > 0 ? (margenBruto / ventasMonto) * 100 : 0,
+          margen_neto: ventasMonto > 0 ? (margenNeto / ventasMonto) * 100 : 0
+        },
+        resultado_neto: resultadoNeto,
+        estado: resultadoNeto >= 0 ? 'GANANCIA' : 'PERDIDA'
       },
       comparacion_periodo_anterior: {
-        ventas_actuales: ingresos,
-        ventas_anteriores: montosAnterior,
-        diferencia: diferenciaVentas,
+        ventas_actuales: ventasMonto,
+        ventas_anteriores: ventasAnterior,
+        diferencia,
         porcentaje_cambio: porcentajeCambio,
-        tendencia: porcentajeCambio > 0 ? 'MEJORA' : porcentajeCambio < 0 ? 'DISMINUCIÓN' : 'IGUAL'
+        tendencia: porcentajeCambio > 0 ? 'MEJORA' : porcentajeCambio < 0 ? 'DISMINUCION' : 'IGUAL'
       },
-      top_productos: topProductosRes.map(p => ({
+      top_productos: topProductos.map(p => ({
         nombre: p.producto_nombre,
-        cantidad_vendida: parseFloat(p.cantidad_vendida),
-        ingresos: parseFloat(p.ingresos_generados),
-        ventas: parseInt(p.ventas_realizadas)
+        cantidad_vendida: Number(p.cantidad_vendida || 0),
+        ingresos: Number(p.ingresos_generados || 0),
+        ganancia: Number(p.ganancia_generada || 0)
       })),
-      vendedores: vendedoresRes.map(v => ({
+      vendedores: vendedores.map(v => ({
         nombre: v.empleado_nombre,
-        cantidad_ventas: parseInt(v.cantidad_ventas),
-        monto_total: parseFloat(v.monto_total_ventas),
-        ticket_promedio: parseFloat(v.ticket_promedio)
+        cantidad_ventas: Number(v.cantidad_ventas || 0),
+        monto_total: Number(v.monto_total_ventas || 0),
+        ticket_promedio: Number(v.ticket_promedio || 0)
+      })),
+      clientes: clientes.map(c => ({
+        nombre: c.cliente_nombre,
+        monto_total: Number(c.monto_total || 0),
+        cantidad_ventas: Number(c.cantidad_ventas || 0),
+        ticket_promedio: Number(c.ticket_promedio || 0)
+      })),
+      ciudades: ciudades.map(c => ({
+        ciudad: c.ciudad,
+        provincia: c.provincia,
+        monto_total: Number(c.monto_total || 0),
+        clientes_unicos: Number(c.clientes_unicos || 0)
+      })),
+      cuentas: cuentas.map(c => ({
+        id: c.id,
+        nombre: c.nombre,
+        facturacion_neta: Number(c.facturacion_neta || 0)
       })),
       alertas: []
     };
 
-    // ✅ Generar alertas automáticas
-    if (resultado < 0) {
+    if (resultadoNeto < 0) {
       dashboard.alertas.push({
-        tipo: 'CRÍTICO',
-        mensaje: `Resultado negativo: Se perdieron $${Math.abs(resultado).toFixed(2)} en este período`
+        tipo: 'CRITICO',
+        mensaje: `Resultado neto negativo: ${Math.abs(resultadoNeto).toFixed(2)}`
       });
     }
-    
     if (porcentajeCambio < -20) {
       dashboard.alertas.push({
         tipo: 'ADVERTENCIA',
-        mensaje: `Las ventas bajaron ${Math.abs(porcentajeCambio).toFixed(1)}% respecto al período anterior`
+        mensaje: `Facturacion en baja ${Math.abs(porcentajeCambio).toFixed(1)}% vs periodo anterior`
       });
     }
-
-    if (resumen.cant_ventas === 0) {
+    if (ventasCantidad === 0) {
       dashboard.alertas.push({
         tipo: 'INFO',
-        mensaje: 'No hay ventas registradas en este período'
+        mensaje: 'No hay ventas registradas para el filtro actual'
       });
     }
 
-    console.log('✅ Dashboard completo generado exitosamente');
-
-    res.json({
-      success: true,
-      data: dashboard
-    });
-
+    res.json({ success: true, data: dashboard, filtrosAplicados: filtros });
   } catch (error) {
     console.error('💥 Error generando dashboard:', error);
     res.status(500).json({

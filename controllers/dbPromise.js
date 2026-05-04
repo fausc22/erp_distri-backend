@@ -8,19 +8,24 @@ class DatabaseManager {
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
         this.reconnectDelay = 5000; // 5 segundos
+        // ✅ Guardar configuración para acceso posterior
+        this.poolConfig = {
+            connectionLimit: 10,
+            queueLimit: 0
+        };
         
         this.initializePool();
     }
 
     initializePool() {
         try {
-            this.pool = mysql.createPool({
+            // ✅ Guardar configuración antes de crear el pool
+            this.poolConfig = {
                 host: process.env.DB_HOST,
                 user: process.env.DB_USER,
                 password: process.env.DB_PASSWORD,
                 database: process.env.DB_DATABASE,
                 port: process.env.DB_PORT || 3306,
-                // ✅ Configuraciones VÁLIDAS para mysql2
                 waitForConnections: true,
                 connectionLimit: 10,
                 maxIdle: 10,
@@ -30,10 +35,13 @@ class DatabaseManager {
                 keepAliveInitialDelay: 0,
                 charset: 'utf8mb4',
                 timezone: 'local',
-                // ✅ Configuraciones específicas de mysql2
+                connectTimeout: 10000,
+                // ✅ FIX: Removidas opciones inválidas (acquireTimeout y timeout no son válidas en mysql2)
                 multipleStatements: false,
                 namedPlaceholders: false
-            });
+            };
+            
+            this.pool = mysql.createPool(this.poolConfig);
 
             // ✅ Manejar eventos del pool
             this.pool.on('connection', (connection) => {
@@ -102,12 +110,24 @@ class DatabaseManager {
                     throw new Error('Pool de base de datos no inicializado');
                 }
 
-                const [results] = await this.pool.execute(query, params);
+                // ✅ FASE 1: Timeout adicional para queries largas (30 segundos)
+                const queryPromise = this.pool.execute(query, params);
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Query timeout: la consulta excedió 30 segundos')), 30000);
+                });
+
+                const [results] = await Promise.race([queryPromise, timeoutPromise]);
                 return [results];
 
             } catch (error) {
                 currentRetry++;
                 console.error(`❌ Error en consulta MySQL (intento ${currentRetry}/${maxRetries}):`, error.message);
+
+                // ✅ FASE 1: Manejar timeout específicamente
+                if (error.message.includes('timeout')) {
+                    console.error('⏱️ Query timeout - consulta muy lenta o bloqueada');
+                    throw new Error('La consulta está tardando demasiado. Por favor, intente nuevamente.');
+                }
 
                 // Si es un error de conexión y no hemos agotado los reintentos
                 if ((error.code === 'PROTOCOL_CONNECTION_LOST' || 
@@ -159,9 +179,9 @@ class DatabaseManager {
             isConnected: this.isConnected,
             reconnectAttempts: this.reconnectAttempts,
             poolExists: !!this.pool,
-            poolConfig: this.pool ? {
-                connectionLimit: this.pool.config.connectionLimit,
-                queueLimit: this.pool.config.queueLimit
+            poolConfig: this.poolConfig ? {
+                connectionLimit: this.poolConfig.connectionLimit || 10,
+                queueLimit: this.poolConfig.queueLimit || 0
             } : null
         };
     }
@@ -172,13 +192,27 @@ class DatabaseManager {
             return { error: 'Pool no inicializado' };
         }
 
-        return {
-            totalConnections: this.pool._allConnections?.length || 0,
-            freeConnections: this.pool._freeConnections?.length || 0,
-            acquiringConnections: this.pool._acquiringConnections?.length || 0,
-            connectionLimit: this.pool.config.connectionLimit,
-            queueLimit: this.pool.config.queueLimit
-        };
+        try {
+            // ✅ Acceder a propiedades internas del pool de forma segura
+            const allConnections = this.pool._allConnections || [];
+            const freeConnections = this.pool._freeConnections || [];
+            const acquiringConnections = this.pool._acquiringConnections || [];
+            
+            // ✅ Usar configuración guardada en lugar de this.pool.config
+            return {
+                totalConnections: allConnections.length,
+                freeConnections: freeConnections.length,
+                acquiringConnections: acquiringConnections.length,
+                connectionLimit: this.poolConfig?.connectionLimit || 10,
+                queueLimit: this.poolConfig?.queueLimit || 0
+            };
+        } catch (error) {
+            console.error('❌ Error obteniendo estadísticas del pool:', error);
+            return {
+                error: 'Error al obtener estadísticas',
+                message: error.message
+            };
+        }
     }
 }
 

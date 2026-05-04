@@ -10,6 +10,16 @@ router.get('/obtener-ventas',
     ventasController.obtenerVentas
 );
 
+router.get('/datos-filtros',
+    requireEmployee,
+    ventasController.obtenerDatosFiltros
+);
+
+router.get('/sugerencias-filtros',
+    requireEmployee,
+    ventasController.obtenerSugerenciasFiltros
+);
+
 router.get('/obtener-venta/:ventaId', 
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas' }),
@@ -74,6 +84,11 @@ router.post('/venta-directa',
     requireManager,  // ✅ SOLO GERENTES
     middlewareAuditoria({ accion: 'INSERT', tabla: 'venta_directa', incluirBody: true }),
     ventasController.ventaDirecta
+);
+
+router.post('/duplicar-venta/:id',
+    middlewareAuditoria({ accion: 'INSERT', tabla: 'ventas', incluirBody: true }),
+    ventasController.duplicarVentaBorrador
 );
 
 module.exports = router;

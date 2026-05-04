@@ -142,11 +142,16 @@ export function formatearDocumento(documento) {
  */
 export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVenta) {
   const condicionIVAReceptor = datosUsuario.cliente.condicionIVA;
+  const receptorEsExento = esExento(condicionIVAReceptor);
+  const toNumber = (value, fallback = 0) => {
+    const n = parseFloat(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
   
   // 1. Calcular totales considerando si es exento
   const totales = calcularTotales(datosUsuario.items, condicionIVAReceptor);
   
-  // 2. Agrupar IVA por alícuota (vacío si es exento)
+  // 2. Agrupar IVA por alícuota (base inicial desde items)
   const ivaAgrupado = agruparIVAPorAlicuota(datosUsuario.items, condicionIVAReceptor);
   
   // 3. Formatear documento del cliente
@@ -156,7 +161,63 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
   const fecha = datosUsuario.fecha 
     ? (typeof datosUsuario.fecha === 'number' ? datosUsuario.fecha : dateAFormatoARCA(datosUsuario.fecha))
     : obtenerFechaActual();
+
+  // 4.1 Resolver importes finales (prioriza importes explícitos enviados desde ventas)
+  const impTotConc = toNumber(datosUsuario.impTotConc, 0);
+  const impTrib = toNumber(datosUsuario.impTrib, 0);
+  let impNeto = redondear(toNumber(datosUsuario.impNeto, totales.totalNeto));
+  let impIVA = redondear(toNumber(datosUsuario.impIVA, totales.totalIVA));
+  let impOpEx = redondear(toNumber(datosUsuario.impOpEx, 0));
+  const impTotalInput = Number.isFinite(parseFloat(datosUsuario.impTotal))
+    ? redondear(parseFloat(datosUsuario.impTotal))
+    : null;
+
+  // Reglas actuales de esta integración: receptor exento viaja con ImpIVA=0 y diferencial en ImpOpEx
+  if (receptorEsExento) {
+    impIVA = 0;
+  }
+
+  // Para no exentos, priorizar consistencia fiscal entre cabecera e Iva.
+  // Si la cabecera redondeada no coincide con el detalle por alícuota, usar detalle.
+  if (!receptorEsExento && ivaAgrupado.length > 0) {
+    const sumaBaseAlic = redondear(ivaAgrupado.reduce((acc, al) => acc + (parseFloat(al.BaseImp) || 0), 0));
+    const sumaIvaAlic = redondear(ivaAgrupado.reduce((acc, al) => acc + (parseFloat(al.Importe) || 0), 0));
+    if (Math.abs(sumaBaseAlic - impNeto) > 0.01 || Math.abs(sumaIvaAlic - impIVA) > 0.01) {
+      impNeto = sumaBaseAlic;
+      impIVA = sumaIvaAlic;
+    }
+  }
+
+  // Si llega ImpTotal explícito y no cierra la suma:
+  // - Exentos: ajustar ImpOpEx (regla actual de integración)
+  // - No exentos: usar total consistente con cabecera fiscal calculada
+  if (impTotalInput !== null) {
+    const sumaActual = redondear(impNeto + impIVA + impTotConc + impOpEx + impTrib);
+    const diferencia = redondear(impTotalInput - sumaActual);
+    if (receptorEsExento && Math.abs(diferencia) > 0.01) {
+      impOpEx = redondear(Math.max(0, impOpEx + diferencia));
+    }
+  }
+
+  const sumaComponentes = redondear(impNeto + impIVA + impTotConc + impOpEx + impTrib);
+  const impTotal = (impTotalInput !== null && receptorEsExento)
+    ? impTotalInput
+    : sumaComponentes;
   
+  // 4.2 Construir bloque Iva alineado a la cabecera fiscal.
+  // Si existe diferencia entre detalle y cabecera, ARCA debe seguir cabecera.
+  let ivaFinal = ivaAgrupado;
+  if (receptorEsExento) {
+    ivaFinal = [{
+      Id: 3,
+      BaseImp: impNeto,
+      Importe: 0
+    }];
+  } else if (ivaAgrupado.length > 0) {
+    // Para no exentos, conservar el detalle por alícuotas proveniente de items.
+    ivaFinal = ivaAgrupado;
+  }
+
   // 5. Construir objeto en formato ARCA
   const datosARCA = {
     CantReg: 1,
@@ -168,20 +229,20 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     CbteDesde: numeroComprobante,
     CbteHasta: numeroComprobante,
     CbteFch: fecha,
-    ImpTotal: totales.total,
-    ImpTotConc: datosUsuario.impTotConc || 0,
-    ImpNeto: totales.totalNeto,
-    ImpOpEx: datosUsuario.impOpEx || 0,
-    ImpIVA: totales.totalIVA,
-    ImpTrib: datosUsuario.impTrib || 0,
+    ImpTotal: impTotal,
+    ImpTotConc: impTotConc,
+    ImpNeto: impNeto,
+    ImpOpEx: impOpEx,
+    ImpIVA: impIVA,
+    ImpTrib: impTrib,
     MonId: datosUsuario.moneda || 'PES',
     MonCotiz: datosUsuario.cotizacionMoneda || 1,
     CondicionIVAReceptorId: condicionIVAReceptor
   };
 
-  if (ivaAgrupado.length > 0) {
-  datosARCA.Iva = ivaAgrupado;
-}
+  if (ivaFinal.length > 0) {
+    datosARCA.Iva = ivaFinal;
+  }
   
   // 6. Agregar fechas de servicio si corresponde
   if (datosUsuario.fechaServicioDesde && datosUsuario.fechaServicioHasta) {

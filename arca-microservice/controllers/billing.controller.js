@@ -351,6 +351,104 @@ class BillingController {
     }
   }
 
+  /**
+   * POST /api/consulta-contribuyente
+   * Consulta datos del contribuyente en AFIP por DNI o CUIT (Padrón / Constancia).
+   * Body: { dni?: string, cuit?: string } (uno de los dos).
+   */
+  async consultaContribuyente(req, res) {
+    try {
+      const { dni, cuit } = req.body || {};
+      const cuitLimpio = cuit != null ? String(cuit).replace(/\D/g, '') : '';
+      const dniLimpio = dni != null ? String(dni).replace(/\D/g, '') : '';
+
+      if (cuitLimpio && dniLimpio) {
+        return res.status(400).json({
+          success: false,
+          message: 'Envíe solo DNI o solo CUIT, no ambos.'
+        });
+      }
+      if (!cuitLimpio && !dniLimpio) {
+        return res.status(400).json({
+          success: false,
+          message: 'Debe enviar DNI (7 u 8 dígitos) o CUIT (11 dígitos).'
+        });
+      }
+
+      if (cuitLimpio.length === 11) {
+        const personaReturn = await afipService.getDatosConstancia(cuitLimpio);
+        if (!personaReturn) {
+          return res.status(404).json({
+            success: false,
+            message: 'No se encontró el contribuyente en AFIP con ese CUIT.'
+          });
+        }
+        const data = afipService.mapConstanciaToCliente(personaReturn);
+        return res.json({ success: true, data });
+      }
+
+      if (cuitLimpio.length > 0 && cuitLimpio.length !== 11) {
+        return res.status(400).json({
+          success: false,
+          message: 'El CUIT debe tener 11 dígitos.'
+        });
+      }
+
+      if (dniLimpio.length < 7 || dniLimpio.length > 8) {
+        return res.status(400).json({
+          success: false,
+          message: 'El DNI debe tener 7 u 8 dígitos.'
+        });
+      }
+
+      const cuitObtenido = await afipService.getCuitPorDni(dniLimpio);
+      if (!cuitObtenido) {
+        return res.json({
+          success: true,
+          data: {
+            nombre: '',
+            cuit: '',
+            dni: dniLimpio,
+            condicion_iva: 'Consumidor Final',
+            direccion: '',
+            ciudad: '',
+            provincia: ''
+          },
+          message: 'No encontrado en padrón AFIP. Se puede guardar como Consumidor Final; complete el nombre.'
+        });
+      }
+
+      const personaReturn = await afipService.getDatosConstancia(cuitObtenido);
+      if (!personaReturn) {
+        return res.json({
+          success: true,
+          data: {
+            nombre: '',
+            cuit: cuitObtenido.length === 11
+              ? `${cuitObtenido.slice(0, 2)}-${cuitObtenido.slice(2, 10)}-${cuitObtenido.slice(10)}`
+              : cuitObtenido,
+            dni: dniLimpio,
+            condicion_iva: 'Consumidor Final',
+            direccion: '',
+            ciudad: '',
+            provincia: ''
+          },
+          message: 'CUIT encontrado pero sin datos de constancia. Complete los datos manualmente.'
+        });
+      }
+
+      const data = afipService.mapConstanciaToCliente(personaReturn, dniLimpio);
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error consulta contribuyente AFIP:', error.message);
+      const status = (error.status >= 400 && error.status < 600) ? error.status : 503;
+      const message = error.data?.message || error.data?.error || error.message;
+      res.status(status).json({
+        success: false,
+        message: message.includes('AFIP') || message.includes('timeout') ? message : `Error al consultar AFIP: ${message}`
+      });
+    }
+  }
 
   /**
  * POST /api/notas-credito/tipo-a

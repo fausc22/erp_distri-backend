@@ -1,13 +1,15 @@
 const fs = require('fs');
+const path = require('path');
 const mysql = require('mysql2/promise');
 const XLSX = require('xlsx');
 
 // Configuración de la base de datos
 const dbConfig = {
-    host: 'localhost',
-    user: 'root',
-    password: '251199',
-    database: 'erp_distri',
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '251199',
+    database: process.env.DB_DATABASE || 'erp_distri',
+    port: process.env.DB_PORT ? Number(process.env.DB_PORT) : 3306,
     charset: 'utf8mb4'
 };
 
@@ -269,6 +271,14 @@ class ExcelProductUpdater {
             console.log(`⚠️ Productos omitidos (datos inválidos): ${productsSkipped}`);
             console.log('='.repeat(50));
 
+            return {
+                total: data.length,
+                inserted: productsInserted,
+                updated: productsUpdated,
+                noChange: productsNoChange,
+                skipped: productsSkipped
+            };
+
         } catch (error) {
             console.error('❌ Error al procesar Excel:', error.message);
             throw error;
@@ -276,29 +286,50 @@ class ExcelProductUpdater {
     }
 }
 
-// Función principal
-async function main() {
+function resolveExcelPath(customExcelPath) {
+    if (customExcelPath) {
+        if (path.isAbsolute(customExcelPath)) {
+            return customExcelPath;
+        }
+        return path.resolve(process.cwd(), customExcelPath);
+    }
+
+    const defaultPaths = [
+        path.resolve(process.cwd(), 'scripts/productosnuevos.xlsx'),
+        path.resolve(process.cwd(), 'storage/comprobantes/productosnuevos.xlsx'),
+        path.resolve(__dirname, 'productosnuevos.xlsx')
+    ];
+
+    return defaultPaths.find((candidatePath) => fs.existsSync(candidatePath)) || defaultPaths[0];
+}
+
+// Función principal reutilizable (CLI + endpoint)
+async function runUpdateScript(options = {}) {
     const updater = new ExcelProductUpdater();
+    const excelPath = resolveExcelPath(options.excelPath);
     
     try {
-        const excelPath = './productosnuevos.xlsx';
-
         if (!fs.existsSync(excelPath)) {
-            console.error('❌ Archivo Excel no encontrado:', excelPath);
-            console.log('💡 Asegúrate de que el archivo existe y la ruta es correcta');
-            return;
+            throw new Error(`Archivo Excel no encontrado: ${excelPath}`);
         }
 
         console.log('🚀 Iniciando actualización de productos desde Excel...');
         console.log('📌 Este script insertará productos nuevos y actualizará precios existentes\n');
+        console.log(`📂 Archivo objetivo: ${excelPath}`);
         
         await updater.connect();
-        await updater.processExcel(excelPath);
+        const summary = await updater.processExcel(excelPath);
         
         console.log('\n🎉 Proceso completado exitosamente!');
+        return {
+            success: true,
+            excelPath,
+            summary
+        };
         
     } catch (error) {
         console.error('💥 Error durante el proceso:', error.message);
+        throw error;
     } finally {
         await updater.disconnect();
     }
@@ -306,7 +337,10 @@ async function main() {
 
 // Ejecutar el script
 if (require.main === module) {
-    main().catch(console.error);
+    runUpdateScript().catch(console.error);
 }
 
-module.exports = ExcelProductUpdater;
+module.exports = {
+    ExcelProductUpdater,
+    runUpdateScript
+};
