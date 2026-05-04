@@ -15,10 +15,9 @@ const rateLimit = require('express-rate-limit');
 const port = process.env.PORT || 3001;
 const app = express();
 
-// ✅ FIX: Trust proxy deshabilitado - funcionaba antes sin él
-// Si después necesitas proxy, puedes activarlo con: app.set('trust proxy', 1)
-// Por ahora mantenemos la configuración original (sin trust proxy) para evitar problemas
-// app.set('trust proxy', false); // Deshabilitado por defecto
+// ✅ FIX: Activar trust proxy porque el tráfico llega por proxy (nginx/Cloudflare en VPS).
+// Sin esto, express-rate-limit lanza ERR_ERL_UNEXPECTED_X_FORWARDED_FOR cuando existe X-Forwarded-For.
+app.set('trust proxy', 1);
 
 // ==============================================
 // IMPORTACIÓN DE RUTAS
@@ -41,6 +40,7 @@ const arcaRoutes = require('./routes/arcaRoutes');
 const ciudadesRoutes = require('./routes/ciudadesRoutes');
 const listadosRoutes = require('./routes/listadosRoutes');
 const notasRoutes = require('./routes/notasRoutes');
+const scriptsRoutes = require('./routes/scriptsRoutes');
 
 
 // ==============================================
@@ -48,22 +48,21 @@ const notasRoutes = require('./routes/notasRoutes');
 // ==============================================
 const allowedOrigins = [
     // Desarrollo local
-    'http://localhost:3000', 
+    'http://localhost:3000',
+    'http://localhost:3001',
     
-    // Producción principal
-    'https://vertimar.vercel.app',
-    'https://www.vertimar.vercel.app/',
-    'http://vertimar.vercel.app',
-    'https://www.distri-facturacion.vercel.app',
-    'https://distri-facturacion.vercel.app',
-    'https://distri-facturacion.vercel.app/',
+    'https://vertimar.online',
+    'https://www.vertimar.online',
     
-    // API VPS
-    'https://distri-api.duckdns.org',
-    'http://distri-api.duckdns.org',
+    
+    
+    
+    'https://api.vertimar.online',
+    'http://api.vertimar.online',
     
     // Otros servicios
     'https://excel-ima.vercel.app',
+    'https://beta.vertimar.online'
 ];
 
 // En desarrollo, permitir cualquier origen localhost
@@ -106,6 +105,7 @@ const corsOptions = {
 const { middlewareAuditoria } = require('./middlewares/auditoriaMiddleware');
 const { metricsMiddleware } = require('./middlewares/metricsMiddleware');
 const metrics = require('./utils/metrics');
+const { log } = require('./utils/logger');
 
 // ✅ FASE 3: Headers de seguridad con Helmet
 app.use(helmet({
@@ -133,11 +133,13 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ✅ FIX: Logging temprano para diagnosticar requests que no aparecen
 // Debe ir ANTES de otros middlewares para capturar TODOS los requests
+// Usa log.info para que además llegue a Discord (canal consola)
 app.use((req, res, next) => {
     const timestamp = new Date().toISOString();
     const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     const forwardedFor = req.headers['x-forwarded-for'] || 'none';
-    console.log(`📥 [${timestamp}] ${req.method} ${req.path} | IP: ${clientIP} | X-Forwarded-For: ${forwardedFor} | Origin: ${req.headers.origin || 'none'}`);
+    const msg = `📥 ${req.method} ${req.path} | IP: ${clientIP} | Origin: ${req.headers.origin || 'none'}`;
+    log.info(msg, { timestamp, xForwardedFor: forwardedFor });
     req.startTime = Date.now();
     next();
 });
@@ -145,25 +147,18 @@ app.use((req, res, next) => {
 // ✅ FASE 3: Middleware de métricas (debe ir después de body parsers)
 app.use(metricsMiddleware);
 
-// ✅ FIX: Rate limiting DESHABILITADO - Sistema pequeño (3-4 usuarios)
-// Rate limiter extremadamente permisivo (prácticamente sin límites)
-// Configurado para funcionar sin trust proxy (como funcionaba antes)
+// ✅ Rate limiting muy permisivo - Sistema interno (4-5 usuarios). Con trust proxy, req.ip ya es la IP real.
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 1000000, // 1 millón de requests (prácticamente ilimitado)
+    max: 1000000, // Prácticamente sin límite
     message: 'Demasiados requests desde esta IP, por favor intenta más tarde.',
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
-        // No aplicar rate limit a health check, ping y metrics
         return req.path === '/health' || req.path === '/ping' || req.path === '/metrics';
     },
-    // ✅ Usar IP directa sin confiar en proxy (como funcionaba antes)
-    // Esto evita errores cuando no hay proxy reverso configurado
-    keyGenerator: (req) => {
-        // Usar IP directa de la conexión, no X-Forwarded-For
-        return req.connection.remoteAddress || req.socket.remoteAddress || 'unknown';
-    }
+    // Desactivar validación X-Forwarded-For por si en algún entorno no hay proxy
+    validate: { xForwardedForHeader: false }
 });
 
 // Aplicar rate limiter general
@@ -356,6 +351,7 @@ app.get('/', (req, res) => {
             ciudades: '/ciudades',
             listados: '/listados',
             notas: '/notas',
+            scripts: '/scripts',
             
             // Sistema
             health: '/health',
@@ -385,6 +381,8 @@ app.use('/arca', arcaRoutes);
 app.use('/ciudades', ciudadesRoutes);
 app.use('/listados', listadosRoutes);
 app.use('/notas', notasRoutes);
+app.use('/scripts', scriptsRoutes);
+app.use('/', scriptsRoutes);
 
 
 // ==============================================

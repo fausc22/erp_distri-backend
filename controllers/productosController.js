@@ -1,5 +1,8 @@
 const db = require('./db');
 
+/** Nombre exacto del producto plantilla para fletes (Venta Directa). La búsqueda usa igualdad exacta para no confundir con otros que contengan este texto. */
+const NOMBRE_PRODUCTO_FLETE_HACIENDA = 'FLETE DE HACIENDA';
+
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
@@ -83,40 +86,76 @@ const nuevoProducto = async (req, res) => {
     });
 };
 
+/**
+ * Buscar productos con paginación y filtros (Fase 1 Productos).
+ * Query: search, pagina, porPagina, categoria_id, unidad_medida, stock (bajo | cero).
+ * Respuesta: { success, data, total, pagina, porPagina }.
+ */
 const buscarProducto = (req, res) => {
-    // ✅ FASE 1: Agregar límite y paginación sin cambiar formato de respuesta
-    const searchTerm = req.query.search ? `%${req.query.search}%` : '%';
-    const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Límite por defecto 100, máximo 500
-    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const searchRaw = (req.query.search && String(req.query.search).trim()) || '';
+    const searchTerm = searchRaw ? `%${searchRaw}%` : '%';
+    const pagina = Math.max(1, parseInt(req.query.pagina, 10) || 1);
+    const porPagina = Math.min(100, Math.max(1, parseInt(req.query.porPagina, 10) || 50));
+    const categoriaId = (req.query.categoria_id && String(req.query.categoria_id).trim()) || '';
+    const unidadMedida = (req.query.unidad_medida && String(req.query.unidad_medida).trim()) || '';
+    const stockFiltro = (req.query.stock && String(req.query.stock).trim().toLowerCase()) || '';
 
-    const query = `
+    const baseFrom = 'FROM productos p LEFT JOIN categorias c ON p.categoria_id = c.id';
+    const conditions = ['(p.nombre LIKE ? OR c.nombre LIKE ? OR CAST(p.id AS CHAR) LIKE ?)'];
+    const params = [searchTerm, searchTerm, searchTerm];
+
+    if (categoriaId) {
+        conditions.push('p.categoria_id = ?');
+        params.push(categoriaId);
+    }
+    if (unidadMedida) {
+        conditions.push('p.unidad_medida = ?');
+        params.push(unidadMedida);
+    }
+    if (stockFiltro === 'bajo') {
+        conditions.push('p.stock_actual < 10');
+    } else if (stockFiltro === 'cero') {
+        conditions.push('p.stock_actual = 0');
+    }
+
+    const whereClause = 'WHERE ' + conditions.join(' AND ');
+    const orderLimit = 'ORDER BY p.nombre ASC';
+
+    const countQuery = `SELECT COUNT(*) as total ${baseFrom} ${whereClause}`;
+    const dataQuery = `
         SELECT p.*, c.nombre as categoria_nombre
-        FROM productos p
-        LEFT JOIN categorias c ON p.categoria_id = c.id
-        WHERE p.nombre LIKE ? OR c.nombre LIKE ? OR CAST(p.id AS CHAR) LIKE ?
-        ORDER BY p.nombre ASC
+        ${baseFrom}
+        ${whereClause}
+        ${orderLimit}
         LIMIT ? OFFSET ?
     `;
+    const offset = (pagina - 1) * porPagina;
+    const dataParams = [...params, porPagina, offset];
 
-    db.query(query, [searchTerm, searchTerm, searchTerm, limit, offset], (err, results) => {
-        if (err) {
-            console.error('Error al obtener los productos:', err);
-            return res.status(500).json({ success: false, message: "Error al obtener los productos" });
+    db.query(countQuery, params, (errCount, countResults) => {
+        if (errCount) {
+            console.error('Error al contar productos:', errCount);
+            return res.status(500).json({ success: false, message: 'Error al obtener los productos' });
         }
-        console.log(`✅ Productos encontrados: ${results.length} (límite: ${limit}, offset: ${offset})`);
-        
-        // Debug: verificar que el IVA esté presente (solo en desarrollo)
-        if (results.length > 0 && process.env.NODE_ENV === 'development') {
-            console.log('📊 Ejemplo de producto con IVA:', {
-                id: results[0].id,
-                nombre: results[0].nombre,
-                iva: results[0].iva,
-                tipo_iva: typeof results[0].iva
+        const total = (countResults && countResults[0] && countResults[0].total) ? Number(countResults[0].total) : 0;
+
+        db.query(dataQuery, dataParams, (err, results) => {
+            if (err) {
+                console.error('Error al obtener los productos:', err);
+                return res.status(500).json({ success: false, message: 'Error al obtener los productos' });
+            }
+            if (results.length > 0 && process.env.NODE_ENV === 'development') {
+                console.log('📊 Ejemplo producto IVA:', { id: results[0].id, nombre: results[0].nombre, iva: results[0].iva });
+            }
+            console.log(`✅ Productos: ${results.length} de ${total} (pág. ${pagina}, porPagina ${porPagina})`);
+            res.json({
+                success: true,
+                data: results,
+                total,
+                pagina,
+                porPagina
             });
-        }
-        
-        // ✅ Mantener formato de respuesta exactamente igual
-        res.json({ success: true, data: results });
+        });
     });
 };
 
@@ -692,9 +731,88 @@ const actualizarProductoBasico = async (req, res) => {
     }
 };
 
+const eliminarProducto = async (req, res) => {
+    const productoId = req.params.id;
+
+    const checkQuery = 'SELECT * FROM productos WHERE id = ?';
+    db.query(checkQuery, [productoId], async (err, results) => {
+        if (err) {
+            console.error('Error al verificar el producto:', err);
+            return res.status(500).json({ success: false, message: "Error al verificar el producto" });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: "Producto no encontrado" });
+        }
+
+        const datosAnteriores = results[0];
+
+        const deleteQuery = 'DELETE FROM productos WHERE id = ?';
+        db.query(deleteQuery, [productoId], async (deleteErr) => {
+            if (deleteErr) {
+                console.error('Error al eliminar el producto:', deleteErr);
+
+                await auditarOperacion(req, {
+                    accion: 'DELETE',
+                    tabla: 'productos',
+                    registroId: productoId,
+                    detallesAdicionales: `Error al eliminar producto: ${deleteErr.message}`,
+                    datosAnteriores
+                });
+
+                return res.status(500).json({
+                    success: false,
+                    message: deleteErr.code === 'ER_ROW_IS_REFERENCED_2'
+                        ? "No se puede eliminar el producto porque tiene registros asociados"
+                        : "Error al eliminar el producto"
+                });
+            }
+
+            await auditarOperacion(req, {
+                accion: 'DELETE',
+                tabla: 'productos',
+                registroId: productoId,
+                datosAnteriores,
+                detallesAdicionales: `Producto eliminado: ${datosAnteriores.nombre}`
+            });
+
+            invalidate('productos:*');
+
+            res.json({ success: true, message: "Producto eliminado correctamente" });
+        });
+    });
+};
+
+/**
+ * Obtiene el producto "FLETE DE HACIENDA" por nombre exacto (no LIKE).
+ * Usado en Venta Directa para agregar líneas de flete personalizadas.
+ * Si hay varios con nombre similar, solo devuelve el que coincide exactamente.
+ */
+const getProductoFleteHacienda = (req, res) => {
+    const query = `
+        SELECT * FROM productos
+        WHERE TRIM(nombre) = ?
+        LIMIT 1
+    `;
+    db.query(query, [NOMBRE_PRODUCTO_FLETE_HACIENDA], (err, results) => {
+        if (err) {
+            console.error('Error al obtener producto FLETE DE HACIENDA:', err);
+            return res.status(500).json({ success: false, message: 'Error al obtener el producto de flete' });
+        }
+        if (!results || results.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: `No se encontró el producto "${NOMBRE_PRODUCTO_FLETE_HACIENDA}". Debe existir en la tabla productos con ese nombre exacto.`
+            });
+        }
+        res.json({ success: true, data: results[0] });
+    });
+};
+
 module.exports = {
     nuevoProducto,
-    buscarProducto, 
+    buscarProducto,
+    getProductoFleteHacienda, 
     actualizarProducto,
     nuevoRemito,
     obtenerCategorias,
@@ -705,4 +823,5 @@ module.exports = {
     obtenerStock,
     actualizarProductoBasico,  // Nueva función
     obtenerTodosProductos,
+    eliminarProducto,
 };

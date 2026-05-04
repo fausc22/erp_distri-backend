@@ -6,13 +6,23 @@ const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const { cacheMiddleware, invalidate } = require('../utils/cache');
 const router = express.Router();
 
-// ✅ FASE 3: Rate limiting para búsquedas (protección contra scraping)
 const searchLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 100, // 100 búsquedas por IP cada 15 minutos
+    windowMs: 15 * 60 * 1000,
+    max: 500,
     message: 'Demasiadas búsquedas desde esta IP, por favor intenta más tarde.',
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false }
+});
+
+// Fase 5: límite más estricto para consulta AFIP (llamadas externas a Afip SDK / ARCA)
+const consultaAfipLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    message: 'Demasiadas consultas a AFIP. Esperá unos minutos antes de intentar de nuevo.',
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false }
 });
 
 router.post('/crear-cliente', 
@@ -28,9 +38,11 @@ router.get('/buscar-cliente',
     // ✅ FASE 2: Caché con key dinámica basada en query params
     (req, res, next) => {
         const searchTerm = req.query.q || req.query.search || '';
-        const limit = req.query.limit || '100';
-        const offset = req.query.offset || '0';
-        const cacheKey = `clientes:buscar:${searchTerm}:${limit}:${offset}`;
+        const pagina = req.query.pagina || '1';
+        const porPagina = req.query.porPagina || '0';
+        const sortBy = req.query.sortBy || 'nombre';
+        const sortOrder = req.query.sortOrder || 'asc';
+        const cacheKey = `clientes:buscar:${searchTerm}:${pagina}:${porPagina}:${sortBy}:${sortOrder}`;
         return cacheMiddleware(cacheKey, 120)(req, res, next);
     },
     personasController.buscarCliente
@@ -40,6 +52,14 @@ router.put('/actualizar-cliente/:id',
     requireEmployee,
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'clientes', incluirBody: true }),
     personasController.actualizarCliente
+);
+
+// Consulta AFIP por DNI o CUIT (Padrón Alcance 13 + Constancia de Inscripción)
+router.post('/consulta-afip',
+    requireEmployee,
+    consultaAfipLimiter,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'clientes', incluirBody: true }),
+    personasController.consultaAfip
 );
 
 router.post('/crear-proveedor', 

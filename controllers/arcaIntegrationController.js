@@ -1,5 +1,7 @@
 const db = require('./db.js');
-const { sincronizarNumeroAprobado, obtenerSiguienteNumeroFacturaDesdeARCA } = require('../utils/numeracionARCA');
+const { sincronizarNumeroAprobado } = require('../utils/numeracionARCA');
+const { validarCuit } = require('../utils/validadoresCliente');
+const { roundFacturacion } = require('../utils/rounding');
 
 /**
  * CONTROLADOR DE INTEGRACIÓN ARCA
@@ -125,11 +127,50 @@ const esExento = (condicionIVA) => {
 };
 
 /**
+ * Fecha actual en formato ARCA (YYYYMMDD)
+ */
+const obtenerFechaActualARCA = () => {
+  const ahora = new Date();
+  return parseInt(
+    `${ahora.getFullYear()}${String(ahora.getMonth() + 1).padStart(2, '0')}${String(ahora.getDate()).padStart(2, '0')}`
+  );
+};
+
+const arcaFechaToSqlDate = (fechaArca) => {
+  const fechaStr = String(fechaArca || '');
+  if (!/^\d{8}$/.test(fechaStr)) return null;
+  return `${fechaStr.slice(0, 4)}-${fechaStr.slice(4, 6)}-${fechaStr.slice(6, 8)}`;
+};
+
+const getDbConnection = () => {
+  return new Promise((resolve, reject) => {
+    db.getConnection((err, conn) => {
+      if (err) reject(err);
+      else resolve(conn);
+    });
+  });
+};
+
+const executeWithConnection = (connection, query, params = []) => {
+  return new Promise((resolve, reject) => {
+    connection.query(query, params, (err, results) => {
+      if (err) reject(err);
+      else resolve(results);
+    });
+  });
+};
+
+/**
  * ✅ SOLICITAR CAE PARA UNA VENTA
  * POST /arca/solicitar-cae
  */
 const solicitarCAE = async (req, res) => {
   const { ventaId } = req.body;
+  let lockName = null;
+  let lockAcquired = false;
+  let lockConnection = null;
+  let intentoId = null;
+  const inicioSolicitudMs = Date.now();
   
   console.log(`\n╔══════════════════════════════════════════╗`);
   console.log(`║  📋 Solicitando CAE para venta ${ventaId}      ║`);
@@ -150,7 +191,7 @@ const solicitarCAE = async (req, res) => {
     
     const ventaQuery = `
       SELECT 
-        id, fecha, cliente_nombre, cliente_cuit, cliente_condicion,
+        id, fecha, fecha_fiscal, cliente_nombre, cliente_cuit, cliente_condicion,
         tipo_f, tipo_doc, subtotal, iva_total, total, cae_id, numero_factura,
         venta_referencia_id
       FROM ventas 
@@ -166,7 +207,7 @@ const solicitarCAE = async (req, res) => {
       });
     }
     
-    const venta = ventaRows[0];
+    let venta = ventaRows[0];
     
     if (venta.cae_id) {
       console.log(`⚠️ Venta ${ventaId} ya tiene CAE: ${venta.cae_id}`);
@@ -186,7 +227,26 @@ const solicitarCAE = async (req, res) => {
         tipo: venta.tipo_f
       });
     }
-    
+
+    // Fase 4: solo para factura A el cliente debe tener CUIT válido (ARCA lo exige).
+    // Factura B (Consumidor Final) puede ir sin CUIT: se envía tipoDoc 99 y numeroDoc 0 como antes.
+    if (venta.tipo_f === 'A') {
+      const cuitVenta = (venta.cliente_cuit || '').toString().trim();
+      if (!cuitVenta || cuitVenta.replace(/\D/g, '').length !== 11) {
+        return res.status(400).json({
+          success: false,
+          message: 'Para facturas tipo A el cliente debe tener CUIT (11 dígitos). Actualizá el cliente con un CUIT válido o validalo con AFIP desde el formulario de cliente.'
+        });
+      }
+      const resultadoCuit = validarCuit(venta.cliente_cuit);
+      if (!resultadoCuit.valido) {
+        return res.status(400).json({
+          success: false,
+          message: `El CUIT del cliente es inválido (${resultadoCuit.mensaje || 'dígito verificador incorrecto'}). Corregí los datos del cliente o validalo con AFIP.`
+        });
+      }
+    }
+
     console.log('✅ Venta obtenida:', {
       id: venta.id,
       cliente: venta.cliente_nombre,
@@ -197,10 +257,10 @@ const solicitarCAE = async (req, res) => {
     });
     
     // ============================================
-    // 1.5️⃣ VALIDAR NUMERACIÓN CON ARCA (OPCIONAL)
+    // 1.5️⃣ VALIDAR NUMERACIÓN (SIN PRE-ASIGNAR EN BD)
     // ============================================
-    // Intentamos validar con ARCA, pero si falla usamos el número local
-    // ARCA validará definitivamente al crear el comprobante
+    // Para FACTURAS, ARCA define el número final al autorizar.
+    // No se actualiza numero_factura antes del CAE para evitar duplicados.
     console.log('\n🔢 Intentando validar numeración con ARCA...');
     console.log(`   Número local actual: ${venta.numero_factura || 'N/A'}`);
     
@@ -247,63 +307,55 @@ const solicitarCAE = async (req, res) => {
     puntoVentaARCA = puntoVentaLocal;
     numeroARCA = parseInt(numeroLocal);
     numeroCompletoARCA = venta.numero_factura;
+
+    // Serializar solicitudes por tipo fiscal + punto de venta.
+    // Así el orden de envío queda alineado con el orden autorizado por ARCA.
+    lockName = `arca_cae_${tipoFiscalLocal || venta.tipo_f || 'UNK'}_${puntoVentaLocal}`;
+    lockConnection = await getDbConnection();
+    const lockRows = await executeWithConnection(lockConnection, 'SELECT GET_LOCK(?, ?) AS lock_acquired', [lockName, 30]);
+    if (!lockRows?.[0] || lockRows[0].lock_acquired !== 1) {
+      throw new Error(`No se pudo obtener lock de numeración (${lockName}). Reintente en unos segundos.`);
+    }
+    lockAcquired = true;
+    console.log(`🔒 Lock de numeración adquirido: ${lockName}`);
+
+    // Revalidar estado de CAE dentro de la sección crítica para evitar doble emisión.
+    const ventaRefrescadaRows = await executeWithConnection(
+      lockConnection,
+      'SELECT id, cae_id, numero_factura, fecha, fecha_fiscal, tipo_f, tipo_doc, cliente_cuit, cliente_condicion, total, venta_referencia_id FROM ventas WHERE id = ? LIMIT 1',
+      [ventaId]
+    );
+    if (!ventaRefrescadaRows || ventaRefrescadaRows.length === 0) {
+      throw new Error('Venta no encontrada al revalidar estado bajo lock');
+    }
+    const ventaRefrescada = ventaRefrescadaRows[0];
+    if (ventaRefrescada.cae_id) {
+      console.log(`ℹ️ Venta ${ventaId} ya tenía CAE bajo lock: ${ventaRefrescada.cae_id}`);
+      return res.json({
+        success: true,
+        message: 'La venta ya tenía CAE asignado',
+        existing: true,
+        data: {
+          ventaId,
+          autorizacion: {
+            cae: ventaRefrescada.cae_id
+          },
+          comprobante: {
+            numero: ventaRefrescada.numero_factura
+          }
+        }
+      });
+    }
+    venta = { ...venta, ...ventaRefrescada };
     
     // ✅ Si es una NOTA, NO validar numeración con ARCA (las notas tienen numeración independiente)
     // Solo validar numeración para FACTURAS
     const esNota = venta.tipo_doc === 'NOTA_DEBITO' || venta.tipo_doc === 'NOTA_CREDITO';
     
     if (!esNota) {
-      // Intentar consultar ARCA para validar (solo para facturas)
-      try {
-        const connection = await new Promise((resolve, reject) => {
-          db.getConnection((err, conn) => {
-            if (err) reject(err);
-            else resolve(conn);
-          });
-        });
-        
-        try {
-          const numeracion = await obtenerSiguienteNumeroFacturaDesdeARCA(
-            connection, 
-            venta.tipo_f
-          );
-          
-          const numeroARCAObtenido = numeracion.numeroFactura;
-          const numeroCompletoARCAObtenido = numeracion.numeroCompleto;
-          
-          console.log(`✅ Número desde ARCA: ${numeroCompletoARCAObtenido}`);
-          
-          // Si hay diferencia, actualizar (solo para facturas, no para notas)
-          if (venta.numero_factura !== numeroCompletoARCAObtenido) {
-            console.log(`⚠️  Desincronización detectada:`);
-            console.log(`   Local: ${venta.numero_factura}`);
-            console.log(`   ARCA: ${numeroCompletoARCAObtenido}`);
-            console.log(`   Actualizando venta con número de ARCA...`);
-            
-            const updateNumeroQuery = `
-              UPDATE ventas 
-              SET numero_factura = ?
-              WHERE id = ?
-            `;
-            await db.execute(updateNumeroQuery, [numeroCompletoARCAObtenido, ventaId]);
-            console.log(`✅ Número actualizado en BD: ${numeroCompletoARCAObtenido}`);
-            
-            // Actualizar variables para usar el número de ARCA
-            numeroARCA = numeracion.numeroFactura;
-            numeroCompletoARCA = numeroCompletoARCAObtenido;
-            puntoVentaARCA = numeracion.puntoVenta;
-          }
-          
-        } finally {
-          connection.release();
-        }
-      } catch (error) {
-        // ⚠️ Si falla la consulta a ARCA, usar el número local
-        // ARCA validará definitivamente al crear el comprobante
-        console.warn('⚠️  No se pudo consultar ARCA para validar numeración:', error.message);
-        console.warn('   Usando número local. ARCA validará al crear el comprobante.');
-        usarNumeroLocal = true;
-      }
+      // En facturas, el número definitivo lo devuelve ARCA al aprobar.
+      console.log('ℹ️ Factura detectada: numeración final definida por ARCA al autorizar.');
+      usarNumeroLocal = false;
     } else {
       // ✅ Para notas, consultar ARCA para obtener el siguiente número del tipo correcto
       console.log(`📝 Es una ${venta.tipo_doc} - Consultando numeración en ARCA para este tipo de comprobante...`);
@@ -401,10 +453,17 @@ const solicitarCAE = async (req, res) => {
     
     console.log(`  - Documento: Tipo ${tipoDocumento}, Número ${numeroDocumento}`);
     
-    const fechaVenta = new Date(venta.fecha);
-    const fechaFormateada = parseInt(
-      `${fechaVenta.getFullYear()}${String(fechaVenta.getMonth() + 1).padStart(2, '0')}${String(fechaVenta.getDate()).padStart(2, '0')}`
-    );
+    const fechaFormateada = esNota
+      ? (() => {
+          const fechaVenta = new Date(venta.fecha);
+          return parseInt(
+            `${fechaVenta.getFullYear()}${String(fechaVenta.getMonth() + 1).padStart(2, '0')}${String(fechaVenta.getDate()).padStart(2, '0')}`
+          );
+        })()
+      : obtenerFechaActualARCA();
+    if (!esNota) {
+      console.log(`📅 Fecha de emisión enviada a ARCA: ${fechaFormateada}`);
+    }
     
     const items = productosRows.map(prod => {
       const cantidad = parseFloat(prod.cantidad) || 0;
@@ -473,6 +532,31 @@ const solicitarCAE = async (req, res) => {
       }
     }
     
+    const subtotalDetalle = roundFacturacion(productosRows.reduce((acc, prod) => acc + (parseFloat(prod.subtotal) || 0), 0));
+    const ivaDetalle = roundFacturacion(productosRows.reduce((acc, prod) => acc + (parseFloat(prod.iva) || 0), 0));
+
+    const subtotalVenta = Number.isFinite(parseFloat(venta.subtotal))
+      ? roundFacturacion(parseFloat(venta.subtotal))
+      : subtotalDetalle;
+    const ivaVenta = Number.isFinite(parseFloat(venta.iva_total))
+      ? roundFacturacion(parseFloat(venta.iva_total))
+      : ivaDetalle;
+    const exentoVentaCabecera = Number.isFinite(parseFloat(venta.exento))
+      ? roundFacturacion(parseFloat(venta.exento))
+      : 0;
+    const impOpExExento = clienteEsExento ? exentoVentaCabecera : 0;
+    const totalVenta = roundFacturacion(
+      subtotalVenta + (clienteEsExento ? impOpExExento : ivaVenta)
+    );
+
+    if (Math.abs(subtotalDetalle - subtotalVenta) > 1 || Math.abs(ivaDetalle - ivaVenta) > 1) {
+      console.warn(
+        `⚠️ Diferencia cabecera/detalle detectada en venta ${ventaId}: ` +
+        `detalle(subtotal=${subtotalDetalle}, iva=${ivaDetalle}) vs ` +
+        `cabecera(subtotal=${subtotalVenta}, iva=${ivaVenta})`
+      );
+    }
+
     const datosFactura = {
       tipoComprobante: tipoComprobante,
       concepto: 1,
@@ -485,6 +569,11 @@ const solicitarCAE = async (req, res) => {
       fecha: fechaFormateada,
       moneda: 'PES',
       cotizacionMoneda: 1,
+      // ✅ Importes explícitos desde la venta (evita que EXENTO quede en neto)
+      impNeto: subtotalVenta,
+      impIVA: clienteEsExento ? 0 : ivaVenta,
+      impOpEx: impOpExExento,
+      impTotal: totalVenta,
       // ✅ Usar el número obtenido desde ARCA (no el de la BD)
       puntoVenta: parseInt(puntoVentaARCA) || 1,
       // ✅ Agregar comprobantes asociados si es una nota
@@ -492,6 +581,17 @@ const solicitarCAE = async (req, res) => {
       // ✅ Para notas, pasar el número de comprobante que ya tenemos (no que lo obtenga ARCA)
       numeroComprobante: esNota ? numeroARCA : undefined
     };
+
+    const [intentoInsertResult] = await db.execute(
+      `
+      INSERT INTO arca_solicitudes_log
+        (venta_id, request_data, estado)
+      VALUES
+        (?, ?, ?)
+      `,
+      [ventaId, JSON.stringify(datosFactura), 'EN_PROCESO']
+    );
+    intentoId = intentoInsertResult?.insertId || null;
     
     console.log('✅ Datos preparados para ARCA');
     if (esNota && comprobantesAsociados.length > 0) {
@@ -527,6 +627,18 @@ const solicitarCAE = async (req, res) => {
     
     if (!responseARCA || !responseARCA.success) {
       throw new Error(responseARCA?.message || 'Error desconocido de ARCA');
+    }
+
+    if (intentoId) {
+      const tiempoRespuesta = Date.now() - inicioSolicitudMs;
+      await db.execute(
+        `
+        UPDATE arca_solicitudes_log
+        SET response_data = ?, estado = ?, tiempo_respuesta = ?
+        WHERE id = ?
+        `,
+        [JSON.stringify(responseARCA), 'EXITOSO', tiempoRespuesta, intentoId]
+      );
     }
     
     console.log('✅ Respuesta de ARCA recibida');
@@ -569,13 +681,15 @@ const solicitarCAE = async (req, res) => {
     // ============================================
     console.log('\n💾 Paso 6: Guardando CAE en la base de datos...');
     
+    const fechaFiscalSql = arcaFechaToSqlDate(fechaFormateada);
     const updateQuery = `
       UPDATE ventas 
       SET 
         cae_id = ?,
         cae_fecha = ?,
         cae_resultado = ?,
-        cae_solicitud_fecha = NOW()
+        cae_solicitud_fecha = NOW(),
+        fecha_fiscal = COALESCE(?, fecha_fiscal)
       WHERE id = ?
     `;
     
@@ -583,6 +697,7 @@ const solicitarCAE = async (req, res) => {
       cae,
       caeVencimiento,
       caeResultado,
+      fechaFiscalSql,
       ventaId
     ]);
     
@@ -679,6 +794,22 @@ const solicitarCAE = async (req, res) => {
     
   } catch (error) {
     console.error('\n❌ ERROR SOLICITANDO CAE:', error);
+
+    if (intentoId) {
+      try {
+        const tiempoRespuesta = Date.now() - inicioSolicitudMs;
+        await db.execute(
+          `
+          UPDATE arca_solicitudes_log
+          SET estado = ?, mensaje_error = ?, tiempo_respuesta = ?
+          WHERE id = ?
+          `,
+          ['ERROR', (error.message || 'Error sin mensaje').substring(0, 65535), tiempoRespuesta, intentoId]
+        );
+      } catch (logError) {
+        console.warn('⚠️  No se pudo registrar error en arca_solicitudes_log:', logError.message);
+      }
+    }
     
     res.status(500).json({
       success: false,
@@ -686,6 +817,29 @@ const solicitarCAE = async (req, res) => {
       error: error.message,
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
+  } finally {
+    if (lockAcquired && lockName) {
+      try {
+        const releaseRows = lockConnection
+          ? await executeWithConnection(lockConnection, 'SELECT RELEASE_LOCK(?) AS released', [lockName])
+          : [];
+        const released = releaseRows?.[0]?.released;
+        if (released === 1) {
+          console.log(`🔓 Lock de numeración liberado: ${lockName}`);
+        } else {
+          console.warn(`⚠️  RELEASE_LOCK devolvió ${released} para ${lockName}`);
+        }
+      } catch (releaseError) {
+        console.warn(`⚠️  No se pudo liberar lock ${lockName}:`, releaseError.message);
+      }
+    }
+    if (lockConnection) {
+      try {
+        lockConnection.release();
+      } catch (releaseConnError) {
+        console.warn('⚠️  No se pudo liberar conexión de lock:', releaseConnError.message);
+      }
+    }
   }
 };
 

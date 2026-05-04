@@ -30,21 +30,44 @@ const loggerConfig = {
 // ✅ Crear instancia del logger
 const logger = pino(loggerConfig);
 
-// ✅ Métodos de logging con contexto
+// ✅ Discord: envío a webhooks (opcional, no rompe si no está configurado)
+let discordLogger;
+try {
+  discordLogger = require('./discordLogger');
+} catch (_) {
+  discordLogger = null;
+}
+
+function sendToDiscord(level, message, context) {
+  if (!discordLogger) return;
+  try {
+    if (level === 'error') {
+      discordLogger.sendErrores(message, context);
+    }
+    discordLogger.sendConsola(level, message, context);
+  } catch (_) {
+    // Ignorar si Discord falla
+  }
+}
+
+// ✅ Métodos de logging con contexto (+ opcional Discord)
 const log = {
   // Error: errores críticos que requieren atención
   error: (message, context = {}) => {
     logger.error({ ...context }, message);
+    sendToDiscord('error', message, context);
   },
 
   // Warn: advertencias que no bloquean pero son importantes
   warn: (message, context = {}) => {
     logger.warn({ ...context }, message);
+    sendToDiscord('warn', message, context);
   },
 
   // Info: información general de operaciones importantes
   info: (message, context = {}) => {
     logger.info({ ...context }, message);
+    sendToDiscord('info', message, context);
   },
 
   // Debug: solo en desarrollo, información detallada
@@ -52,6 +75,7 @@ const log = {
     if (!isProduction) {
       logger.debug({ ...context }, message);
     }
+    sendToDiscord('debug', message, context);
   }
 };
 

@@ -34,6 +34,7 @@ const generarPdfLibroIva = async (req, res) => {
             SELECT
                 v.id,
                 v.fecha,
+                COALESCE(v.fecha_fiscal, DATE(v.fecha)) AS fecha_fiscal,
                 v.numero_factura,
                 v.tipo_f,
                 v.tipo_doc,
@@ -45,9 +46,31 @@ const generarPdfLibroIva = async (req, res) => {
                 v.exento,
                 v.total
             FROM ventas v
-            WHERE DATE(v.fecha) BETWEEN ? AND ?
+            WHERE DATE(COALESCE(v.fecha_fiscal, DATE(v.fecha))) BETWEEN ? AND ?
                 AND (v.tipo_f = 'A' OR v.tipo_f = 'B')
-            ORDER BY v.fecha ASC, v.numero_factura ASC
+            ORDER BY
+                DATE(COALESCE(v.fecha_fiscal, DATE(v.fecha))) ASC,
+                CASE
+                    WHEN UPPER(TRIM(v.tipo_doc)) = 'FACTURA' THEN 1
+                    WHEN UPPER(TRIM(v.tipo_doc)) = 'NOTA_DEBITO' THEN 2
+                    WHEN UPPER(TRIM(v.tipo_doc)) = 'NOTA_CREDITO' THEN 3
+                    ELSE 9
+                END ASC,
+                CASE
+                    WHEN v.numero_factura REGEXP '^[A-Z]+[[:space:]]+[0-9]{4}-[0-9]{8}$'
+                        THEN CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(v.numero_factura, '-', 1), ' ', -1) AS UNSIGNED)
+                    WHEN v.numero_factura REGEXP '^[0-9]{4}-[0-9]{5}$'
+                        THEN CAST(SUBSTRING_INDEX(v.numero_factura, '-', 1) AS UNSIGNED)
+                    ELSE 0
+                END ASC,
+                CASE
+                    WHEN v.numero_factura REGEXP '^[A-Z]+[[:space:]]+[0-9]{4}-[0-9]{8}$'
+                        THEN CAST(SUBSTRING_INDEX(v.numero_factura, '-', -1) AS UNSIGNED)
+                    WHEN v.numero_factura REGEXP '^[0-9]{4}-[0-9]{5}$'
+                        THEN CAST(SUBSTRING_INDEX(v.numero_factura, '-', -1) AS UNSIGNED)
+                    ELSE 0
+                END ASC,
+                v.id ASC
         `;
 
         const ventas = await queryPromise(query, [primerDia, ultimaFecha]);
@@ -82,20 +105,25 @@ const generarPdfLibroIva = async (req, res) => {
             // ✅ Determinar el signo según el tipo de documento
             const esNotaCredito = tipoDoc === 'NOTA_CREDITO' || tipoDoc === 'NOTA CREDITO';
             const multiplicador = esNotaCredito ? -1 : 1;
+            const netoCabecera = parseFloat(venta.subtotal) || 0;
+            const ivaCabecera = parseFloat(venta.iva_total) || 0;
+            const exentoCabecera = parseFloat(venta.exento) || 0;
+            const totalCabecera = parseFloat(venta.total) || 0;
             
             return {
-                fecha: venta.fecha,
+                fecha: venta.fecha_fiscal || venta.fecha,
                 comprobante: nombreComprobante,
                 numero: venta.numero_factura || '-',
                 cliente: venta.cliente_nombre || 'Sin nombre',
                 cuit: venta.cliente_cuit || '-',
                 condicionIva: (venta.cliente_condicion || 'Sin especificar').toString().trim(),
-                neto: (parseFloat(venta.subtotal) || 0) * multiplicador,
-                exento: (parseFloat(venta.exento) || 0) * multiplicador,
-                iva: (parseFloat(venta.iva_total) || 0) * multiplicador,
+                // Fuente única para libro/reportes: cabecera fiscal de ventas
+                neto: netoCabecera * multiplicador,
+                exento: exentoCabecera * multiplicador,
+                iva: ivaCabecera * multiplicador,
                 percepciones: 0,
                 retenciones: 0,
-                total: (parseFloat(venta.total) || 0) * multiplicador
+                total: totalCabecera * multiplicador
             };
         });
 
@@ -498,26 +526,47 @@ const generarPdfListadoVendedores = async (req, res) => {
 
         const vendedorNombre = `${vendedor[0].nombre} ${vendedor[0].apellido}`;
 
-        // Consulta SQL para obtener todas las ventas (A, B, X) del mes del vendedor
+        // Consulta SQL para obtener operaciones comerciales del vendedor:
+        // - FACTURA: se imputa por el empleado de la propia factura.
+        // - NOTA_DEBITO / NOTA_CREDITO: se imputan por el empleado de la venta de referencia.
+        // Regla comercial de signos:
+        // FACTURA y NOTA_DEBITO suman; NOTA_CREDITO resta.
         const query = `
             SELECT
                 v.id,
                 v.fecha,
                 v.numero_factura,
+                v.tipo_doc,
                 v.tipo_f,
                 v.cliente_nombre,
                 v.cliente_cuit,
                 v.subtotal,
                 v.iva_total,
                 v.exento,
-                v.total
+                v.total,
+                v.venta_referencia_id,
+                vr.empleado_id AS referencia_empleado_id
             FROM ventas v
+            LEFT JOIN ventas vr ON vr.id = v.venta_referencia_id
             WHERE DATE(v.fecha) BETWEEN ? AND ?
-                AND v.empleado_id = ?
+                AND UPPER(TRIM(COALESCE(v.tipo_doc, 'FACTURA'))) IN ('FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO')
+                AND UPPER(TRIM(COALESCE(v.estado, 'FACTURADA'))) IN ('FACTURADA', 'FACTURADO')
+                AND (
+                    (
+                        UPPER(TRIM(COALESCE(v.tipo_doc, 'FACTURA'))) = 'FACTURA'
+                        AND v.empleado_id = ?
+                    )
+                    OR
+                    (
+                        UPPER(TRIM(COALESCE(v.tipo_doc, 'FACTURA'))) IN ('NOTA_DEBITO', 'NOTA_CREDITO')
+                        AND v.venta_referencia_id IS NOT NULL
+                        AND vr.empleado_id = ?
+                    )
+                )
             ORDER BY v.fecha ASC, v.numero_factura ASC
         `;
 
-        const ventas = await queryPromise(query, [primerDia, ultimaFecha, vendedorId]);
+        const ventas = await queryPromise(query, [primerDia, ultimaFecha, vendedorId, vendedorId]);
 
         console.log(`📊 Se encontraron ${ventas.length} ventas para el vendedor ${vendedorNombre} en el período`);
 
@@ -529,16 +578,31 @@ const generarPdfListadoVendedores = async (req, res) => {
 
         // Formatear datos para el PDF
         const ventasFormateadas = ventas.map(venta => {
+            const tipoDoc = (venta.tipo_doc || 'FACTURA').toString().trim().toUpperCase();
+            const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
+
             let comprobante = '';
-            if (venta.tipo_f === 'A') {
+            if (tipoDoc === 'NOTA_DEBITO') {
+                comprobante = `NOTA DE DÉBITO ${tipoFiscal || ''}`.trim();
+            } else if (tipoDoc === 'NOTA_CREDITO') {
+                comprobante = `NOTA DE CRÉDITO ${tipoFiscal || ''}`.trim();
+            } else if (tipoFiscal === 'A') {
                 comprobante = 'FACTURA A';
-            } else if (venta.tipo_f === 'B') {
+            } else if (tipoFiscal === 'B') {
                 comprobante = 'FACTURA B';
-            } else if (venta.tipo_f === 'X') {
+            } else if (tipoFiscal === 'X') {
                 comprobante = 'FACTURA X';
             } else {
-                comprobante = venta.tipo_f || 'N/A';
+                comprobante = `FACTURA ${tipoFiscal || 'N/A'}`.trim();
             }
+
+            // Regla de signos: FACTURA/NOTA_DEBITO suman, NOTA_CREDITO resta
+            const multiplicador = tipoDoc === 'NOTA_CREDITO' ? -1 : 1;
+
+            const netoCabecera = parseFloat(venta.subtotal) || 0;
+            const ivaCabecera = parseFloat(venta.iva_total) || 0;
+            const exentoCabecera = parseFloat(venta.exento) || 0;
+            const totalCabecera = parseFloat(venta.total) || 0;
 
             return {
                 fecha: venta.fecha,
@@ -546,12 +610,13 @@ const generarPdfListadoVendedores = async (req, res) => {
                 numero: venta.numero_factura || '-',
                 cliente: venta.cliente_nombre || 'Sin nombre',
                 cuit: venta.cliente_cuit || '-',
-                neto: parseFloat(venta.subtotal) || 0,
-                exento: parseFloat(venta.exento) || 0, // ✅ Usar monto exento guardado
-                iva: parseFloat(venta.iva_total) || 0,
+                // Fuente única para reportes: cabecera fiscal de ventas con signo comercial
+                neto: netoCabecera * multiplicador,
+                exento: exentoCabecera * multiplicador,
+                iva: ivaCabecera * multiplicador,
                 percepciones: 0, // Siempre 0 según especificación
                 retenciones: 0, // Siempre 0 según especificación
-                total: parseFloat(venta.total) || 0
+                total: totalCabecera * multiplicador
             };
         });
 

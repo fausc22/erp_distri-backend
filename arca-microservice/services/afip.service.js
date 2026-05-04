@@ -1,5 +1,40 @@
 import Afip from '@afipsdk/afip.js';
+import { createRequire } from 'module';
 import afipConfig from '../config/afip.config.js';
+
+const require = createRequire(import.meta.url);
+const discordLogger = require('../../utils/discordLogger.js');
+
+/** Envía log a consola y a Discord (canal ARCA/AFIP). */
+function arcaLog(msg, ctx = {}) {
+  console.log(msg);
+  discordLogger.sendArcaAfip(msg, ctx);
+}
+function arcaErr(msg, ctx = {}) {
+  console.error(msg);
+  discordLogger.sendArcaAfip(msg, ctx);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getHttpStatus(error) {
+  return error?.response?.status || error?.status || null;
+}
+
+function esErrorTransitorio(error) {
+  const status = getHttpStatus(error);
+  if (status && status >= 500) return true;
+
+  const code = error?.code;
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ECONNABORTED', 'EAI_AGAIN'].includes(code)) {
+    return true;
+  }
+
+  const msg = String(error?.message || '').toLowerCase();
+  return msg.includes('timeout') || msg.includes('socket hang up');
+}
 
 /**
  * SERVICIO PRINCIPAL DE AFIP
@@ -22,10 +57,10 @@ class AfipService {
       if (process.env.NODE_ENV === 'development') {
         const ambiente = config.production ? 'PRODUCCIÓN' : 'HOMOLOGACIÓN';
         const cuit = config.CUIT || 'No configurado';
-        console.log(`✅ ARCA SDK inicializado (${ambiente}, CUIT: ${cuit})`);
+        arcaLog(`✅ ARCA SDK inicializado (${ambiente}, CUIT: ${cuit})`);
       }
     } catch (error) {
-      console.error(`❌ Error al inicializar SDK de AFIP/ARCA: ${error.message}`);
+      arcaErr(`❌ Error al inicializar SDK de AFIP/ARCA: ${error.message}`);
       throw error;
     }
   }
@@ -41,20 +76,37 @@ class AfipService {
    * @returns {Promise<number>} Último número de comprobante
    */
   async obtenerUltimoComprobante(puntoVenta, tipoComprobante) {
-    try {
-      console.log(`📊 Consultando último comprobante - PV: ${puntoVenta}, Tipo: ${tipoComprobante}`);
-      
-      const ultimoNumero = await this.afip.ElectronicBilling.getLastVoucher(
-        puntoVenta,
-        tipoComprobante
-      );
-      
-      console.log(`✓ Último comprobante: ${ultimoNumero}`);
-      return ultimoNumero;
-      
-    } catch (error) {
-      console.error('❌ Error al obtener último comprobante:', error);
-      throw new Error(`Error al consultar último comprobante: ${error.message}`);
+    const maxIntentos = 3;
+    const esperaBaseMs = 700;
+
+    for (let intento = 1; intento <= maxIntentos; intento++) {
+      try {
+        arcaLog(
+          `📊 Consultando último comprobante - PV: ${puntoVenta}, Tipo: ${tipoComprobante} (intento ${intento}/${maxIntentos})`
+        );
+
+        const ultimoNumero = await this.afip.ElectronicBilling.getLastVoucher(
+          puntoVenta,
+          tipoComprobante
+        );
+
+        arcaLog(`✓ Último comprobante: ${ultimoNumero}`);
+        return ultimoNumero;
+      } catch (error) {
+        const status = getHttpStatus(error);
+        const esTransitorio = esErrorTransitorio(error);
+        const ultimoIntento = intento === maxIntentos;
+        const detalle = `status=${status || 'N/A'} code=${error?.code || 'N/A'} msg=${error.message}`;
+
+        if (!esTransitorio || ultimoIntento) {
+          arcaErr(`❌ Error al obtener último comprobante (${detalle})`);
+          throw new Error(`Error al consultar último comprobante: ${error.message}`);
+        }
+
+        const esperaMs = esperaBaseMs * (2 ** (intento - 1));
+        arcaLog(`⚠️ Falla transitoria consultando último comprobante (${detalle}). Reintentando en ${esperaMs}ms...`);
+        await sleep(esperaMs);
+      }
     }
   }
 
@@ -69,30 +121,42 @@ class AfipService {
    * @returns {Promise<Object>} CAE, fecha de vencimiento y datos adicionales
    */
   async crearComprobante(datosComprobante, respuestaCompleta = false) {
-    try {
-      console.log('📝 Creando comprobante en ARCA...');
-      
-      const resultado = await this.afip.ElectronicBilling.createVoucher(
-        datosComprobante,
-        respuestaCompleta
-      );
-      
-      console.log('✓ Comprobante creado exitosamente');
-      console.log(`  CAE: ${resultado.CAE}`);
-      console.log(`  Vencimiento CAE: ${resultado.CAEFchVto}`);
-      
-      return resultado;
-      
-    } catch (error) {
-      console.error('❌ Error al crear comprobante:', error);
-      
-      // Si el error viene de ARCA, tiene información más detallada
-      if (error.response?.data) {
-        const errData = error.response.data;
-        throw new Error(`Error de ARCA: ${errData.Errors || error.message}`);
+    const maxIntentos = 3;
+    const esperaBaseMs = 700;
+
+    for (let intento = 1; intento <= maxIntentos; intento++) {
+      try {
+        arcaLog(`📝 Creando comprobante en ARCA... (intento ${intento}/${maxIntentos})`);
+
+        const resultado = await this.afip.ElectronicBilling.createVoucher(
+          datosComprobante,
+          respuestaCompleta
+        );
+
+        arcaLog(`✓ Comprobante creado exitosamente | CAE: ${resultado.CAE} | Vto: ${resultado.CAEFchVto}`);
+        return resultado;
+      } catch (error) {
+        const status = getHttpStatus(error);
+        const esTransitorio = esErrorTransitorio(error);
+        const ultimoIntento = intento === maxIntentos;
+        const detalle = `status=${status || 'N/A'} code=${error?.code || 'N/A'} msg=${error.message}`;
+
+        if (!esTransitorio || ultimoIntento) {
+          arcaErr('❌ Error al crear comprobante: ' + (error.response?.data?.Errors || error.message));
+
+          // Si el error viene de ARCA, tiene información más detallada
+          if (error.response?.data) {
+            const errData = error.response.data;
+            throw new Error(`Error de ARCA: ${errData.Errors || error.message}`);
+          }
+
+          throw new Error(`Error al crear comprobante: ${error.message}`);
+        }
+
+        const esperaMs = esperaBaseMs * (2 ** (intento - 1));
+        arcaLog(`⚠️ Falla transitoria creando comprobante (${detalle}). Reintentando en ${esperaMs}ms...`);
+        await sleep(esperaMs);
       }
-      
-      throw new Error(`Error al crear comprobante: ${error.message}`);
     }
   }
 
@@ -107,21 +171,18 @@ class AfipService {
    */
   async crearSiguienteComprobante(datosComprobante) {
     try {
-      console.log('📝 Creando siguiente comprobante...');
+      arcaLog('📝 Creando siguiente comprobante...');
       
       const resultado = await this.afip.ElectronicBilling.createNextVoucher(
         datosComprobante
       );
       
-      console.log('✓ Siguiente comprobante creado');
-      console.log(`  Número: ${resultado.voucher_number}`);
-      console.log(`  CAE: ${resultado.CAE}`);
-      console.log(`  Vencimiento CAE: ${resultado.CAEFchVto}`);
+      arcaLog(`✓ Siguiente comprobante creado | Nº: ${resultado.voucher_number} | CAE: ${resultado.CAE}`);
       
       return resultado;
       
     } catch (error) {
-      console.error('❌ Error al crear siguiente comprobante:', error);
+      arcaErr('❌ Error al crear siguiente comprobante: ' + error.message);
       throw new Error(`Error al crear siguiente comprobante: ${error.message}`);
     }
   }
@@ -139,7 +200,7 @@ class AfipService {
    */
   async obtenerInfoComprobante(numeroComprobante, puntoVenta, tipoComprobante) {
     try {
-      console.log(`🔍 Consultando comprobante ${numeroComprobante}...`);
+      arcaLog(`🔍 Consultando comprobante ${numeroComprobante}...`);
       
       const info = await this.afip.ElectronicBilling.getVoucherInfo(
         numeroComprobante,
@@ -148,15 +209,15 @@ class AfipService {
       );
       
       if (info === null) {
-        console.log('ℹ Comprobante no encontrado');
+        arcaLog('ℹ Comprobante no encontrado');
         return null;
       }
       
-      console.log('✓ Información del comprobante obtenida');
+      arcaLog('✓ Información del comprobante obtenida');
       return info;
       
     } catch (error) {
-      console.error('❌ Error al obtener información:', error);
+      arcaErr('❌ Error al obtener información: ' + error.message);
       throw new Error(`Error al consultar comprobante: ${error.message}`);
     }
   }
@@ -174,7 +235,7 @@ class AfipService {
       const tipos = await this.afip.ElectronicBilling.getVoucherTypes();
       return tipos;
     } catch (error) {
-      console.error('❌ Error al obtener tipos de comprobantes:', error);
+      arcaErr('❌ Error al obtener tipos de comprobantes: ' + error.message);
       throw error;
     }
   }
@@ -189,7 +250,7 @@ class AfipService {
       const tipos = await this.afip.ElectronicBilling.getDocumentTypes();
       return tipos;
     } catch (error) {
-      console.error('❌ Error al obtener tipos de documentos:', error);
+      arcaErr('❌ Error al obtener tipos de documentos: ' + error.message);
       throw error;
     }
   }
@@ -204,7 +265,7 @@ class AfipService {
       const tipos = await this.afip.ElectronicBilling.getAliquotTypes();
       return tipos;
     } catch (error) {
-      console.error('❌ Error al obtener tipos de IVA:', error);
+      arcaErr('❌ Error al obtener tipos de IVA: ' + error.message);
       throw error;
     }
   }
@@ -224,7 +285,7 @@ class AfipService {
     } catch (error) {
       // En testing es normal que falle porque no hay puntos configurados
       if (afipConfig.environment === 'dev') {
-        console.log('ℹ En testing, usar punto de venta 1 por defecto');
+        arcaLog('ℹ En testing, usar punto de venta 1 por defecto');
         return [{ PtoVta: 1 }];
       }
       throw error;
@@ -242,19 +303,19 @@ class AfipService {
   async verificarEstadoServidor() {
     try {
       const estado = await this.afip.ElectronicBilling.getServerStatus();
-      console.log('Estado del servidor ARCA:', estado);
+      arcaLog('Estado del servidor ARCA: ' + JSON.stringify(estado));
       return estado;
     } catch (error) {
-      console.error('❌ Error al verificar servidor:', error);
+      arcaErr('❌ Error al verificar servidor: ' + error.message);
       throw error;
     }
   }
 
   /**
    * OBTENER COTIZACIÓN DE MONEDA
-   * 
+   *
    * Consulta el tipo de cambio oficial de una moneda
-   * 
+   *
    * @param {string} monedaId - ID de la moneda (ej: 'DOL' para dólares)
    * @param {string} fecha - Fecha en formato YYYYMMDD
    * @returns {Promise<Object>} Cotización de la moneda
@@ -270,9 +331,105 @@ class AfipService {
       );
       return cotizacion;
     } catch (error) {
-      console.error('❌ Error al obtener cotización:', error);
+      arcaErr('❌ Error al obtener cotización: ' + error.message);
       throw error;
     }
+  }
+
+  // ─── PADRÓN / CONSTANCIA DE INSCRIPCIÓN (consulta contribuyentes) ───
+
+  /**
+   * Obtiene el CUIT asociado a un DNI (Padrón Alcance 13).
+   * @param {string|number} dni - DNI 7 u 8 dígitos
+   * @returns {Promise<string|null>} CUIT 11 dígitos o null
+   */
+  async getCuitPorDni(dni) {
+    const dniStr = String(dni).replace(/\D/g, '');
+    const dniNum = parseInt(dniStr, 10);
+    if (isNaN(dniNum) || dniStr.length < 7 || dniStr.length > 8) {
+      throw new Error('DNI debe tener 7 u 8 dígitos');
+    }
+    try {
+      const idPersona = await this.afip.RegisterScopeThirteen.getTaxIDByDocument(dniNum);
+      if (idPersona == null) return null;
+      const cuit = Array.isArray(idPersona) ? idPersona[0] : idPersona;
+      const cuitStr = String(cuit).replace(/\D/g, '');
+      return cuitStr.length === 11 ? cuitStr : null;
+    } catch (error) {
+      arcaErr('❌ Error Padrón A13 (CUIT por DNI): ' + error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Obtiene datos del contribuyente por CUIT (Constancia de Inscripción).
+   * @param {string|number} cuit - CUIT 11 dígitos
+   * @returns {Promise<Object|null>} personaReturn o null
+   */
+  async getDatosConstancia(cuit) {
+    const cuitStr = String(cuit).replace(/\D/g, '');
+    if (cuitStr.length !== 11) throw new Error('CUIT debe tener 11 dígitos');
+    const idPersona = parseInt(cuitStr, 10);
+    try {
+      const personaReturn = await this.afip.RegisterInscriptionProof.getTaxpayerDetails(idPersona);
+      return personaReturn || null;
+    } catch (error) {
+      arcaErr('❌ Error Constancia de Inscripción: ' + error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Mapea respuesta de Constancia de Inscripción al formato cliente del ERP.
+   * @param {Object} personaReturn - Respuesta getPersona_v2
+   * @param {string} [dniOpcional] - DNI ingresado (Consumidor Final por DNI)
+   * @returns {Object} { nombre, cuit, dni, condicion_iva, direccion, ciudad, provincia }
+   */
+  mapConstanciaToCliente(personaReturn, dniOpcional) {
+    const dg = personaReturn.datosGenerales || {};
+    const domicilio = dg.domicilioFiscal || {};
+    const monotributo = personaReturn.datosMonotributo;
+    const regimenGeneral = personaReturn.datosRegimenGeneral;
+
+    let condicion_iva = 'Consumidor Final';
+    const tieneMonotributo = monotributo && (
+      (monotributo.categoriaMonotributo && typeof monotributo.categoriaMonotributo === 'object') ||
+      (Array.isArray(monotributo.impuesto) && monotributo.impuesto.length > 0) ||
+      (monotributo.actividadMonotributista && typeof monotributo.actividadMonotributista === 'object')
+    );
+    const tieneRegimenGeneral = regimenGeneral && (
+      (Array.isArray(regimenGeneral.impuesto) && regimenGeneral.impuesto.length > 0) ||
+      (Array.isArray(regimenGeneral.regimen) && regimenGeneral.regimen.length > 0)
+    );
+    if (tieneMonotributo) condicion_iva = 'Monotributo';
+    else if (tieneRegimenGeneral) condicion_iva = 'Responsable Inscripto';
+
+    const idPersona = dg.idPersona != null ? String(dg.idPersona).replace(/\D/g, '') : '';
+    const cuitFormateado = idPersona.length === 11
+      ? `${idPersona.slice(0, 2)}-${idPersona.slice(2, 10)}-${idPersona.slice(10)}`
+      : '';
+
+    let nombre = '';
+    if (dg.razonSocial) nombre = dg.razonSocial.trim();
+    else if (dg.apellido || dg.nombre) nombre = [dg.apellido, dg.nombre].filter(Boolean).join(' ').trim();
+
+    const direccion = (domicilio.direccion || '').trim();
+    const ciudad = (domicilio.localidad || '').trim();
+    const provincia = (domicilio.descripcionProvincia || '').trim();
+
+    const dni = dniOpcional != null && String(dniOpcional).trim() !== ''
+      ? String(dniOpcional).replace(/\D/g, '')
+      : (idPersona.length === 11 ? idPersona.slice(2, 10).replace(/^0+/, '') || idPersona.slice(2, 10) : '');
+
+    return {
+      nombre,
+      cuit: cuitFormateado || idPersona,
+      dni: dni || '',
+      condicion_iva,
+      direccion,
+      ciudad,
+      provincia
+    };
   }
 }
 

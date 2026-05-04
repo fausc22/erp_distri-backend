@@ -6,13 +6,13 @@ const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const { cacheMiddleware, invalidate } = require('../utils/cache');
 const router = express.Router();
 
-// ✅ FASE 3: Rate limiting para búsquedas (protección contra scraping)
 const searchLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 100, // 100 búsquedas por IP cada 15 minutos
+    windowMs: 15 * 60 * 1000,
+    max: 500,
     message: 'Demasiadas búsquedas desde esta IP, por favor intenta más tarde.',
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false }
 });
 
 router.post('/crear-producto', 
@@ -23,14 +23,17 @@ router.post('/crear-producto',
 
 router.get('/buscar-producto', 
     requireEmployee,
-    searchLimiter, // ✅ FASE 3: Rate limiting para búsquedas
+    searchLimiter,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
-    // ✅ FASE 2: Caché con key dinámica basada en query params
+    // Caché con key dinámica: paginación y filtros (Fase 1 Productos)
     (req, res, next) => {
         const searchTerm = req.query.search || '';
-        const limit = req.query.limit || '100';
-        const offset = req.query.offset || '0';
-        const cacheKey = `productos:buscar:${searchTerm}:${limit}:${offset}`;
+        const pagina = req.query.pagina || '1';
+        const porPagina = req.query.porPagina || '50';
+        const categoriaId = req.query.categoria_id || '';
+        const unidadMedida = req.query.unidad_medida || '';
+        const stock = req.query.stock || '';
+        const cacheKey = `productos:buscar:${searchTerm}:${pagina}:${porPagina}:${categoriaId}:${unidadMedida}:${stock}`;
         return cacheMiddleware(cacheKey, 120)(req, res, next);
     },
     productosController.buscarProducto
@@ -80,10 +83,17 @@ router.post('/generarpdf-remitos-multiples',
     productosController.generarPdfRemitosMultiples
 );
 
-router.get('/stock/:id', 
+router.get('/stock/:id',
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'productos' }),
     productosController.obtenerStock
+);
+
+/** Producto plantilla para fletes en Venta Directa: nombre exacto "FLETE DE HACIENDA". */
+router.get('/producto-flete-hacienda',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'productos' }),
+    productosController.getProductoFleteHacienda
 );
 
 router.get('/obtener-todos-productos',
@@ -102,6 +112,12 @@ router.put('/actualizar-producto-basico/:id',
     requireEmployee,
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'productos', incluirBody: true }),
     productosController.actualizarProductoBasico
+);
+
+router.delete('/eliminar-producto/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'DELETE', tabla: 'productos' }),
+    productosController.eliminarProducto
 );
 
 module.exports = router;

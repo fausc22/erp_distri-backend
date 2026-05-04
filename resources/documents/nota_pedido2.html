@@ -4,118 +4,272 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nota de Pedido</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        html, body {
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            background-color: #ffffff;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            color: #333;
+        }
+
+        @page {
+            size: A4;
+            margin: 10mm 12mm;
+        }
+
+        .np-page {
+            page-break-after: always;
+        }
+
+        .np-page.last-page {
+            page-break-after: auto;
+        }
+
+        .header-page-num {
+            font-size: 11px;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        .continuacion-texto {
+            font-size: 11px;
+            color: #555;
+            margin-bottom: 6px;
         }
 
         .page-container {
-            max-width: 210mm;
-            margin: 20px auto;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-            background-color: white;
-            padding: 20px;
+            max-width: 186mm;
+            margin: 0 auto;
+            padding: 8px 10px;
+            background-color: #fff;
         }
 
         .header-section {
-            border-bottom: 1px solid #e5e7eb;
-            padding-bottom: 15px;
-            margin-bottom: 20px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 8px;
+            margin-bottom: 10px;
+            text-align: center;
         }
 
-        .details-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 10px;
+        .header-section h1 {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 6px;
+            letter-spacing: 0.02em;
         }
 
-        /* Styles for the product table */
-        .product-table table {
+        .header-datos {
+            display: table;
+            width: 100%;
+            font-size: 11px;
+            margin-top: 4px;
+        }
+
+        .header-datos-left {
+            display: table-cell;
+            width: 50%;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .header-datos-right {
+            display: table-cell;
+            width: 50%;
+            text-align: right;
+            vertical-align: top;
+        }
+
+        .header-datos p {
+            margin: 2px 0;
+        }
+
+        .np-title-row {
+            display: table;
+            width: 100%;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #666;
+            padding-bottom: 8px;
+        }
+
+        .np-logo {
+            display: table-cell;
+            width: 60px;
+            font-size: 28px;
+            font-weight: bold;
+            color: #1a365d;
+            vertical-align: middle;
+        }
+
+        .np-meta {
+            display: table-cell;
+            text-align: right;
+            vertical-align: middle;
+            font-size: 13px;
+        }
+
+        .np-meta .titulo {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 4px;
+        }
+
+        .np-meta p {
+            margin: 2px 0;
+        }
+
+        .datos-cliente {
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .datos-cliente p {
+            margin: 4px 0;
+            padding: 0;
+        }
+
+        .datos-cliente strong {
+            display: inline-block;
+            min-width: 85px;
+        }
+
+        .observaciones-box {
+            border: 1px solid #666;
+            padding: 6px 8px;
+            margin-bottom: 10px;
+            font-size: 12px;
+            background-color: #f9f9f9;
+        }
+
+        .observaciones-box strong {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
+
+        .product-table {
             width: 100%;
             border-collapse: collapse;
+            font-size: 11px;
+            table-layout: fixed;
         }
 
-        .product-table th, .product-table td {
-            padding: 10px;
+        .product-table th,
+        .product-table td {
+            padding: 4px 5px;
+            border: 1px solid #666;
             text-align: left;
-            border-bottom: 1px dashed #e5e7eb;
         }
 
         .product-table th {
+            background-color: #e0e0e0;
             font-weight: bold;
-            background-color: #f3f4f6;
-            border-top: 2px solid #e5e7eb;
-            border-bottom: 2px solid #e5e7eb;
-            color: #4a5568;
+            text-align: center;
+            font-size: 11px;
+        }
+
+        .product-table th:nth-child(1) { width: 7%; }
+        .product-table th:nth-child(2) { width: 76%; }
+        .product-table th:nth-child(3) { width: 8%; }
+        .product-table th:nth-child(4) { width: 9%; }
+
+        .product-table td:nth-child(1) {
+            width: 7%;
+            text-align: center;
+        }
+
+        .product-table td:nth-child(2) {
+            width: 76%;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .product-table td:nth-child(3) {
+            width: 8%;
+            text-align: center;
+        }
+
+        .product-table td:nth-child(4) {
+            width: 9%;
+            text-align: center;
+        }
+
+        .product-table tbody tr {
+            page-break-inside: avoid;
+        }
+
+        .footer-leyenda {
+            margin-top: 10px;
+            text-align: center;
+            font-size: 11px;
+            color: #555;
         }
     </style>
 </head>
-<body class="bg-gray-100 p-4 sm:p-6 md:p-8">
-    <div class="page-container rounded-lg">
-        <div class="header-section text-center">
-            <h1 class="text-3xl sm:text-4xl font-bold text-gray-800 mb-4 rounded-md p-2">
-                DISTRIBUIDORA VERTI-MAR SRL
-            </h1>
-            
-            <div class="flex justify-between items-start text-sm text-gray-600 mt-4">
-                <div class="text-left mb-4 sm:mb-0">
-                    <p><strong>Dirección:</strong> 31 1555</p>
-                    <p><strong>E-mail:</strong> vertimar@hotmail.com</p>
-                    <p><strong>CUIT:</strong> 30714525030</p>
-                </div>
-                <div class="text-right">
-                    <p><strong>Ing. Brutos:</strong> 251491/4</p>
-                    <p><strong>Inicio actividades:</strong> 01/02/2016</p>
-                    <p><strong>IVA:</strong> Responsable Inscripto</p>
-                </div>
-            </div>
-        </div>
-
-        <div class="main-content mb-8">
-            <div class="flex justify-between items-start mb-6">
-                <h2 class="text-6xl font-extrabold text-blue-600 mb-4 sm:mb-0">NP</h2>
-                <div class="text-right text-lg">
-                    <p class="text-xl font-semibold text-gray-700">Nota de Pedido</p>
-                    <p><strong>Fecha:</strong> <span id="fecha">{{fecha}}</span></p>
-                    <p><strong>N:</strong> <span id="id">{{id}}</span></p>
+<body>
+    <!-- PAGE_TEMPLATE_START -->
+    <div class="np-page {{page_class}}">
+        <div class="page-container">
+            <div class="header-section">
+                <h1>DISTRIBUIDORA VERTI-MAR SRL</h1>
+                <div class="header-datos">
+                    <div class="header-datos-left">
+                        <p><strong>Dirección:</strong> 31 1555 - GENERAL PICO - LA PAMPA</p>
+                        <p><strong>E-mail:</strong> vertimar@hotmail.com</p>
+                        <p><strong>CUIT:</strong> 30714525030</p>
+                    </div>
+                    <div class="header-datos-right">
+                        <p><strong>Ing. Brutos:</strong> 251491/4</p>
+                        <p><strong>Inicio actividades:</strong> 01/02/2016</p>
+                        <p><strong>IVA:</strong> Responsable Inscripto</p>
+                    </div>
                 </div>
             </div>
 
-            <div class="details-grid text-gray-700 text-lg mb-6">
-                <p><strong>Persona:</strong> <span id="cliente_nombre">{{cliente_nombre}}</span></p>
-                <p><strong>Dirección:</strong> <span id="cliente_direccion">{{cliente_direccion}}</span></p>
-                <p><strong>Teléfonos:</strong> <span id="cliente_telefono">{{cliente_telefono}}</span></p>
-                <p><strong>Vendedor:</strong> <span id="empleado_nombre">{{empleado_nombre}}</span></p>
+            <div class="np-title-row">
+                <div class="np-logo">NP</div>
+                <div class="np-meta">
+                    <div class="titulo">Nota de Pedido</div>
+                    <p><strong>Fecha:</strong> {{fecha}}</p>
+                    <p><strong>Nº:</strong> {{id}}</p>
+                    <p class="header-page-num">Página {{page_number}}/{{page_total}}</p>
+                </div>
             </div>
 
-            <div class="product-table rounded-lg overflow-hidden border border-gray-200">
-                <table>
-                    <thead>
-                        <tr>
-                            <th class="w-1/12">Código</th>
-                            <th class="w-7/12">Producto</th> 
-                            <th class="w-2/12">Unidad</th>
-                            <th class="w-2/12 text-center">Cantidad</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {{items}}
-                    </tbody>
-                </table>
+            <div class="datos-cliente">
+                <p><strong>Persona:</strong> {{cliente_nombre}}</p>
+                <p><strong>Dirección:</strong> {{cliente_direccion}}</p>
+                <p><strong>Ciudad:</strong> {{cliente_ciudad}}</p>
+                <p><strong>Teléfono:</strong> {{cliente_telefono}}</p>
+                <p><strong>Vendedor:</strong> {{empleado_nombre}}</p>
             </div>
-        </div>
 
+            {{observaciones_or_continuation}}
 
-        <div class="footer-section text-center text-sm mt-8">
-            <p><strong>OBSERVACIONES:</strong> <span id="cliente_nombre">{{pedido_observacion}}</span></p>
-        </div>
+            <table class="product-table">
+                <thead>
+                    <tr>
+                        <th>Código</th>
+                        <th>Producto</th>
+                        <th>Unidad</th>
+                        <th>Cantidad</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{items}}
+                </tbody>
+            </table>
 
-        <div class="footer-section text-center text-gray-500 text-sm mt-8">
-            <p>Gracias por su preferencia.</p>
+            {{footer_leyenda}}
         </div>
     </div>
+    <!-- PAGE_TEMPLATE_END -->
 </body>
 </html>

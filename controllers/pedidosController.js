@@ -1,13 +1,12 @@
 const db = require('./db');
 const axios = require('axios');
-const path = require('path');
-const fs = require('fs');
 const dotenv = require('dotenv');
 
 const multer = require('multer');
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
+const { roundFacturacion } = require('../utils/rounding');
 
 // ✅ FUNCIÓN PARA GENERAR HASH ÚNICO DEL PEDIDO (IDEMPOTENCIA)
 const generarHashPedido = (pedidoData) => {
@@ -81,38 +80,56 @@ const verificarPedidoDuplicado = async (hashPedido) => {
     });
 };
 
-
-
-const formatearFecha = (fechaBD) => {
-    if (!fechaBD) return 'Fecha no disponible';
-    
-    try {
-        // Crear objeto Date desde string de BD (MySQL datetime format)
-        const fecha = new Date(fechaBD);
-        
-        // Verificar que la fecha es válida
-        if (isNaN(fecha.getTime())) {
-            console.warn('Fecha inválida recibida:', fechaBD);
-            return 'Fecha inválida';
-        }
-        
-        // Formatear componentes
-        const dia = String(fecha.getDate()).padStart(2, '0');
-        const mes = String(fecha.getMonth() + 1).padStart(2, '0'); // +1 porque getMonth() empieza en 0
-        const año = fecha.getFullYear();
-        
-        const horas = String(fecha.getHours()).padStart(2, '0');
-        const minutos = String(fecha.getMinutes()).padStart(2, '0');
-        const segundos = String(fecha.getSeconds()).padStart(2, '0');
-        
-        // Retornar formato deseado: DD/MM/AAAA - HH:mm:ss
-        return `${dia}/${mes}/${año} - ${horas}:${minutos}:${segundos}`;
-        
-    } catch (error) {
-        console.error('Error formateando fecha:', error, 'Fecha original:', fechaBD);
-        return 'Error en fecha';
-    }
+// ✅ HELPERS FASE 2: metadata offline + control de edición segura
+const getOfflineMeta = (req) => {
+    const bodyMeta = req.body?.__offline_meta || {};
+    const headerOpId = req.headers['x-offline-op-id'];
+    return {
+        op_id: bodyMeta.op_id || headerOpId || null,
+        client_ts: bodyMeta.client_ts || null,
+        base_version: bodyMeta.base_version || null
+    };
 };
+
+const getPedidoById = (pedidoId) => {
+    return new Promise((resolve, reject) => {
+        db.query(
+            'SELECT id, estado, empleado_id, cliente_nombre FROM pedidos WHERE id = ? LIMIT 1',
+            [pedidoId],
+            (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
+            }
+        );
+    });
+};
+
+const canEditPedido = (pedido, user) => {
+    if (!pedido) {
+        return { allowed: false, status: 404, code: 'PEDIDO_NOT_FOUND', message: 'Pedido no encontrado' };
+    }
+
+    if (pedido.estado === 'Facturado' || pedido.estado === 'Anulado') {
+        return {
+            allowed: false,
+            status: 409,
+            code: 'PEDIDO_NO_EDITABLE',
+            message: `No se puede editar un pedido en estado "${pedido.estado}"`
+        };
+    }
+
+    if (user?.rol !== 'GERENTE' && Number(pedido.empleado_id) !== Number(user?.id)) {
+        return {
+            allowed: false,
+            status: 403,
+            code: 'PEDIDO_SIN_PERMISOS',
+            message: 'No tiene permisos para editar este pedido'
+        };
+    }
+
+    return { allowed: true };
+};
+
 
 
 const buscarCliente = (req, res) => {
@@ -122,41 +139,44 @@ const buscarCliente = (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Límite por defecto 100, máximo 500
     const offset = Math.max(parseInt(req.query.offset) || 0, 0);
     
-    // ✅ SI NO HAY BÚSQUEDA, DEVOLVER TODOS (para PWA) con límite
-    if (!rawSearch || rawSearch.trim() === '') {
-        const queryTodos = `
-            SELECT * FROM clientes
-            ORDER BY nombre ASC
-            LIMIT ? OFFSET ?
-        `;
-        
-        db.query(queryTodos, [limit, offset], (err, results) => {
-            if (err) {
-                console.error('Error al obtener todos los clientes:', err);
-                return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
-            }
-            console.log(`📦 Enviando clientes: ${results.length} (límite: ${limit}, offset: ${offset})`);
-            res.json({ success: true, data: results });
-        });
-        return;
-    }
-    
-    // ✅ CON BÚSQUEDA, FILTRAR CON LÍMITE
+    const hasSearch = !!(rawSearch && rawSearch.trim() !== '');
     const searchTerm = `%${rawSearch}%`;
-    const query = `
+    const whereClause = hasSearch ? 'WHERE nombre LIKE ?' : '';
+    const whereParams = hasSearch ? [searchTerm] : [];
+
+    const queryCount = `SELECT COUNT(*) as total FROM clientes ${whereClause}`;
+    const queryData = `
         SELECT * FROM clientes
-        WHERE nombre LIKE ?
+        ${whereClause}
         ORDER BY nombre ASC
         LIMIT ? OFFSET ?
     `;
 
-    db.query(query, [searchTerm, limit, offset], (err, results) => {
-        if (err) {
-            console.error('Error al obtener los clientes:', err);
+    db.query(queryCount, whereParams, (countErr, countRows) => {
+        if (countErr) {
+            console.error('Error al contar clientes:', countErr);
             return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
         }
-        console.log(`🔍 Búsqueda clientes "${rawSearch}": ${results.length} resultados (límite: ${limit}, offset: ${offset})`);
-        res.json({ success: true, data: results });
+
+        const total = Number(countRows?.[0]?.total || 0);
+        const hasMore = offset + limit < total;
+        const dataParams = [...whereParams, limit, offset];
+
+        db.query(queryData, dataParams, (err, results) => {
+            if (err) {
+                console.error('Error al obtener los clientes:', err);
+                return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
+            }
+            console.log(`🔍 Búsqueda clientes "${rawSearch}": ${results.length}/${total} resultados (límite: ${limit}, offset: ${offset})`);
+            res.json({
+                success: true,
+                data: results,
+                total,
+                limit,
+                offset,
+                hasMore
+            });
+        });
     });
 };
 
@@ -277,19 +297,25 @@ const registrarPedido = (pedidoData, callback, hashPedido = null) => {
     
     // ✅ Asegurar que exentoFinal sea un número, no string
     exentoFinal = Number(exentoFinal);
+
+    // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
+    const subtotalR = roundFacturacion(subtotal);
+    const ivaTotalR = roundFacturacion(iva_total);
+    const exentoR = roundFacturacion(exentoFinal);
+    const totalR = roundFacturacion(total);
     
     console.log(`💾 [registrarPedido] Recibido exento: ${exento}, Tipo: ${typeof exento}, Final: ${exentoFinal} (${typeof exentoFinal})`);
     
     const pedidoValues = [
         cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
         cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-        subtotal, iva_total, exentoFinal, total, estado, observaciones, empleado_id, empleado_nombre,
+        subtotalR, ivaTotalR, exentoR, totalR, estado, observaciones, empleado_id, empleado_nombre,
         hashPedido || null // ✅ AGREGAR HASH AL INSERT (puede ser null si no existe)
     ];
     
     console.log(`💾 [registrarPedido] Valores a insertar:`);
-    console.log(`   - Exento (posición 11): ${exentoFinal} (${typeof exentoFinal})`);
-    console.log(`   - Subtotal: ${subtotal}, IVA: ${iva_total}, Total: ${total}`);
+    console.log(`   - Exento (posición 11): ${exentoR} (${typeof exentoR})`);
+    console.log(`   - Subtotal: ${subtotalR}, IVA: ${ivaTotalR}, Total: ${totalR} (redondeados)`);
     console.log(`   - Query campos: cliente_id, cliente_nombre, ..., subtotal, iva_total, exento, total, ...`);
     console.log(`   - Valores en orden: [${pedidoValues.map((v, i) => i === 10 ? `[EXENTO:${v}]` : v).join(', ')}]`);
     
@@ -307,8 +333,8 @@ const registrarPedido = (pedidoData, callback, hashPedido = null) => {
         db.query('SELECT exento FROM pedidos WHERE id = ?', [result.insertId], (errVerify, results) => {
             if (!errVerify && results.length > 0) {
                 console.log(`🔍 [VERIFICACIÓN] Exento guardado en BD: ${results[0].exento}`);
-                if (parseFloat(results[0].exento) !== exentoFinal) {
-                    console.error(`❌ [ERROR] El exento guardado (${results[0].exento}) NO coincide con el enviado (${exentoFinal})`);
+                if (parseFloat(results[0].exento) !== exentoR) {
+                    console.error(`❌ [ERROR] El exento guardado (${results[0].exento}) NO coincide con el enviado (${exentoR})`);
                 }
             }
         });
@@ -404,90 +430,21 @@ const nuevoPedido = async (req, res) => {
         });
     }
 
-    // ✅ Calcular monto exento si no viene del frontend o si el cliente es exento
+    // ✅ Política fiscal: EXENTO informa IVA contenido; no EXENTO informa 0.
+    // No afecta precio final (total), solo el campo fiscal exento.
     const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
+    const ivaTotalNumerico = Number(iva_total);
+    const montoExentoFinal = esClienteExento && Number.isFinite(ivaTotalNumerico)
+        ? parseFloat(ivaTotalNumerico.toFixed(2))
+        : 0;
     
-    // Convertir exento a número, manejando strings "0.00" o undefined
-    let montoExento = 0;
-    if (exento !== undefined && exento !== null && exento !== '') {
-        const exentoNum = parseFloat(exento);
-        montoExento = isNaN(exentoNum) ? 0 : exentoNum;
-    }
-    
-    console.log(`🔍 Exento recibido: "${exento}" (tipo: ${typeof exento}), Convertido: ${montoExento}`);
-    console.log(`🔍 Cliente es exento: ${esClienteExento}, Monto exento actual: ${montoExento}`);
-    
-    // Si el cliente es exento, calcular el monto exento SIEMPRE (ignorar lo que venga del frontend)
-    if (esClienteExento) {
-        // Calcular el monto exento desde los productos
-        console.log('🔄 Calculando monto exento en backend para cliente exento...');
-        console.log(`   - Productos a procesar: ${productos.length}`);
-        
-        // Obtener todos los IDs de productos
-        const productoIds = productos.map(p => p.id);
-        console.log(`   - IDs de productos: ${productoIds.join(', ')}`);
-        
-        if (productoIds.length > 0) {
-            // Obtener porcentajes de IVA de todos los productos en una sola consulta
-            const placeholders = productoIds.map(() => '?').join(',');
-            const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
-            
-            montoExento = await new Promise((resolve, reject) => {
-                db.query(queryProductos, productoIds, (err, results) => {
-                    if (err) {
-                        console.error('❌ Error obteniendo IVA de productos:', err);
-                        return resolve(0);
-                    }
-                    
-                    console.log(`   - Productos encontrados en BD: ${results.length}`);
-                    
-                    // Crear un mapa de ID -> porcentaje IVA
-                    const ivaMap = {};
-                    results.forEach(row => {
-                        ivaMap[row.id] = parseFloat(row.iva) || 21;
-                        console.log(`   - Producto ${row.id}: IVA ${ivaMap[row.id]}%`);
-                    });
-                    
-                    // Calcular monto exento para cada producto
-                    let totalExento = 0;
-                    productos.forEach(producto => {
-                        const porcentajeIva = ivaMap[producto.id] || 21;
-                        const subtotalProducto = parseFloat(producto.subtotal) || 0;
-                        const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
-                        console.log(`   - Producto ${producto.id}: Subtotal $${subtotalProducto}, IVA ${porcentajeIva}%, Exento $${ivaQueDeberiaCobrarse}`);
-                        totalExento += ivaQueDeberiaCobrarse;
-                    });
-                    
-                    console.log(`✅ Monto exento calculado: $${totalExento.toFixed(2)}`);
-                    resolve(totalExento);
-                });
-            });
-        } else {
-            console.log('⚠️ No hay productos para calcular monto exento');
-            montoExento = 0;
-        }
-    }
-    
-    // ✅ Asegurar que montoExento sea un número válido antes de guardar
-    // Si el cliente es exento, SIEMPRE usar el valor calculado (aunque sea 0)
-    let montoExentoFinal = 0;
-    if (esClienteExento) {
-        // Si se calculó el monto exento, usarlo; si no, usar el que vino del frontend
-        montoExentoFinal = (montoExento !== null && montoExento !== undefined && !isNaN(montoExento)) 
-            ? parseFloat(montoExento.toFixed(2)) 
-            : 0;
-    } else {
-        // Si no es exento, el monto exento debe ser 0
-        montoExentoFinal = 0;
-    }
-    
-    console.log(`💰 Monto exento calculado: $${montoExento.toFixed(2)}`);
-    console.log(`💰 Tipo de montoExento: ${typeof montoExento}, Valor: ${montoExento}`);
+    console.log(`🔍 Cliente es exento: ${esClienteExento}`);
+    console.log(`💰 IVA total recibido: ${iva_total}`);
     console.log(`💾 Preparando para guardar pedido:`);
     console.log(`   - Cliente: ${cliente_nombre}`);
     console.log(`   - Condición: ${cliente_condicion}`);
     console.log(`   - Es exento: ${esClienteExento}`);
-    console.log(`   - Monto exento a guardar: $${montoExentoFinal.toFixed(2)}`);
+    console.log(`   - Monto exento a guardar: $${montoExentoFinal.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
     console.log(`   - Tipo de montoExentoFinal: ${typeof montoExentoFinal}`);
     
     registrarPedido({
@@ -537,48 +494,122 @@ const nuevoPedido = async (req, res) => {
     }, hashPedidoFinal); // ✅ PASAR HASH COMO TERCER PARÁMETRO
 };
 
-// Obtener todos los pedidos (con filtro opcional por empleado)
+// Obtener pedidos con paginación y filtros. Si dias=30: solo últimos 30 días. Si no se envía dias: todo el historial (o filtros).
+// Query params: pagina, porPagina, empleado_id, dias, fechaDesde, fechaHasta, cliente, estado, ciudad, empleado_nombre
+// Respuesta: { success, data, total, pagina, porPagina }
 const obtenerPedidos = (req, res) => {
     const empleadoIdRaw = req.query.empleado_id;
-    
-    // VALIDACIÓN Y CONVERSIÓN CORRECTA
+    const diasRaw = req.query.dias;
+    const pagina = Math.max(1, parseInt(req.query.pagina, 10) || 1);
+    const porPagina = Math.min(200, Math.max(10, parseInt(req.query.porPagina, 10) || 50));
+    const offset = (pagina - 1) * porPagina;
+    const fechaDesdeParam = (req.query.fechaDesde || '').toString().trim();
+    const fechaHastaParam = (req.query.fechaHasta || '').toString().trim();
+    const clienteParam = (req.query.cliente || '').toString().trim();
+    const estadoParamRaw = (req.query.estado || '').toString().trim();
+    const ciudadParam = (req.query.ciudad || '').toString().trim();
+    const empleadoNombreParam = (req.query.empleado_nombre || '').toString().trim();
+
+    // Normalizar estado al valor exacto del enum (Exportado, Facturado, Anulado)
+    const ESTADOS_VALIDOS = ['Exportado', 'Facturado', 'Anulado'];
+    const estadoParam = ESTADOS_VALIDOS.find(e => e.toLowerCase() === estadoParamRaw.toLowerCase()) || estadoParamRaw;
+
     let empleadoId = null;
     if (empleadoIdRaw && empleadoIdRaw !== 'null' && empleadoIdRaw !== 'undefined') {
         const num = parseInt(empleadoIdRaw, 10);
-        if (!isNaN(num) && num > 0) {
-            empleadoId = num;
-        }
+        if (!isNaN(num) && num > 0) empleadoId = num;
     }
-    
-    let query = `
+
+    const usarRangoFechas = fechaDesdeParam.length > 0 || fechaHastaParam.length > 0;
+    let fechaDesde = null;
+    let fechaHasta = null;
+    if (usarRangoFechas) {
+        if (fechaDesdeParam) fechaDesde = fechaDesdeParam + ' 00:00:00';
+        if (fechaHastaParam) fechaHasta = fechaHastaParam + ' 23:59:59';
+    }
+
+    let dias = parseInt(diasRaw, 10);
+    const usarFiltroDias = !usarRangoFechas && diasRaw !== undefined && diasRaw !== '' && !isNaN(dias) && dias > 0;
+    if (usarFiltroDias && dias > 365) dias = 365;
+    if (usarFiltroDias && dias > 30) dias = 30;
+
+    if (req.user?.rol !== 'GERENTE') {
+        empleadoId = req.user?.id || empleadoId;
+    }
+
+    if (!usarRangoFechas && usarFiltroDias) {
+        const from = new Date(Date.now() - dias * 24 * 60 * 60 * 1000);
+        fechaDesde = from.toISOString().slice(0, 19).replace('T', ' ');
+    }
+
+    const conditions = ['1=1'];
+    const queryParams = [];
+
+    if (fechaDesde) {
+        conditions.push('fecha >= ?');
+        queryParams.push(fechaDesde);
+    }
+    if (fechaHasta) {
+        conditions.push('fecha <= ?');
+        queryParams.push(fechaHasta);
+    }
+    if (empleadoId !== null) {
+        conditions.push('empleado_id = ?');
+        queryParams.push(empleadoId);
+    }
+    if (clienteParam) {
+        conditions.push('cliente_nombre LIKE ?');
+        queryParams.push('%' + clienteParam + '%');
+    }
+    if (estadoParam) {
+        conditions.push('estado = ?');
+        queryParams.push(estadoParam);
+    }
+    if (ciudadParam) {
+        conditions.push('cliente_ciudad LIKE ?');
+        queryParams.push('%' + ciudadParam + '%');
+    }
+    if (empleadoNombreParam) {
+        conditions.push('TRIM(empleado_nombre) = ?');
+        queryParams.push(empleadoNombreParam);
+    }
+
+    const whereClause = 'WHERE ' + conditions.join(' AND ');
+    const baseQuery = 'FROM pedidos ' + whereClause;
+    const countQuery = 'SELECT COUNT(*) as total FROM pedidos ' + whereClause;
+    const dataQuery = `
         SELECT 
             id, fecha, 
             cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
             cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
             subtotal, iva_total, exento, total, estado, observaciones, 
             empleado_id, empleado_nombre
-        FROM pedidos 
+        FROM pedidos
+        ${whereClause}
+        ORDER BY fecha DESC
+        LIMIT ? OFFSET ?
     `;
-    
-    let queryParams = [];
-    
-    if (empleadoId !== null) {
-        query += ` WHERE empleado_id = ?`;
-        queryParams.push(empleadoId);
-    }
-    
-    query += ` ORDER BY fecha DESC`;
-    
-    console.log(`📋 Consulta pedidos: ${empleadoId ? `empleado ${empleadoId}` : 'todos'} - filtro=${empleadoIdRaw} → ${empleadoId}`);
-    
-    db.query(query, queryParams, (err, results) => {
-        if (err) {
-            console.error('Error al obtener pedidos:', err);
+    const dataParams = [...queryParams, porPagina, offset];
+
+    db.query(countQuery, queryParams, (errCount, countRows) => {
+        if (errCount) {
+            console.error('Error al contar pedidos:', errCount);
             return res.status(500).json({ success: false, message: 'Error al obtener pedidos' });
         }
-        
-        console.log(`📋 Resultados: ${results.length} pedidos encontrados`);
-        res.json({ success: true, data: results });
+        const total = (countRows && countRows[0] && countRows[0].total) ? countRows[0].total : 0;
+        db.query(dataQuery, dataParams, (err, results) => {
+            if (err) {
+                console.error('Error al obtener pedidos:', err);
+                return res.status(500).json({ success: false, message: 'Error al obtener pedidos' });
+            }
+            res.json({
+                success: true,
+                data: results || [],
+                total: total,
+                pagina: pagina,
+                porPagina: porPagina
+            });
+        });
     });
 };
 
@@ -900,39 +931,25 @@ const filtrarPedido = (req, res) => {
 const actualizarObservacionesPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { observaciones } = req.body;
+    const offlineMeta = getOfflineMeta(req);
     
     try {
-        // Obtener datos anteriores para auditoría
-        const obtenerDatosAnterioresPromise = () => {
-            return new Promise((resolve, reject) => {
-                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
-                    if (err) return reject(err);
-                    resolve(results.length > 0 ? results[0] : null);
-                });
+        const datosAnteriores = await new Promise((resolve, reject) => {
+            db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
             });
-        };
-
-        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        });
         if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
-        // ✅ VALIDAR QUE EL PEDIDO NO ESTÉ FACTURADO
-        if (datosAnteriores.estado === 'Facturado') {
-            console.warn(`⚠️ Intento de editar observaciones en pedido facturado ${pedidoId}`);
-            
-            await auditarOperacion(req, {
-                accion: 'UPDATE_BLOCKED',
-                tabla: 'pedidos',
-                registroId: pedidoId,
-                estado: 'FALLIDO',
-                detallesAdicionales: `Intento bloqueado de cambiar observaciones en pedido facturado ${pedidoId} - Usuario: ${req.user?.nombre || 'Desconocido'}`
-            });
-
-            return res.status(403).json({
+        const permiso = canEditPedido(datosAnteriores, req.user);
+        if (!permiso.allowed) {
+            return res.status(permiso.status).json({
                 success: false,
-                message: 'No se pueden modificar las observaciones de un pedido que ya está facturado',
-                code: 'PEDIDO_FACTURADO',
+                message: permiso.message,
+                code: permiso.code,
                 estadoActual: datosAnteriores.estado
             });
         }
@@ -960,7 +977,7 @@ const actualizarObservacionesPedido = async (req, res) => {
             registroId: pedidoId,
             datosAnteriores,
             datosNuevos: { ...datosAnteriores, observaciones: observaciones || 'sin observaciones' },
-            detallesAdicionales: `Observaciones actualizadas - Cliente: ${datosAnteriores.cliente_nombre}`
+            detallesAdicionales: `Observaciones actualizadas - Cliente: ${datosAnteriores.cliente_nombre}${offlineMeta.op_id ? ` - OfflineOp: ${offlineMeta.op_id}` : ''}`
         });
         
         res.json({ success: true, message: 'Observaciones actualizadas correctamente' });
@@ -983,6 +1000,7 @@ const actualizarObservacionesPedido = async (req, res) => {
 const agregarProductoPedidoExistente = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal } = req.body;
+    const offlineMeta = getOfflineMeta(req);
 
     if (!producto_id || !cantidad || cantidad <= 0) {
         return res.status(400).json({
@@ -992,29 +1010,17 @@ const agregarProductoPedidoExistente = async (req, res) => {
     }
 
     try {
-        // 1. Obtener la condición IVA del cliente del pedido
-        const obtenerClientePedidoPromise = () => {
-            return new Promise((resolve, reject) => {
-                db.query('SELECT cliente_condicion FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
-                    if (err) return reject(err);
-                    resolve(results.length > 0 ? results[0] : null);
-                });
+        const pedido = await getPedidoById(pedidoId);
+        const permiso = canEditPedido(pedido, req.user);
+        if (!permiso.allowed) {
+            return res.status(permiso.status).json({
+                success: false,
+                message: permiso.message,
+                code: permiso.code
             });
-        };
-
-        const datosPedido = await obtenerClientePedidoPromise();
-        if (!datosPedido) {
-            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
-        // 2. Recalcular IVA si el cliente es EXENTO
-        const esClienteExento = datosPedido.cliente_condicion?.toUpperCase() === 'EXENTO';
-        let ivaFinal = iva;
-
-        if (esClienteExento) {
-            ivaFinal = 0;
-            console.log(`✅ Cliente EXENTO detectado - IVA ajustado a 0 para producto ${producto_nombre}`);
-        }
+        const ivaFinal = iva;
 
         const query = `
             INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
@@ -1048,7 +1054,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
                 pedido_id: pedidoId,
                 ...req.body
             },
-            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad} - Nuevos totales: $${totalesActualizados.total}`
+            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad} - Nuevos totales: $${totalesActualizados.total}${offlineMeta.op_id ? ` - OfflineOp: ${offlineMeta.op_id}` : ''}`
         });
 
         res.json({ 
@@ -1088,6 +1094,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
 const actualizarProductoPedido = async (req, res) => {
     const { cantidad, precio, iva, subtotal, descuento_porcentaje, producto_nombre } = req.body;
     const productId = req.params.productId;
+    const offlineMeta = getOfflineMeta(req);
 
     if (!cantidad || cantidad <= 0 || isNaN(parseFloat(cantidad))) {
         return res.status(400).json({ 
@@ -1142,29 +1149,17 @@ const actualizarProductoPedido = async (req, res) => {
         const pedidoId = datosAnteriores.pedido_id;
         const diferenciaCantidad = cantidad - cantidadAnterior;
 
-        // 2. Obtener condición IVA del cliente del pedido
-        const obtenerClientePedidoPromise = () => {
-            return new Promise((resolve, reject) => {
-                db.query('SELECT cliente_condicion FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
-                    if (err) return reject(err);
-                    resolve(results.length > 0 ? results[0] : null);
-                });
+        const pedido = await getPedidoById(pedidoId);
+        const permiso = canEditPedido(pedido, req.user);
+        if (!permiso.allowed) {
+            return res.status(permiso.status).json({
+                success: false,
+                message: permiso.message,
+                code: permiso.code
             });
-        };
-
-        const datosPedido = await obtenerClientePedidoPromise();
-        if (!datosPedido) {
-            return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
-        // 3. Ajustar IVA si el cliente es EXENTO
-        const esClienteExento = datosPedido.cliente_condicion?.toUpperCase() === 'EXENTO';
         let ivaFinal = iva;
-
-        if (esClienteExento) {
-            ivaFinal = 0;
-            console.log(`✅ Cliente EXENTO detectado - IVA ajustado a 0 para producto ${datosAnteriores.producto_nombre}`);
-        }
 
         // 4. VALIDAR STOCK DISPONIBLE **ANTES** DE ACTUALIZAR
         // Si aumentamos la cantidad, debemos verificar que haya stock disponible
@@ -1253,7 +1248,7 @@ const actualizarProductoPedido = async (req, res) => {
                 descuento_porcentaje: descuentoFinal,
                 producto_nombre: nombreFinal
             },
-            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre}${nombreFinal !== datosAnteriores.producto_nombre ? ` → ${nombreFinal}` : ''} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}`
+            detallesAdicionales: `Producto actualizado por ${tipoOperacion} ${req.user?.nombre || 'Desconocido'} en pedido ${pedidoId}: ${datosAnteriores.producto_nombre}${nombreFinal !== datosAnteriores.producto_nombre ? ` → ${nombreFinal}` : ''} - Cantidad: ${cantidadAnterior} → ${cantidad} - Precio: ${datosAnteriores.precio} → ${precio}${descuentoFinal > 0 ? ` - Descuento: ${descuentoFinal}%` : ''} - Nuevos totales: ${totalesActualizados.total}${offlineMeta.op_id ? ` - OfflineOp: ${offlineMeta.op_id}` : ''}`
         });
 
         // ✅ 9. RESPUESTA CON INFORMACIÓN DETALLADA
@@ -1298,6 +1293,7 @@ const actualizarProductoPedido = async (req, res) => {
 // Eliminar producto de un pedido
 const eliminarProductoPedido = async (req, res) => {
     const productId = req.params.productId;
+    const offlineMeta = getOfflineMeta(req);
 
     try {
         // 1. Obtener datos del producto antes de eliminarlo
@@ -1316,6 +1312,15 @@ const eliminarProductoPedido = async (req, res) => {
         }
 
         const pedidoId = datosProducto.pedido_id;
+        const pedido = await getPedidoById(pedidoId);
+        const permiso = canEditPedido(pedido, req.user);
+        if (!permiso.allowed) {
+            return res.status(permiso.status).json({
+                success: false,
+                message: permiso.message,
+                code: permiso.code
+            });
+        }
 
         // 2. Eliminar el producto del pedido
         const queryEliminar = `DELETE FROM pedidos_cont WHERE id = ?`;
@@ -1342,7 +1347,7 @@ const eliminarProductoPedido = async (req, res) => {
             tabla: 'pedidos_cont',
             registroId: productId,
             datosAnteriores: datosProducto,
-            detallesAdicionales: `Producto eliminado del pedido ${pedidoId}: ${datosProducto.producto_nombre} x${datosProducto.cantidad} - Nuevos totales: $${totalesActualizados.total}`
+            detallesAdicionales: `Producto eliminado del pedido ${pedidoId}: ${datosProducto.producto_nombre} x${datosProducto.cantidad} - Nuevos totales: $${totalesActualizados.total}${offlineMeta.op_id ? ` - OfflineOp: ${offlineMeta.op_id}` : ''}`
         });
 
         res.json({ 
@@ -1469,7 +1474,7 @@ const generarPdfNotaPedido = async (req, res) => {
     }
 };
 
-// ✅ GENERAR PDFs MÚLTIPLES DE NOTAS DE PEDIDO 
+// ✅ GENERAR PDFs MÚLTIPLES DE NOTAS DE PEDIDO (misma lógica que el PDF individual: multipágina + placeholders)
 const generarPdfNotasPedidoMultiples = async (req, res) => {
     const { pedidosIds } = req.body;
     
@@ -1477,20 +1482,23 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
         return res.status(400).json({ error: "Debe proporcionar al menos un ID de pedido válido" });
     }
 
-    const templatePath = path.join(__dirname, "../resources/documents/nota_pedido2.html");
-
-    if (!fs.existsSync(templatePath)) {
-        return res.status(500).json({ error: "Plantilla HTML no encontrada" });
+    let PDFDocument;
+    try {
+        ({ PDFDocument } = require('pdf-lib'));
+    } catch (e) {
+        console.error('❌ Dependencia faltante: pdf-lib');
+        return res.status(500).json({
+            error: "Falta dependencia para impresión múltiple",
+            details: "Instalar 'pdf-lib' en el backend y reiniciar el servicio"
+        });
     }
 
     try {
         console.log(`📄 Iniciando generación de ${pedidosIds.length} notas de pedido múltiples...`);
+        const startTime = Date.now();
+        const pdfBuffers = [];
 
-        const htmlSections = [];
-
-        for (let i = 0; i < pedidosIds.length; i++) {
-            const pedidoId = pedidosIds[i];
-            
+        for (const pedidoId of pedidosIds) {
             try {
                 const pedidoRows = await new Promise((resolve, reject) => {
                     db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
@@ -1517,75 +1525,41 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
                 }
                 
                 const pedido = pedidoRows[0];
-                
-                let htmlTemplate = fs.readFileSync(templatePath, "utf8");
-                
-                const fechaFormateada = formatearFecha(pedido.fecha);
-                htmlTemplate = htmlTemplate
-                    .replace("{{fecha}}", fechaFormateada)
-                    .replace("{{id}}", pedido.id)
-                    .replace("{{cliente_nombre}}", pedido.cliente_nombre)
-                    .replace("{{cliente_direccion}}", pedido.cliente_direccion || "No informado")
-                    .replace("{{cliente_telefono}}", pedido.cliente_telefono || "No informado")
-                    .replace("{{empleado_nombre}}", pedido.empleado_nombre || "No informado")
-                    .replace("{{pedido_observacion}}", pedido.observaciones || "No informado");
-
-                const itemsHTML = productos
-                    .map(p => `
-                        <tr>
-                            <td>${p.producto_id || ''}</td>
-                            <td>${p.producto_nombre || ''}</td>
-                            <td>${p.producto_um || ''}</td>
-                            <td style="text-align: center;">${p.cantidad || 0}</td>
-                        </tr>
-                    `)
-                    .join("");
-
-                htmlTemplate = htmlTemplate.replace("{{items}}", itemsHTML);
-                
-                htmlSections.push(htmlTemplate);
-                
+                const pdfBufferIndividual = await pdfGenerator.generarNotaPedido(pedido, productos);
+                pdfBuffers.push(pdfBufferIndividual);
                 console.log(`✅ PDF generado para pedido ID ${pedidoId}`);
-                
             } catch (error) {
                 console.error(`❌ Error procesando pedido ID ${pedidoId}:`, error);
             }
         }
 
-        if (htmlSections.length === 0) {
+        if (pdfBuffers.length === 0) {
             return res.status(404).json({ 
                 error: "No se pudieron generar PDFs para las notas de pedido seleccionadas"
             });
         }
 
-        // ✅ COMBINAR CON SALTO DE PÁGINA PARA html-pdf
-        const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
+        const mergedPdf = await PDFDocument.create();
+        for (const buffer of pdfBuffers) {
+            const pdf = await PDFDocument.load(buffer);
+            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+            copiedPages.forEach((page) => mergedPdf.addPage(page));
+        }
+        const mergedBytes = await mergedPdf.save();
+        const pdfBuffer = Buffer.from(mergedBytes);
 
-        // ✅ USAR pdfGenerator con html-pdf
-        const pdfBuffer = await pdfGenerator.generatePdfFromHtml(combinedHTML, {
-            format: 'A4',
-            border: {
-                top: '8mm',
-                right: '6mm', 
-                bottom: '8mm',
-                left: '6mm'
-            },
-            quality: "75",
-            type: "pdf",
-            timeout: 30000
-        });
+        const generationTime = Date.now() - startTime;
+        console.log(`🎉 ${pdfBuffers.length} notas de pedido generadas y combinadas en ${generationTime}ms`);
 
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'pedidos',
-            detallesAdicionales: `PDFs múltiples generados: ${htmlSections.length} notas de pedido combinadas`
+            detallesAdicionales: `PDFs múltiples generados: ${pdfBuffers.length} notas de pedido combinadas`
         });
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="Notas_Pedidos_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
         res.end(pdfBuffer);
-        
-        console.log(`🎉 ${htmlSections.length} notas de pedido generadas y combinadas exitosamente`);
         
     } catch (error) {
         console.error("❌ Error generando PDFs múltiples:", error);
@@ -1604,65 +1578,81 @@ const generarPdfNotasPedidoMultiples = async (req, res) => {
 };
 
 const obtenerDatosFiltros = (req, res) => {
-    // Consulta optimizada para obtener ciudades y clientes únicos
+    // Consulta optimizada para ciudades, clientes y empleados únicos desde TODOS los pedidos
     const queryCiudades = `
-        SELECT DISTINCT cliente_ciudad
-        FROM pedidos 
-        WHERE cliente_ciudad IS NOT NULL 
-            AND cliente_ciudad != ''
-            AND TRIM(cliente_ciudad) != ''
+        SELECT DISTINCT cliente_ciudad AS valor FROM pedidos
+        WHERE cliente_ciudad IS NOT NULL AND TRIM(cliente_ciudad) != '' AND cliente_ciudad != 'No especificada'
         ORDER BY cliente_ciudad ASC
+        LIMIT 150
+    `;
+    const queryClientes = `
+        SELECT DISTINCT cliente_nombre AS valor FROM pedidos
+        WHERE cliente_nombre IS NOT NULL AND TRIM(cliente_nombre) != '' AND cliente_nombre != 'Cliente no especificado'
+        ORDER BY cliente_nombre ASC
+        LIMIT 300
+    `;
+    const queryEmpleados = `
+        SELECT DISTINCT empleado_nombre AS valor FROM pedidos
+        WHERE empleado_nombre IS NOT NULL AND TRIM(empleado_nombre) != '' AND empleado_nombre != 'No especificado'
+        ORDER BY empleado_nombre ASC
         LIMIT 100
     `;
 
-    const queryClientes = `
-        SELECT DISTINCT cliente_nombre
-        FROM pedidos 
-        WHERE cliente_nombre IS NOT NULL 
-            AND cliente_nombre != ''
-            AND TRIM(cliente_nombre) != ''
-        ORDER BY cliente_nombre ASC
-        LIMIT 200
-    `;
-
-    // Ejecutar consulta para ciudades
-    db.query(queryCiudades, (err, resultadoCiudades) => {
-        if (err) {
-            console.error('Error al obtener ciudades para filtros:', err);
-            return res.status(500).json({ 
-                success: false, 
-                message: "Error al obtener ciudades para filtros" 
-            });
+    db.query(queryClientes, (errC, rowsC) => {
+        if (errC) {
+            console.error('Error al obtener clientes para filtros:', errC);
+            return res.status(500).json({ success: false, message: 'Error al obtener datos de filtros' });
         }
-
-        // Ejecutar consulta para clientes
-        db.query(queryClientes, (err, resultadoClientes) => {
-            if (err) {
-                console.error('Error al obtener clientes para filtros:', err);
-                return res.status(500).json({ 
-                    success: false, 
-                    message: "Error al obtener clientes para filtros" 
-                });
+        db.query(queryCiudades, (errCi, rowsCi) => {
+            if (errCi) {
+                console.error('Error al obtener ciudades para filtros:', errCi);
+                return res.status(500).json({ success: false, message: 'Error al obtener datos de filtros' });
             }
-
-            // Extraer solo los valores de las ciudades y clientes
-            const ciudades = resultadoCiudades.map(row => row.cliente_ciudad);
-            const clientes = resultadoClientes.map(row => row.cliente_nombre);
-
-            console.log(`📊 Datos para filtros obtenidos: ${ciudades.length} ciudades, ${clientes.length} clientes`);
-
-            res.json({
-                success: true,
-                data: {
-                    ciudades,
-                    clientes
-                },
-                meta: {
-                    totalCiudades: ciudades.length,
-                    totalClientes: clientes.length
+            db.query(queryEmpleados, (errE, rowsE) => {
+                if (errE) {
+                    console.error('Error al obtener empleados para filtros:', errE);
+                    return res.status(500).json({ success: false, message: 'Error al obtener datos de filtros' });
                 }
+                const clientes = (rowsC || []).map(r => r.valor);
+                const ciudades = (rowsCi || []).map(r => r.valor);
+                const empleados = (rowsE || []).map(r => r.valor);
+                res.json({
+                    success: true,
+                    data: { clientes, ciudades, empleados },
+                    meta: { totalClientes: clientes.length, totalCiudades: ciudades.length, totalEmpleados: empleados.length }
+                });
             });
         });
+    });
+};
+
+/**
+ * Sugerencias para autocomplete: busca en TODOS los pedidos por tipo (cliente, ciudad, empleado).
+ * Query params: tipo (cliente|ciudad|empleado), q (texto). Limita a 25 resultados.
+ */
+const obtenerSugerenciasFiltros = (req, res) => {
+    const tipo = (req.query.tipo || '').trim().toLowerCase();
+    const q = (req.query.q || '').trim();
+    const validos = ['cliente', 'ciudad', 'empleado'];
+    if (!validos.includes(tipo)) {
+        return res.status(400).json({ success: false, message: 'Parámetro tipo debe ser cliente, ciudad o empleado' });
+    }
+    const columna = tipo === 'cliente' ? 'cliente_nombre' : tipo === 'ciudad' ? 'cliente_ciudad' : 'empleado_nombre';
+    const term = q.length ? '%' + q + '%' : '%';
+    const query = `
+        SELECT DISTINCT ${columna} AS valor FROM pedidos
+        WHERE ${columna} IS NOT NULL AND TRIM(${columna}) != ''
+        AND (${columna} LIKE ?)
+        ORDER BY ${columna} ASC
+        LIMIT 25
+    `;
+    db.query(query, [term], (err, rows) => {
+        if (err) {
+            console.error('Error en sugerencias filtros pedidos:', err);
+            return res.status(500).json({ success: false, message: 'Error al buscar sugerencias' });
+        }
+        const valores = (rows || []).map(r => r.valor);
+        res.json({ success: true, data: valores });
     });
 };
 
@@ -1711,17 +1701,13 @@ const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente 
             try {
                 // 2. Si se proporciona condición IVA, recalcular IVA de cada producto
                 if (condicionIvaCliente) {
-                    const esClienteExento = condicionIvaCliente.toUpperCase() === 'EXENTO';
-                    console.log(`🔄 Recalculando IVA para ${productos.length} productos. Cliente ${esClienteExento ? 'EXENTO' : 'CON IVA'}`);
+                    console.log(`🔄 Recalculando IVA comercial para ${productos.length} productos. Condición cliente: ${condicionIvaCliente}`);
 
                     for (const producto of productos) {
                         const subtotal = parseFloat(producto.subtotal) || 0;
                         const porcentajeIva = parseFloat(producto.porcentaje_iva) || 21;
 
-                        // Si el cliente es EXENTO, IVA = 0. Si no, calcular IVA
-                        const nuevoIva = esClienteExento
-                            ? 0
-                            : parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
+                        const nuevoIva = parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
 
                         // Actualizar IVA del producto
                         await new Promise((resolveUpdate, rejectUpdate) => {
@@ -1754,17 +1740,14 @@ const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente 
                         const ivaTotal = parseFloat(results[0].iva_total) || 0;
                         const total = subtotalTotal + ivaTotal;
                         
-                        // ✅ Calcular monto exento: si el cliente es exento, calcular el IVA que debería haberse cobrado
-                        let montoExento = 0;
-                        if (condicionIvaCliente && condicionIvaCliente.toUpperCase() === 'EXENTO') {
-                            // Calcular el IVA que debería haberse cobrado si no fuera exento
-                            montoExento = productos.reduce((acc, prod) => {
-                                const subtotal = parseFloat(prod.subtotal) || 0;
-                                const porcentajeIva = parseFloat(prod.porcentaje_iva) || 21;
-                                const ivaQueDeberiaCobrarse = parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
-                                return acc + ivaQueDeberiaCobrarse;
-                            }, 0);
-                        }
+                        const esClienteExento = condicionIvaCliente && condicionIvaCliente.toUpperCase() === 'EXENTO';
+                        const montoExento = esClienteExento ? ivaTotal : 0;
+
+                        // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
+                        const subtotalR = roundFacturacion(subtotalTotal);
+                        const ivaTotalR = roundFacturacion(ivaTotal);
+                        const exentoR = roundFacturacion(montoExento);
+                        const totalR = roundFacturacion(total);
 
                         // 4. Actualizar totales del pedido
                         const queryActualizar = `
@@ -1773,18 +1756,18 @@ const recalcularYActualizarTotalesPedido = async (pedidoId, condicionIvaCliente 
                             WHERE id = ?
                         `;
 
-                        db.query(queryActualizar, [subtotalTotal, ivaTotal, montoExento, total, pedidoId], (errUpdate, result) => {
+                        db.query(queryActualizar, [subtotalR, ivaTotalR, exentoR, totalR, pedidoId], (errUpdate, result) => {
                             if (errUpdate) {
                                 console.error('Error al actualizar totales del pedido:', errUpdate);
                                 return reject(errUpdate);
                             }
 
-                            console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalTotal}, IVA=${ivaTotal}, Exento=${montoExento}, Total=${total}`);
+                            console.log(`💰 Totales recalculados para pedido ${pedidoId}: Subtotal=${subtotalR}, IVA=${ivaTotalR}, Exento=${exentoR}, Total=${totalR} (redondeados)`);
                             resolve({
-                                subtotal: subtotalTotal,
-                                iva_total: ivaTotal,
-                                exento: montoExento,
-                                total: total
+                                subtotal: subtotalR,
+                                iva_total: ivaTotalR,
+                                exento: exentoR,
+                                total: totalR
                             });
                         });
                     }
@@ -2132,6 +2115,7 @@ module.exports = {
     generarPdfNotaPedido,
     generarPdfNotasPedidoMultiples,
     obtenerDatosFiltros,
+    obtenerSugerenciasFiltros,
 
     obtenerCatalogoCompleto,
     verificarVersionCatalogo,

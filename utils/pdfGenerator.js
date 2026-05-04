@@ -11,6 +11,16 @@ const ARCA_MICROSERVICE_URL = process.env.ARCA_MICROSERVICE_URL;
 class PdfGenerator {
     constructor() {
         this.templatesPath = path.join(__dirname, '../resources/documents');
+        this.maxRowsIntermediaARCA = this.parsePositiveInt(process.env.ARCA_MAX_ROWS_INTERMEDIA, 10);
+        this.maxRowsFinalARCA = this.parsePositiveInt(process.env.ARCA_MAX_ROWS_FINAL, 10);
+        /* Nota de Pedido A4 — Etapa 4: máx. 16 ítems primera página, 24 en siguientes (configurable por NOTA_PEDIDO_MAX_ROWS_FIRST / NEXT). */
+        this.notaPedidoMaxRowsFirst = this.parsePositiveInt(process.env.NOTA_PEDIDO_MAX_ROWS_FIRST, 16);
+        this.notaPedidoMaxRowsNext = this.parsePositiveInt(process.env.NOTA_PEDIDO_MAX_ROWS_NEXT, 24);
+    }
+
+    parsePositiveInt(value, fallback) {
+        const parsed = parseInt(value, 10);
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
     }
 
     formatearFecha(fechaBD) {
@@ -37,6 +47,22 @@ class PdfGenerator {
         }
     }
 
+    formatearFechaFiscalQR(venta) {
+        const fuenteFecha = venta?.fecha_fiscal || venta?.cae_solicitud_fecha || venta?.fecha;
+        if (!fuenteFecha) return null;
+        const fecha = new Date(fuenteFecha);
+        if (isNaN(fecha.getTime())) return null;
+        return fecha.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
+    }
+
+    obtenerCuitEmisorQR() {
+        const cuit = (process.env.AFIP_CUIT || '').replace(/\D/g, '');
+        if (cuit.length !== 11) {
+            throw new Error('AFIP_CUIT inválido o no configurado para generar QR');
+        }
+        return parseInt(cuit, 10);
+    }
+
     // ✅ NUEVA FUNCIÓN: Formatear cantidades (elimina decimales innecesarios)
     formatearCantidad(cantidad) {
         const num = parseFloat(cantidad);
@@ -49,6 +75,73 @@ class PdfGenerator {
         
         // Si tiene decimales, mostrar con hasta 2 decimales (elimina ceros finales)
         return parseFloat(num.toFixed(2)).toString();
+    }
+
+    formatearMoneda(valor) {
+        const num = parseFloat(valor);
+        if (isNaN(num)) return '0,00';
+
+        return num.toLocaleString('es-AR', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+    }
+
+    formatearMonedaRedondeadaCeroCentavos(valor) {
+        const num = parseFloat(valor);
+        if (isNaN(num)) return '0,00';
+        return this.formatearMoneda(Math.round(num));
+    }
+
+    construirTotalesVisualesRedondeados(items = [], totalObjetivo = null) {
+        if (!Array.isArray(items) || items.length === 0) return [];
+        const rounded = items.map((item) => Math.round(Number(item) || 0));
+        const totalCalculado = rounded.reduce((acc, n) => acc + n, 0);
+        const totalEsperado = Number.isFinite(Number(totalObjetivo))
+            ? Math.round(Number(totalObjetivo))
+            : totalCalculado;
+        const diferencia = totalEsperado - totalCalculado;
+        if (diferencia !== 0) {
+            const ultimoIdx = rounded.length - 1;
+            rounded[ultimoIdx] += diferencia;
+        }
+        return rounded;
+    }
+
+    normalizarCondicionIva(condicion) {
+        return (condicion || '')
+            .toString()
+            .trim()
+            .toUpperCase()
+            .replace(/\s+/g, ' ');
+    }
+
+    esCondicionExento(condicion) {
+        return this.normalizarCondicionIva(condicion) === 'EXENTO';
+    }
+
+    esCondicionConsumidorFinal(condicion) {
+        const normalized = this.normalizarCondicionIva(condicion);
+        return normalized === 'CONSUMIDOR FINAL' || normalized === 'CONSUMIDOR_FINAL' || normalized === 'CF';
+    }
+
+    debeOcultarIvaDiscriminadoEnComprobanteB(tipoFiscal, condicionIva) {
+        const tipo = (tipoFiscal || '').toString().trim().toUpperCase();
+        if (tipo !== 'B') return false;
+        return this.esCondicionExento(condicionIva) || this.esCondicionConsumidorFinal(condicionIva);
+    }
+
+    obtenerCodigoComprobanteVisual(tipoFiscal, tipoDoc = 'FACTURA') {
+        const tipo = (tipoFiscal || '').toString().trim().toUpperCase();
+        const doc = (tipoDoc || 'FACTURA').toString().trim().toUpperCase();
+
+        if (doc === 'NOTA_DEBITO') {
+            return tipo === 'A' ? '2' : '7';
+        }
+        if (doc === 'NOTA_CREDITO') {
+            return tipo === 'A' ? '3' : '8';
+        }
+        return tipo === 'A' ? '1' : '6';
     }
 
     getOptions(customOptions = {}) {
@@ -165,6 +258,13 @@ class PdfGenerator {
             browser = await puppeteer.launch(launchOptions);
             const page = await browser.newPage();
             
+            // Viewport A4 para que mm/CSS se interpreten bien (210×297mm ≈ 794×1123px @96dpi)
+            await page.setViewport({
+                width: 794,
+                height: 1123,
+                deviceScaleFactor: 1
+            });
+            
             // Configurar contenido HTML
             await page.setContent(htmlContent, {
                 waitUntil: 'networkidle0',
@@ -264,8 +364,10 @@ class PdfGenerator {
             }
 
             // ✅ FORMATEAR FECHA SEGÚN RFC3339 (YYYY-MM-DD)
-            const fechaEmision = new Date(venta.fecha);
-            const fechaFormateada = fechaEmision.toISOString().split('T')[0]; // "2025-01-15"
+            const fechaFormateada = this.formatearFechaFiscalQR(venta);
+            if (!fechaFormateada) {
+                throw new Error('No se pudo determinar fecha fiscal para QR');
+            }
 
             // ✅ VALIDAR CAE
             const cae = venta.cae_id;
@@ -300,7 +402,7 @@ class PdfGenerator {
             const datosQR = {
                 ver: 1,                                          // Versión del formato
                 fecha: fechaFormateada,                          // Fecha emisión (YYYY-MM-DD)
-                cuit: parseInt(process.env.AFIP_CUIT || '30714525030'), // CUIT emisor (sin guiones)
+                cuit: this.obtenerCuitEmisorQR(),                      // CUIT emisor (sin guiones)
                 ptoVta: puntoVenta,                               // Punto de venta
                 tipoCmp: tipoComprobante,                        // Tipo comprobante
                 nroCmp: numeroComprobante,                        // Número de comprobante
@@ -382,8 +484,10 @@ class PdfGenerator {
                 }
             }
 
-            const fechaEmision = new Date(venta.fecha);
-            const fechaFormateada = fechaEmision.toISOString().split('T')[0];
+            const fechaFormateada = this.formatearFechaFiscalQR(venta);
+            if (!fechaFormateada) {
+                throw new Error('No se pudo determinar fecha fiscal para QR local');
+            }
 
             // ✅ VALIDAR CAE
             if (!venta.cae_id) {
@@ -417,7 +521,7 @@ class PdfGenerator {
             const datosComprobante = {
                 ver: 1,
                 fecha: fechaFormateada,
-                cuit: parseInt(process.env.AFIP_CUIT || '30714525030'),
+                cuit: this.obtenerCuitEmisorQR(),
                 ptoVta: puntoVenta,
                 tipoCmp: tipoComprobante,
                 nroCmp: numeroComprobante,
@@ -435,7 +539,7 @@ class PdfGenerator {
             const base64Data = Buffer.from(jsonString, 'utf8').toString('base64');
             
             // ✅ CONSTRUIR URL SEGÚN ESPECIFICACIÓN ARCA
-            const qrUrl = `https://www.arca.gob.ar/fe/qr/?p=${base64Data}`;
+            const qrUrl = `https://www.arca.gob.ar/fe/qr/?p=${encodeURIComponent(base64Data)}`;
             
             console.log('📋 URL del QR:', qrUrl);
             console.log('📋 JSON QR:', jsonString);
@@ -457,7 +561,432 @@ class PdfGenerator {
         }
     }
 
+    reemplazarPlaceholders(template, values = {}) {
+        let result = template;
+        for (const [key, value] of Object.entries(values)) {
+            const safeValue = value === undefined || value === null ? '' : String(value);
+            result = result.replace(new RegExp(`{{${key}}}`, 'g'), safeValue);
+        }
+        return result;
+    }
 
+    construirFooterFacturaARCA({
+        observacionesHTML,
+        subtotal,
+        ivaTotal,
+        total,
+        qrBase64,
+        logoARCABase64,
+        cae,
+        fechaVencimientoCAE,
+        esExento = false,
+        forzarCentavosCero = false
+    }) {
+        const fmtImporte = forzarCentavosCero
+            ? (v) => this.formatearMonedaRedondeadaCeroCentavos(v)
+            : (v) => this.formatearMoneda(v);
+        const filasTotales = esExento
+            ? `
+                        <tr class="total-row">
+                            <td><strong>TOTAL:</strong></td>
+                            <td class="text-right" style="white-space: nowrap;"><strong>${fmtImporte(total)}</strong></td>
+                        </tr>`
+            : `
+                        <tr>
+                            <td>Neto Gravado:</td>
+                            <td class="text-right" style="white-space: nowrap;"><strong>${fmtImporte(subtotal)}</strong></td>
+                        </tr>
+                        <tr>
+                            <td>Exento:</td>
+                            <td class="text-right" style="white-space: nowrap;"><strong>0,00</strong></td>
+                        </tr>
+                        <tr>
+                            <td>IVA:</td>
+                            <td class="text-right" style="white-space: nowrap;"><strong>${fmtImporte(ivaTotal)}</strong></td>
+                        </tr>
+                        <tr>
+                            <td>Percepciones:</td>
+                            <td class="text-right" style="white-space: nowrap;"><strong>0,00</strong></td>
+                        </tr>
+                        <tr class="total-row">
+                            <td><strong>TOTAL:</strong></td>
+                            <td class="text-right" style="white-space: nowrap;"><strong>${fmtImporte(total)}</strong></td>
+                        </tr>`;
+        return `
+        <div class="factura-footer-wrapper">
+            <div class="totales-observaciones-container">
+                <div class="observaciones-section">
+                    ${observacionesHTML}
+                </div>
+                <div class="totales-box" style="width: 260px;">
+                    <div class="totales-box-header">
+                        <strong>PESOS</strong>
+                    </div>
+                    <table>
+                        ${filasTotales}
+                    </table>
+                </div>
+            </div>
+            <div class="legal-footer">
+                <p><strong>Observaciones:</strong> El crédito fiscal discriminado en el presente comprobante, sólo podrá ser computado a efectos del Régimen de Sostenimiento e Inclusión Fiscal para Pequeños Contribuyentes de la Ley N° 27.618.</p>
+            </div>
+            <div class="qr-footer">
+                <div class="qr-section">
+                    <img src="${qrBase64}" alt="Código QR AFIP">
+                    <div class="qr-text-content">
+                        <p style="font-weight: bold; margin-bottom: 5px;">Comprobante Autorizado</p>
+                        <img src="${logoARCABase64}" alt="Logo ARCA" style="width: 100px; height: 35px; object-fit: contain;">
+                    </div>
+                    <div style="clear: both;"></div>
+                </div>
+                <div class="cae-section">
+                    <p><strong>CAE Nº:</strong> ${cae}</p>
+                    <p><strong>Fecha de Vto. de CAE:</strong> ${fechaVencimientoCAE}</p>
+                </div>
+            </div>
+        </div>
+        `;
+    }
+
+    /**
+     * REGLAS DE PAGINACIÓN ARCA (Factura / Nota Débito / Nota Crédito)
+     * ───────────────────────────────────────────────────────────────
+     * Regla 1: El encabezado completo (todo lo anterior a la tabla de ítems)
+     *          se repite idéntico en todas las páginas. No se negocia ni se
+     *          modifica por página.
+     * Regla 2: El bloque Totales + Legal + QR + CAE aparece SOLO en la última página.
+     * Regla 3: En páginas intermedias solo va la tabla de ítems (sin totales).
+     * Regla 4: Mostrar numeración visible "Página X/Y" en todas las páginas.
+     * Objetivo: Maximizar uso de páginas intermedias sin romper la estética actual.
+     *
+     * Medición: solo se considera "footer" el bloque visible (.factura-footer-wrapper:not(.is-empty))
+     * para que availableFinal se mida correctamente cuando el HTML tiene footer completo.
+     */
+    async medirLayoutFacturaARCA(htmlMedicion) {
+        let browser = null;
+        try {
+            const pdfOptions = this.getOptions();
+            const launchOptions = {
+                headless: 'new',
+                args: pdfOptions.args || [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage'
+                ]
+            };
+
+            if (pdfOptions.executablePath && fs.existsSync(pdfOptions.executablePath)) {
+                launchOptions.executablePath = pdfOptions.executablePath;
+            }
+
+            browser = await puppeteer.launch(launchOptions);
+            const page = await browser.newPage();
+            await page.setViewport({
+                width: 794,
+                height: 1123,
+                deviceScaleFactor: 1
+            });
+
+            await page.setContent(htmlMedicion, {
+                waitUntil: 'networkidle0',
+                timeout: pdfOptions.timeout || 30000
+            });
+
+            const safePadding = 8;
+            const metrics = await page.evaluate((padding) => {
+                const facturaPage = document.querySelector('.factura-page');
+                if (!facturaPage) return null;
+
+                const theadEl = facturaPage.querySelector('.row-details thead');
+                const footerEl = facturaPage.querySelector('.factura-footer-wrapper:not(.is-empty)');
+                const rows = Array.from(facturaPage.querySelectorAll('.row-details tbody tr'));
+                if (!theadEl) return null;
+
+                const pageRect = facturaPage.getBoundingClientRect();
+                const theadBottom = theadEl.getBoundingClientRect().bottom;
+                const pageHeight = pageRect.height;
+
+                // Espacio bajo el thead en hoja sin footer (páginas intermedias)
+                const availableIntermedia = Math.max(0, pageRect.bottom - theadBottom - padding);
+
+                // Espacio para filas en la ÚLTIMA hoja: altura fija A4 menos encabezado menos bloque totales/QR
+                let availableFinal = availableIntermedia;
+                if (footerEl) {
+                    const headerHeight = theadBottom - pageRect.top;
+                    const footerHeight = footerEl.getBoundingClientRect().height;
+                    availableFinal = Math.max(0, pageHeight - headerHeight - footerHeight - padding);
+                }
+
+                return {
+                    availableIntermedia,
+                    availableFinal,
+                    rowHeights: rows.map((row) => row.getBoundingClientRect().height)
+                };
+            }, safePadding);
+
+            await browser.close();
+            browser = null;
+
+            if (!metrics || !Array.isArray(metrics.rowHeights)) {
+                throw new Error('No se pudieron medir alturas de la factura ARCA');
+            }
+
+            return metrics;
+        } catch (error) {
+            if (browser) {
+                try {
+                    await browser.close();
+                } catch (closeError) {
+                    console.error('Error cerrando navegador de medición ARCA:', closeError.message);
+                }
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Paginación por llenado progresivo: llena cada página intermedia hasta
+     * availableIntermedia; la última página lleva el remanente (y debe caber en availableFinal).
+     *
+     * Importante: si el remanente cabe en altura de hoja "sin pie" pero no en availableFinal
+     * (hoja con totales/QR), no se puede cerrar esa tanda en una sola página con pie: se dejan
+     * filas para la siguiente página o para una última más corta, evitando solapamiento tabla/footer.
+     */
+    paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, limits = {}) {
+        if (!Array.isArray(rowHeights) || rowHeights.length === 0) {
+            return [{ start: 0, end: 0, isLast: true }];
+        }
+
+        const maxRowsIntermedia = this.parsePositiveInt(limits.maxRowsIntermedia, this.maxRowsIntermediaARCA);
+        const maxRowsFinal = this.parsePositiveInt(limits.maxRowsFinal, this.maxRowsFinalARCA);
+        const prefix = [0];
+        for (const height of rowHeights) {
+            prefix.push(prefix[prefix.length - 1] + (parseFloat(height) || 0));
+        }
+
+        const sumRange = (start, end) => prefix[end] - prefix[start];
+        const pages = [];
+        const totalRows = rowHeights.length;
+        let start = 0;
+
+        while (start < totalRows) {
+            const remainingRows = totalRows - start;
+            if (remainingRows <= maxRowsFinal && sumRange(start, totalRows) <= availableFinal) {
+                pages.push({ start, end: totalRows, isLast: true });
+                break;
+            }
+
+            let end = start;
+            let used = 0;
+
+            while (end < totalRows) {
+                const nextRowHeight = parseFloat(rowHeights[end]) || 0;
+
+                if (end === start && nextRowHeight > availableIntermedia) {
+                    end = start + 1;
+                    break;
+                }
+
+                if (used + nextRowHeight > availableIntermedia) {
+                    break;
+                }
+                if ((end - start) >= maxRowsIntermedia) {
+                    break;
+                }
+
+                // Al añadir la siguiente fila se completaría todo el remanente: esa hoja sería
+                // la última (con pie). Si la suma de alturas del remanente supera availableFinal,
+                // no cerrar aquí (salvo una sola fila inevitable); dejar filas para otra página.
+                if (end + 1 === totalRows) {
+                    const heightAllRemaining = sumRange(start, totalRows);
+                    if (heightAllRemaining > availableFinal && end > start) {
+                        break;
+                    }
+                }
+
+                used += nextRowHeight;
+                end += 1;
+            }
+
+            if (end === start) {
+                end = start + 1;
+            }
+
+            pages.push({ start, end, isLast: false });
+            start = end;
+        }
+
+        if (pages.length === 0) {
+            pages.push({ start: 0, end: totalRows, isLast: true });
+        } else {
+            pages.forEach((page) => {
+                page.isLast = false;
+            });
+            pages[pages.length - 1].isLast = true;
+        }
+
+        return pages;
+    }
+
+    /**
+     * Construye el HTML multipágina para Factura ARCA y Notas ARCA (Débito/Crédito).
+     * Única implementación compartida: garantiza Reglas 1-4 (encabezado fijo, footer solo
+     * en última, numeración Página X/Y). En plantillas de notas, la sección "comprobante
+     * asociado" está dentro del bloque de página y se repite en todas las hojas (encabezado).
+     */
+    async construirHtmlMultipaginaARCA({
+        templatePath,
+        commonReplacements,
+        rowsByItem,
+        footerContent,
+        tableHeader
+    }) {
+        if (!fs.existsSync(templatePath)) {
+            throw new Error(`Plantilla no encontrada: ${path.basename(templatePath)}`);
+        }
+
+        const htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+        const templateMatch = htmlTemplate.match(/<!-- PAGE_TEMPLATE_START -->([\s\S]*?)<!-- PAGE_TEMPLATE_END -->/);
+        if (!templateMatch) {
+            throw new Error(`No se encontró bloque de página reutilizable en ${path.basename(templatePath)}`);
+        }
+
+        const htmlSkeleton = htmlTemplate.replace(templateMatch[0], '{{pages_html}}');
+        let pageTemplate = templateMatch[1].trim();
+
+        if (tableHeader) {
+            pageTemplate = pageTemplate.replace(/<thead>[\s\S]*?<\/thead>/m, tableHeader);
+        }
+
+        pageTemplate = this.reemplazarPlaceholders(pageTemplate, commonReplacements);
+
+        const rowsHtml = rowsByItem.join('');
+        const emptyFooter = '<div class="factura-footer-wrapper is-empty"></div>';
+
+        // Medición 1: todos los ítems + footer vacío → rowHeights y availableIntermedia (hoja sin totales)
+        const medicionIntermediaHtml = pageTemplate
+            .replace(/{{items}}/g, rowsHtml)
+            .replace(/{{footer_content}}/g, emptyFooter)
+            .replace(/{{page_class}}/g, '')
+            .replace(/\{\{page_number\}\}/g, '1')
+            .replace(/\{\{page_total\}\}/g, '1');
+        const htmlMedicionIntermedia = htmlSkeleton.replace('{{pages_html}}', medicionIntermediaHtml);
+        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia);
+        const { rowHeights, availableIntermedia } = metricsIntermedia;
+
+        // Medición 2: una fila + footer completo → availableFinal (espacio para ítems en la hoja que lleva total/QR)
+        const unaFilaHtml = rowsByItem.length > 0 ? rowsByItem.slice(0, 1).join('') : '';
+        const medicionFinalHtml = pageTemplate
+            .replace(/{{items}}/g, unaFilaHtml)
+            .replace(/{{footer_content}}/g, footerContent)
+            .replace(/{{page_class}}/g, 'last-page')
+            .replace(/\{\{page_number\}\}/g, '1')
+            .replace(/\{\{page_total\}\}/g, '1');
+        const htmlMedicionFinal = htmlSkeleton.replace('{{pages_html}}', medicionFinalHtml);
+        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal);
+        const availableFinal = metricsFinal.availableFinal;
+
+        const pages = this.paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, {
+            maxRowsIntermedia: this.maxRowsIntermediaARCA,
+            maxRowsFinal: this.maxRowsFinalARCA
+        });
+        const totalRowsHeight = rowHeights.reduce((acc, height) => acc + (parseFloat(height) || 0), 0);
+        console.log(
+            `📐 ARCA layout: filas=${rowHeights.length}, altoFilas=${totalRowsHeight.toFixed(2)}, ` +
+            `intermedia=${availableIntermedia.toFixed(2)}, final=${availableFinal.toFixed(2)}, ` +
+            `maxIntermedia=${this.maxRowsIntermediaARCA}, maxFinal=${this.maxRowsFinalARCA}`
+        );
+
+        const pagesHtml = pages.map((page, index) => {
+            const pageItems = rowsByItem.slice(page.start, page.end).join('');
+            const isLastPage = index === pages.length - 1;
+            const pageFooter = isLastPage
+                ? footerContent
+                : '<div class="factura-footer-wrapper is-empty"></div>';
+
+            return pageTemplate
+                .replace(/{{items}}/g, pageItems)
+                .replace(/{{footer_content}}/g, pageFooter)
+                .replace(/{{page_class}}/g, isLastPage ? 'last-page' : '')
+                .replace(/\{\{page_number\}\}/g, String(index + 1))
+                .replace(/\{\{page_total\}\}/g, String(pages.length));
+        }).join('\n');
+
+        return {
+            html: htmlSkeleton.replace('{{pages_html}}', pagesHtml),
+            pageCount: pages.length
+        };
+    }
+
+    /**
+     * Pagina ítems de Nota de Pedido: primera página hasta notaPedidoMaxRowsFirst,
+     * siguientes hasta notaPedidoMaxRowsNext cada una.
+     */
+    paginarFilasNotaPedido(totalRows) {
+        const first = this.notaPedidoMaxRowsFirst;
+        const next = this.notaPedidoMaxRowsNext;
+        if (totalRows <= 0) return [{ start: 0, end: 0 }];
+        const pages = [];
+        pages.push({ start: 0, end: Math.min(first, totalRows) });
+        let start = pages[0].end;
+        while (start < totalRows) {
+            const end = Math.min(start + next, totalRows);
+            pages.push({ start, end });
+            start = end;
+        }
+        return pages;
+    }
+
+    /**
+     * Construye HTML multipágina para Nota de Pedido (A4).
+     * Encabezado (empresa, NP, datos cliente) se repite en cada página.
+     * Observaciones solo en la primera; "Continuación NP Nº X" en el resto.
+     * Leyenda "Gracias por su preferencia" solo en la última.
+     */
+    construirHtmlMultipaginaNotaPedido({
+        templatePath,
+        commonReplacements,
+        rowsByItem,
+        observacionesHTML,
+        footerLeyendaHTML,
+        continuacionHTML
+    }) {
+        if (!fs.existsSync(templatePath)) {
+            throw new Error(`Plantilla no encontrada: ${path.basename(templatePath)}`);
+        }
+        const htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+        const templateMatch = htmlTemplate.match(/<!-- PAGE_TEMPLATE_START -->([\s\S]*?)<!-- PAGE_TEMPLATE_END -->/);
+        if (!templateMatch) {
+            throw new Error(`No se encontró bloque de página reutilizable en ${path.basename(templatePath)}`);
+        }
+        const htmlSkeleton = htmlTemplate.replace(templateMatch[0], '{{pages_html}}');
+        let pageTemplate = templateMatch[1].trim();
+        pageTemplate = this.reemplazarPlaceholders(pageTemplate, commonReplacements);
+
+        const totalRows = rowsByItem.length;
+        const pages = this.paginarFilasNotaPedido(totalRows);
+        const pageCount = pages.length;
+
+        const pagesHtml = pages.map((page, index) => {
+            const pageItems = rowsByItem.slice(page.start, page.end).join('');
+            const isFirst = index === 0;
+            const isLast = index === pageCount - 1;
+            const obsOrCont = isFirst ? observacionesHTML : continuacionHTML;
+            const footer = isLast ? footerLeyendaHTML : '';
+            return pageTemplate
+                .replace(/{{items}}/g, pageItems)
+                .replace(/\{\{observaciones_or_continuation\}\}/g, obsOrCont)
+                .replace(/\{\{footer_leyenda\}\}/g, footer)
+                .replace(/\{\{page_number\}\}/g, String(index + 1))
+                .replace(/\{\{page_total\}\}/g, String(pageCount))
+                .replace(/\{\{page_class\}\}/g, isLast ? 'last-page' : '');
+        }).join('\n');
+
+        return {
+            html: htmlSkeleton.replace('{{pages_html}}', pagesHtml),
+            pageCount
+        };
+    }
 
     async generarFactura(venta, productos) {
     const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
@@ -486,24 +1015,27 @@ class PdfGenerator {
   }
 
     /**
-   * ✅ GENERAR FACTURA ARCA (A y B) 
-   * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
-   */
+     * ✅ GENERAR FACTURA ARCA (A y B)
+     * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
+     * Integración Etapa 4: usa construirHtmlMultipaginaARCA para garantizar
+     * - Encabezado idéntico en todas las páginas (Regla 1)
+     * - Totales + QR + CAE solo en la última (Regla 2)
+     * - Páginas intermedias solo con tabla, footer vacío (Regla 3)
+     */
   async generarFacturaARCA(venta, productos) {
     const templatePath = path.join(this.templatesPath, 'factura_arca.html');
-    
+
     if (!fs.existsSync(templatePath)) {
       throw new Error('Plantilla factura_arca.html no encontrada');
     }
-
-    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
 
     console.log('📱 Generando QR...');
     const qrBase64 = await this.generarQRDesdeARCA(venta);
     const logoARCABase64 = this.obtenerLogoARCABase64();
     
     const tipoComprobante = venta.tipo_f;
-    const fechaFormateada = this.formatearFecha(venta.fecha);
+    const codigoComprobante = this.obtenerCodigoComprobanteVisual(tipoComprobante, venta.tipo_doc || 'FACTURA');
+    const fechaFormateada = this.formatearFecha(venta.fecha_fiscal || venta.fecha);
     const fechaVencimientoCAE = this.formatearFecha(venta.cae_fecha);
     
     // ✅ DESGLOSAR NÚMERO DE FACTURA: "A 0004-00000001"
@@ -525,102 +1057,169 @@ class PdfGenerator {
         console.warn(`⚠️ numero_factura no disponible, usando ID de venta: ${venta.id}`);
     }
     
-    // ✅ Determinar si el cliente está EXENTO
+    // ✅ Determinar si el cliente está EXENTO (insensible a mayúsculas)
     const condicionIVA = (venta.cliente_condicion || '').toString().trim();
-    const esExento = condicionIVA === 'Exento';
+    const esExento = this.esCondicionExento(condicionIVA);
     
     console.log(`🔖 Cliente ${condicionIVA} ${esExento ? '(SIN IVA)' : '(CON IVA)'}`);
     
-    // ✅ MANEJO CONDICIONAL DE OBSERVACIONES
+    // ✅ MANEJO CONDICIONAL DE OBSERVACIONES + transparencia fiscal (solo Factura B Exento)
     let observacionesHTML = '';
     const observaciones = (venta.observaciones || '').toString().trim();
-    
+    const esFacturaB = (tipoComprobante || '').toString().trim().toUpperCase() === 'B';
+    const ocultarIvaDiscriminado = (tipoComprobante || '').toString().trim().toUpperCase() === 'B'
+      || this.debeOcultarIvaDiscriminadoEnComprobanteB(tipoComprobante, condicionIVA);
+    const mostrarTransparenciaFiscal = ocultarIvaDiscriminado;
+    const ivaContenidoRaw = Number.isFinite(parseFloat(venta.exento)) && parseFloat(venta.exento) > 0
+      ? parseFloat(venta.exento)
+      : (Number.isFinite(parseFloat(venta.iva_total)) ? parseFloat(venta.iva_total) : 0);
+    const ivaContenidoTexto = this.formatearMonedaRedondeadaCeroCentavos(ivaContenidoRaw);
+
     if (observaciones && observaciones.toLowerCase() !== 'sin observaciones') {
-        observacionesHTML = `
+      observacionesHTML += `
             <p><strong>OBSERVACIONES:</strong></p>
             <p>${observaciones}</p>
         `;
-        console.log('📝 Observaciones incluidas en la factura');
+      console.log('📝 Observaciones incluidas en la factura');
     } else {
-        console.log('📝 Sin observaciones para mostrar');
+      console.log('📝 Sin observaciones para mostrar');
+    }
+
+    if (mostrarTransparenciaFiscal) {
+      observacionesHTML += `
+            <div style="margin-top: 6px; font-size: 10px; line-height: 1.2;">
+                <p style="margin: 0;">Regimen de transparencia fiscal al consumidor (Ley 27.743)</p>
+                <p style="margin: 2px 0 0 0;">IVA contenido: $${ivaContenidoTexto}</p>
+            </div>
+        `;
+      console.log(`🧾 Transparencia fiscal agregada (Factura B Exento): IVA contenido $${ivaContenidoTexto}`);
     }
     
-    // Reemplazar datos generales
-    htmlTemplate = htmlTemplate
-      .replace(/{{tipo_comprobante}}/g, tipoComprobante)
-      .replace(/{{punto_venta}}/g, puntoVenta)              // ✅ CAMBIADO
-      .replace(/{{numero_comprobante}}/g, numeroComprobante) // ✅ CAMBIADO
-      .replace(/{{fecha}}/g, fechaFormateada)
-      .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-      .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-      .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-      .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-      .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-      .replace(/{{cliente_cuit}}/g, venta.cliente_cuit || 'No informado')
-      .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-      .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
-      .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado')
-      .replace(/{{observaciones_html}}/g, observacionesHTML);
-
     // ✅ DETECTAR SI HAY DESCUENTOS EN ALGÚN PRODUCTO
     const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
+    const totalFacturaCabecera = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : null;
+    const totalesVisualesFacturaB = esFacturaB
+      ? this.construirTotalesVisualesRedondeados(
+          productos.map((p) => (parseFloat(p.subtotal) || 0) + (parseFloat(p.iva || 0))),
+          totalFacturaCabecera
+        )
+      : [];
+
+    const fmtMontoFactura = esFacturaB
+      ? (v) => this.formatearMonedaRedondeadaCeroCentavos(v)
+      : (v) => this.formatearMoneda(v);
     
-    // ✅ ITEMS - Mostrar precios según si es EXENTO o no, con descuentos si corresponde
-    const itemsHTML = productos.map(producto => {
+    // ✅ FILAS HTML de ítems (array para poder paginar)
+    const rowsByItem = productos.map((producto, index) => {
       const cantidad = parseFloat(producto.cantidad) || 0;
-      const subtotal = parseFloat(producto.subtotal) || 0;
+      const subtotalItem = parseFloat(producto.subtotal) || 0;
+      const ivaItem = parseFloat(producto.iva || 0);
       const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const cantidadFormateada = this.formatearCantidad(cantidad);
-      
-      // Calcular precios: el subtotal YA tiene el descuento aplicado
-      const precioConDescuentoSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
-      
-      // Calcular precio ORIGINAL (antes del descuento)
-      const precioOriginalSinIva = descuento > 0 
-        ? precioConDescuentoSinIva / (1 - descuento / 100)
-        : precioConDescuentoSinIva;
+
+      // Para toda Factura B (consumidor final, monotributo, exento): mostrar precios CON IVA
+      // incluido, para que el cliente vea el valor real que paga (números redondos).
+      // La diferencia entre exento y no exento es solo la columna de IVA en el encabezado.
+      // Para Factura A (Responsable Inscripto): mantener base imponible SIN IVA (correcto legalmente).
+      const totalItemRaw = esFacturaB ? (subtotalItem + ivaItem) : subtotalItem;
+      const totalItemBase = esFacturaB
+        ? (totalesVisualesFacturaB[index] ?? Math.round(totalItemRaw))
+        : totalItemRaw;
+      const precioConDescuento = cantidad > 0 ? (totalItemBase / cantidad) : 0;
+      const precioOriginal = descuento > 0
+        ? precioConDescuento / (1 - descuento / 100)
+        : precioConDescuento;
 
       // Si hay descuentos en la factura, agregar columnas de precio original y descuento
       if (hayDescuentos) {
-        return `
+        if (ocultarIvaDiscriminado) {
+          return `
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
-          <td style="text-align: right;">${precioOriginalSinIva.toFixed(2)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioOriginal)}</td>
           <td style="text-align: center;">${descuento.toFixed(0)}%</td>
-          <td style="text-align: right;">${precioConDescuentoSinIva.toFixed(2)}</td>
-          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
         </tr>
       `;
-      } else {
-        // Layout sin descuentos (mantener original)
+        }
         return `
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
-          <td style="text-align: right;">${precioConDescuentoSinIva.toFixed(2)}</td>
-          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+          <td style="text-align: center;">21.00</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioOriginal)}</td>
+          <td style="text-align: center;">${descuento.toFixed(0)}%</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
         </tr>
       `;
       }
-    }).join('');
+      // Layout sin descuentos
+      if (ocultarIvaDiscriminado) {
+        return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
+        </tr>
+      `;
+      }
+      return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
+          <td style="text-align: center;">21.00</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
+        </tr>
+      `;
+    });
 
-    // ✅ REEMPLAZAR HEADER DE LA TABLA SEGÚN SI HAY DESCUENTOS
-    const tableHeader = hayDescuentos ? `
+    // ✅ REEMPLAZAR HEADER DE LA TABLA: según descuentos y si es exento (exento → sin columna % IVA)
+    let tableHeader;
+    if (ocultarIvaDiscriminado && hayDescuentos) {
+        tableHeader = `
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cant.</th>
+                        <th style="width: 32%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 14%;">P. Original</th>
+                        <th style="width: 8%;">Desc.</th>
+                        <th style="width: 14%;">P. Final</th>
+                        <th style="width: 14%;">Total</th>
+                    </tr>
+                </thead>
+    `;
+    } else if (ocultarIvaDiscriminado) {
+        tableHeader = `
+                <thead>
+                    <tr>
+                        <th style="width: 10%;">Cantidad</th>
+                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 20%;">Precio</th>
+                        <th style="width: 20%;">Total</th>
+                    </tr>
+                </thead>
+    `;
+    } else if (hayDescuentos) {
+        tableHeader = `
                 <thead>
                     <tr>
                         <th style="width: 7%;">Cant.</th>
-                        <th style="width: 28%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 24%;">Producto/Servicio/Detalle</th>
                         <th style="width: 7%;">IVA</th>
-                        <th style="width: 12%;">P. Original</th>
+                        <th style="width: 14%;">P. Original</th>
                         <th style="width: 7%;">Desc.</th>
-                        <th style="width: 12%;">P. Final</th>
-                        <th style="width: 12%;">Total</th>
+                        <th style="width: 14%;">P. Final</th>
+                        <th style="width: 14%;">Total</th>
                     </tr>
                 </thead>
-    ` : `
+    `;
+    } else {
+        tableHeader = `
                 <thead>
                     <tr>
                         <th style="width: 8%;">Cantidad</th>
@@ -631,42 +1230,72 @@ class PdfGenerator {
                     </tr>
                 </thead>
     `;
-
-    htmlTemplate = htmlTemplate
-      .replace(/<thead>[\s\S]*?<\/thead>/m, tableHeader)
-      .replace(/{{items}}/g, itemsHTML);
-
-    // ✅ TOTALES
-    const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
-    
-    let ivaTotal = 0;
-    let total = subtotal;
-    
-    if (!esExento) {
-      ivaTotal = subtotal * 0.21;
-      total = subtotal + ivaTotal;
     }
 
-    htmlTemplate = htmlTemplate
-      .replace(/{{subtotal}}/g, subtotal.toFixed(2))
-      .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
-      .replace(/{{total}}/g, total.toFixed(2))
-      .replace(/{{qr_base64}}/g, qrBase64)
-      .replace(/{{logo_arca}}/g, logoARCABase64)
-      .replace(/{{cae}}/g, venta.cae_id)
-      .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
-    
+    // ✅ TOTALES: priorizar importes persistidos en la venta para evitar divergencias
+    const subtotalCalculado = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+    const subtotal = Number.isFinite(parseFloat(venta.subtotal))
+      ? parseFloat(venta.subtotal)
+      : subtotalCalculado;
+    const ivaTotal = Number.isFinite(parseFloat(venta.iva_total))
+      ? parseFloat(venta.iva_total)
+      : (ocultarIvaDiscriminado ? 0 : subtotal * 0.21);
+    const total = Number.isFinite(parseFloat(venta.total))
+      ? parseFloat(venta.total)
+      : (subtotal + ivaTotal);
+
+    const footerContent = this.construirFooterFacturaARCA({
+      observacionesHTML,
+      subtotal,
+      ivaTotal,
+      total,
+      qrBase64,
+      logoARCABase64,
+      cae: venta.cae_id,
+      fechaVencimientoCAE,
+      esExento: ocultarIvaDiscriminado,
+      forzarCentavosCero: esFacturaB
+    });
+
+    const commonReplacements = {
+      tipo_comprobante: tipoComprobante,
+      codigo_comprobante: codigoComprobante,
+      punto_venta: puntoVenta,
+      numero_comprobante: numeroComprobante,
+      fecha: fechaFormateada,
+      cuit_emisor: process.env.AFIP_CUIT || '30714525030',
+      ingresos_brutos: process.env.IIBB || '251491/4',
+      fecha_inicio_actividades: process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016',
+      telefono: process.env.EMPRESA_TELEFONO || '',
+      email: process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com',
+      cliente_cuit: venta.cliente_cuit || 'No informado',
+      cliente_nombre: venta.cliente_nombre || 'No informado',
+      cliente_condicion: venta.cliente_condicion || 'No informado',
+      cliente_direccion: venta.cliente_direccion || 'No informado'
+    };
+
+    const { html: finalHtml, pageCount } = await this.construirHtmlMultipaginaARCA({
+      templatePath,
+      commonReplacements,
+      rowsByItem,
+      footerContent,
+      tableHeader
+    });
+
     console.log('📄 Generando PDF de Factura ARCA...');
     console.log(`   Subtotal: $${subtotal.toFixed(2)}`);
-    console.log(`   IVA 21%: $${ivaTotal.toFixed(2)} ${esExento ? '(EXENTO)' : ''}`);
+    console.log(`   IVA: $${ivaTotal.toFixed(2)} ${ocultarIvaDiscriminado ? '(NO DISCRIMINADO)' : ''}`);
     console.log(`   Total: $${total.toFixed(2)}`);
-    
-    return await this.generatePdfFromHtml(htmlTemplate);
+    console.log(`   Páginas generadas: ${pageCount}`);
+
+    return await this.generatePdfFromHtml(finalHtml);
   }
 
   /**
    * ✅ GENERAR NOTA DE CRÉDITO ARCA (A y B)
    * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
+   * Integración Etapa 5: usa construirHtmlMultipaginaARCA; encabezado (incl. comprobante
+   * asociado) idéntico en todas las páginas; total y QR solo en la última.
    */
   async generarNotaCreditoARCA(nota, productos, facturaAsociada) {
     const templatePath = path.join(this.templatesPath, 'nota_credito_arca.html');
@@ -675,14 +1304,13 @@ class PdfGenerator {
       throw new Error('Plantilla nota_credito_arca.html no encontrada');
     }
 
-    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-
     console.log('📱 Generando QR para Nota de Crédito...');
     const qrBase64 = await this.generarQRDesdeARCA(nota);
     const logoARCABase64 = this.obtenerLogoARCABase64();
     
     const tipoComprobante = nota.tipo_f || 'NC';
-    const fechaFormateada = this.formatearFecha(nota.fecha);
+    const codigoComprobante = this.obtenerCodigoComprobanteVisual(tipoComprobante, 'NOTA_CREDITO');
+    const fechaFormateada = this.formatearFecha(nota.fecha_fiscal || nota.fecha);
     const fechaVencimientoCAE = this.formatearFecha(nota.cae_fecha);
     
     // ✅ DESGLOSAR NÚMERO DE NOTA
@@ -702,7 +1330,8 @@ class PdfGenerator {
     
     // ✅ Determinar si el cliente está EXENTO
     const condicionIVA = (nota.cliente_condicion || '').toString().trim();
-    const esExento = condicionIVA === 'Exento';
+    const ocultarIvaDiscriminado = (tipoComprobante || '').toString().trim().toUpperCase() === 'B'
+      || this.debeOcultarIvaDiscriminadoEnComprobanteB(tipoComprobante, condicionIVA);
     
     // ✅ MANEJO DE OBSERVACIONES
     let observacionesHTML = '';
@@ -716,79 +1345,131 @@ class PdfGenerator {
     }
     
     // ✅ INFORMACIÓN DE FACTURA ASOCIADA
-    let facturaAsociadaTipo = facturaAsociada?.tipo || 'N/A';
-    let facturaAsociadaPV = facturaAsociada?.puntoVenta || 'N/A';
-    let facturaAsociadaNum = facturaAsociada?.numero || 'N/A';
-    let facturaAsociadaFecha = facturaAsociada?.fecha ? this.formatearFecha(facturaAsociada.fecha) : '';
-    
-    // Reemplazar datos generales
-    htmlTemplate = htmlTemplate
-      .replace(/{{tipo_comprobante}}/g, tipoComprobante)
-      .replace(/{{punto_venta}}/g, puntoVenta)
-      .replace(/{{numero_comprobante}}/g, numeroComprobante)
-      .replace(/{{fecha}}/g, fechaFormateada)
-      .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-      .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-      .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-      .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-      .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-      .replace(/{{cliente_cuit}}/g, nota.cliente_cuit || 'No informado')
-      .replace(/{{cliente_nombre}}/g, nota.cliente_nombre || 'No informado')
-      .replace(/{{cliente_condicion}}/g, nota.cliente_condicion || 'No informado')
-      .replace(/{{cliente_direccion}}/g, nota.cliente_direccion || 'No informado')
-      .replace(/{{observaciones_html}}/g, observacionesHTML)
-      .replace(/{{factura_asociada_tipo}}/g, facturaAsociadaTipo)
-      .replace(/{{factura_asociada_punto_venta}}/g, facturaAsociadaPV)
-      .replace(/{{factura_asociada_numero}}/g, facturaAsociadaNum)
-      .replace(/{{factura_asociada_fecha}}/g, facturaAsociadaFecha);
+    const facturaAsociadaTipo = facturaAsociada?.tipo || 'N/A';
+    const facturaAsociadaPV = facturaAsociada?.puntoVenta || 'N/A';
+    const facturaAsociadaNum = facturaAsociada?.numero || 'N/A';
+    const facturaAsociadaFecha = facturaAsociada?.fecha ? this.formatearFecha(facturaAsociada.fecha) : '';
+    const facturaAsociadaTotal = this.formatearMoneda(facturaAsociada?.total || 0);
 
-    // ✅ ITEMS
-    const itemsHTML = productos.map(producto => {
+    const totalNotaCabecera = Number.isFinite(parseFloat(nota.total)) ? parseFloat(nota.total) : null;
+    const totalesVisualesNota = ocultarIvaDiscriminado
+      ? this.construirTotalesVisualesRedondeados(
+          productos.map((p) => (parseFloat(p.subtotal) || 0) + (parseFloat(p.iva || p.iva_calculado) || 0)),
+          totalNotaCabecera
+        )
+      : [];
+
+    const rowsByItem = productos.map((producto, index) => {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
+      const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
-      const precioUnitario = cantidad > 0 ? (subtotal / cantidad) : 0;
+      const subtotalMostrado = ocultarIvaDiscriminado
+        ? (totalesVisualesNota[index] ?? Math.round(subtotal + ivaItem))
+        : subtotal;
+      const precioUnitario = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
       
+      if (ocultarIvaDiscriminado) {
+        return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
+        </tr>
+      `;
+      }
+
       return `
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
-          <td style="text-align: right;">${precioUnitario.toFixed(2)}</td>
-          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+          <td style="text-align: center;">21.00</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
         </tr>
       `;
-    }).join('');
-
-    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+    });
 
     // ✅ TOTALES
-    const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
-    let ivaTotal = 0;
-    let total = subtotal;
-    
-    if (!esExento) {
-      ivaTotal = subtotal * 0.21;
-      total = subtotal + ivaTotal;
-    }
+    const subtotalCalculado = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+    const subtotal = Number.isFinite(parseFloat(nota.subtotal))
+      ? parseFloat(nota.subtotal)
+      : subtotalCalculado;
+    const ivaTotal = Number.isFinite(parseFloat(nota.iva_total))
+      ? parseFloat(nota.iva_total)
+      : (ocultarIvaDiscriminado ? 0 : subtotal * 0.21);
+    const total = Number.isFinite(parseFloat(nota.total))
+      ? parseFloat(nota.total)
+      : (subtotal + ivaTotal);
 
-    htmlTemplate = htmlTemplate
-      .replace(/{{subtotal}}/g, subtotal.toFixed(2))
-      .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
-      .replace(/{{total}}/g, total.toFixed(2))
-      .replace(/{{qr_base64}}/g, qrBase64)
-      .replace(/{{logo_arca}}/g, logoARCABase64)
-      .replace(/{{cae}}/g, nota.cae_id)
-      .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
+    const tableHeader = ocultarIvaDiscriminado
+      ? `
+                <thead>
+                    <tr>
+                        <th style="width: 10%;">Cantidad</th>
+                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 20%;">Precio</th>
+                        <th style="width: 20%;">Total</th>
+                    </tr>
+                </thead>
+    `
+      : undefined;
+
+    const footerContent = this.construirFooterFacturaARCA({
+      observacionesHTML,
+      subtotal,
+      ivaTotal,
+      total,
+      qrBase64,
+      logoARCABase64,
+      cae: nota.cae_id,
+      fechaVencimientoCAE,
+      esExento: ocultarIvaDiscriminado
+    });
+
+    const commonReplacements = {
+      tipo_comprobante: tipoComprobante,
+      codigo_comprobante: codigoComprobante,
+      punto_venta: puntoVenta,
+      numero_comprobante: numeroComprobante,
+      fecha: fechaFormateada,
+      cuit_emisor: process.env.AFIP_CUIT || '30714525030',
+      ingresos_brutos: process.env.IIBB || '251491/4',
+      fecha_inicio_actividades: process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016',
+      telefono: process.env.EMPRESA_TELEFONO || '',
+      email: process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com',
+      cliente_cuit: nota.cliente_cuit || 'No informado',
+      cliente_nombre: nota.cliente_nombre || 'No informado',
+      cliente_condicion: nota.cliente_condicion || 'No informado',
+      cliente_direccion: nota.cliente_direccion || 'No informado',
+      observaciones_html: observacionesHTML,
+      factura_asociada_tipo: facturaAsociadaTipo,
+      factura_asociada_punto_venta: facturaAsociadaPV,
+      factura_asociada_numero: facturaAsociadaNum,
+      factura_asociada_fecha: facturaAsociadaFecha,
+      factura_asociada_total: facturaAsociadaTotal
+    };
+
+    const { html: finalHtml, pageCount } = await this.construirHtmlMultipaginaARCA({
+      templatePath,
+      commonReplacements,
+      rowsByItem,
+      footerContent,
+      tableHeader
+    });
     
     console.log('📄 Generando PDF de Nota de Crédito ARCA...');
+    console.log(`   Páginas generadas: ${pageCount}`);
     
-    return await this.generatePdfFromHtml(htmlTemplate);
+    return await this.generatePdfFromHtml(finalHtml);
   }
 
   /**
    * ✅ GENERAR NOTA DE DÉBITO ARCA (A y B)
    * Maneja: Responsable Inscripto, Monotributo, Consumidor Final, Exento
+   * Integración Etapa 5: usa construirHtmlMultipaginaARCA; encabezado (incl. comprobante
+   * asociado) idéntico en todas las páginas; total y QR solo en la última.
    */
   async generarNotaDebitoARCA(nota, productos, facturaAsociada) {
     const templatePath = path.join(this.templatesPath, 'nota_debito_arca.html');
@@ -797,14 +1478,13 @@ class PdfGenerator {
       throw new Error('Plantilla nota_debito_arca.html no encontrada');
     }
 
-    let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-
     console.log('📱 Generando QR para Nota de Débito...');
     const qrBase64 = await this.generarQRDesdeARCA(nota);
     const logoARCABase64 = this.obtenerLogoARCABase64();
     
     const tipoComprobante = nota.tipo_f || 'ND';
-    const fechaFormateada = this.formatearFecha(nota.fecha);
+    const codigoComprobante = this.obtenerCodigoComprobanteVisual(tipoComprobante, 'NOTA_DEBITO');
+    const fechaFormateada = this.formatearFecha(nota.fecha_fiscal || nota.fecha);
     const fechaVencimientoCAE = this.formatearFecha(nota.cae_fecha);
     
     // ✅ DESGLOSAR NÚMERO DE NOTA
@@ -824,7 +1504,7 @@ class PdfGenerator {
     
     // ✅ Determinar si el cliente está EXENTO
     const condicionIVA = (nota.cliente_condicion || '').toString().trim();
-    const esExento = condicionIVA === 'Exento';
+    const ocultarIvaDiscriminado = this.debeOcultarIvaDiscriminadoEnComprobanteB(tipoComprobante, condicionIVA);
     
     // ✅ MANEJO DE OBSERVACIONES
     let observacionesHTML = '';
@@ -838,74 +1518,114 @@ class PdfGenerator {
     }
     
     // ✅ INFORMACIÓN DE FACTURA ASOCIADA
-    let facturaAsociadaTipo = facturaAsociada?.tipo || 'N/A';
-    let facturaAsociadaPV = facturaAsociada?.puntoVenta || 'N/A';
-    let facturaAsociadaNum = facturaAsociada?.numero || 'N/A';
-    let facturaAsociadaFecha = facturaAsociada?.fecha ? this.formatearFecha(facturaAsociada.fecha) : '';
-    
-    // Reemplazar datos generales
-    htmlTemplate = htmlTemplate
-      .replace(/{{tipo_comprobante}}/g, tipoComprobante)
-      .replace(/{{punto_venta}}/g, puntoVenta)
-      .replace(/{{numero_comprobante}}/g, numeroComprobante)
-      .replace(/{{fecha}}/g, fechaFormateada)
-      .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-      .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-      .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-      .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-      .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-      .replace(/{{cliente_cuit}}/g, nota.cliente_cuit || 'No informado')
-      .replace(/{{cliente_nombre}}/g, nota.cliente_nombre || 'No informado')
-      .replace(/{{cliente_condicion}}/g, nota.cliente_condicion || 'No informado')
-      .replace(/{{cliente_direccion}}/g, nota.cliente_direccion || 'No informado')
-      .replace(/{{observaciones_html}}/g, observacionesHTML)
-      .replace(/{{factura_asociada_tipo}}/g, facturaAsociadaTipo)
-      .replace(/{{factura_asociada_punto_venta}}/g, facturaAsociadaPV)
-      .replace(/{{factura_asociada_numero}}/g, facturaAsociadaNum)
-      .replace(/{{factura_asociada_fecha}}/g, facturaAsociadaFecha);
+    const facturaAsociadaTipo = facturaAsociada?.tipo || 'N/A';
+    const facturaAsociadaPV = facturaAsociada?.puntoVenta || 'N/A';
+    const facturaAsociadaNum = facturaAsociada?.numero || 'N/A';
+    const facturaAsociadaFecha = facturaAsociada?.fecha ? this.formatearFecha(facturaAsociada.fecha) : '';
+    const facturaAsociadaTotal = this.formatearMoneda(facturaAsociada?.total || 0);
 
-    // ✅ ITEMS
-    const itemsHTML = productos.map(producto => {
+    const rowsByItem = productos.map(producto => {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
+      const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
-      const precioUnitario = cantidad > 0 ? (subtotal / cantidad) : 0;
+      const subtotalMostrado = ocultarIvaDiscriminado ? (subtotal + ivaItem) : subtotal;
+      const precioUnitario = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
       
+      if (ocultarIvaDiscriminado) {
+        return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
+        </tr>
+      `;
+      }
+
       return `
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: center;">${esExento ? '0.00' : '21.00'}</td>
-          <td style="text-align: right;">${precioUnitario.toFixed(2)}</td>
-          <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+          <td style="text-align: center;">21.00</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
+          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
         </tr>
       `;
-    }).join('');
-
-    htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+    });
 
     // ✅ TOTALES
-    const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
-    let ivaTotal = 0;
-    let total = subtotal;
-    
-    if (!esExento) {
-      ivaTotal = subtotal * 0.21;
-      total = subtotal + ivaTotal;
-    }
+    const subtotalCalculado = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+    const subtotal = Number.isFinite(parseFloat(nota.subtotal))
+      ? parseFloat(nota.subtotal)
+      : subtotalCalculado;
+    const ivaTotal = Number.isFinite(parseFloat(nota.iva_total))
+      ? parseFloat(nota.iva_total)
+      : (ocultarIvaDiscriminado ? 0 : subtotal * 0.21);
+    const total = Number.isFinite(parseFloat(nota.total))
+      ? parseFloat(nota.total)
+      : (subtotal + ivaTotal);
 
-    htmlTemplate = htmlTemplate
-      .replace(/{{subtotal}}/g, subtotal.toFixed(2))
-      .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
-      .replace(/{{total}}/g, total.toFixed(2))
-      .replace(/{{qr_base64}}/g, qrBase64)
-      .replace(/{{logo_arca}}/g, logoARCABase64)
-      .replace(/{{cae}}/g, nota.cae_id)
-      .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
+    const tableHeader = ocultarIvaDiscriminado
+      ? `
+                <thead>
+                    <tr>
+                        <th style="width: 10%;">Cantidad</th>
+                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 20%;">Precio</th>
+                        <th style="width: 20%;">Total</th>
+                    </tr>
+                </thead>
+    `
+      : undefined;
+
+    const footerContent = this.construirFooterFacturaARCA({
+      observacionesHTML,
+      subtotal,
+      ivaTotal,
+      total,
+      qrBase64,
+      logoARCABase64,
+      cae: nota.cae_id,
+      fechaVencimientoCAE,
+      esExento: ocultarIvaDiscriminado
+    });
+
+    const commonReplacements = {
+      tipo_comprobante: tipoComprobante,
+      codigo_comprobante: codigoComprobante,
+      punto_venta: puntoVenta,
+      numero_comprobante: numeroComprobante,
+      fecha: fechaFormateada,
+      cuit_emisor: process.env.AFIP_CUIT || '30714525030',
+      ingresos_brutos: process.env.IIBB || '251491/4',
+      fecha_inicio_actividades: process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016',
+      telefono: process.env.EMPRESA_TELEFONO || '',
+      email: process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com',
+      cliente_cuit: nota.cliente_cuit || 'No informado',
+      cliente_nombre: nota.cliente_nombre || 'No informado',
+      cliente_condicion: nota.cliente_condicion || 'No informado',
+      cliente_direccion: nota.cliente_direccion || 'No informado',
+      observaciones_html: observacionesHTML,
+      factura_asociada_tipo: facturaAsociadaTipo,
+      factura_asociada_punto_venta: facturaAsociadaPV,
+      factura_asociada_numero: facturaAsociadaNum,
+      factura_asociada_fecha: facturaAsociadaFecha,
+      factura_asociada_total: facturaAsociadaTotal
+    };
+
+    const { html: finalHtml, pageCount } = await this.construirHtmlMultipaginaARCA({
+      templatePath,
+      commonReplacements,
+      rowsByItem,
+      footerContent,
+      tableHeader
+    });
     
     console.log('📄 Generando PDF de Nota de Débito ARCA...');
+    console.log(`   Páginas generadas: ${pageCount}`);
     
-    return await this.generatePdfFromHtml(htmlTemplate);
+    return await this.generatePdfFromHtml(finalHtml);
   }
 
   /**
@@ -947,6 +1667,11 @@ class PdfGenerator {
     // ✅ DETECTAR SI HAY DESCUENTOS
     const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
 
+    const esFacturaB = (venta.tipo_f || '').toString().trim().toUpperCase() === 'B';
+    const fmtMontoFacturaGen = esFacturaB
+      ? (v) => this.formatearMonedaRedondeadaCeroCentavos(v)
+      : (v) => this.formatearMoneda(v);
+
     // ✅ ITEMS CON IVA INCLUIDO Y DESCUENTOS OPCIONALES
     const itemsHTML = productos.map(producto => {
       const cantidad = parseFloat(producto.cantidad) || 0;
@@ -971,10 +1696,10 @@ class PdfGenerator {
           <td>${producto.producto_nombre}</td>
           <td>${producto.producto_um}</td>
           <td style="text-align: center;">${cantidadFormateada}</td>
-          <td style="text-align: right;">${precioOriginalConIva.toFixed(2)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFacturaGen(precioOriginalConIva)}</td>
           <td style="text-align: center;">${descuento.toFixed(0)}%</td>
-          <td style="text-align: right;">${precioConDescuentoConIva.toFixed(2)}</td>
-          <td style="text-align: right;">${total.toFixed(2)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFacturaGen(precioConDescuentoConIva)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFacturaGen(total)}</td>
         </tr>
       `;
       } else {
@@ -985,8 +1710,8 @@ class PdfGenerator {
           <td>${producto.producto_nombre}</td>
           <td>${producto.producto_um}</td>
           <td style="text-align: center;">${cantidadFormateada}</td>
-          <td style="text-align: right;">${precioConDescuentoConIva.toFixed(2)}</td>
-          <td style="text-align: right;">${total.toFixed(2)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFacturaGen(precioConDescuentoConIva)}</td>
+          <td style="text-align: right; white-space: nowrap;">${fmtMontoFacturaGen(total)}</td>
         </tr>
       `;
       }
@@ -1029,7 +1754,8 @@ class PdfGenerator {
       return acc + subtotal + iva;
     }, 0);
 
-    htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
+    const totalFacturaMostrado = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : totalFactura;
+    htmlTemplate = htmlTemplate.replace(/{{total}}/g, fmtMontoFacturaGen(totalFacturaMostrado));
 
     return await this.generatePdfFromHtml(htmlTemplate);
   }
@@ -1042,32 +1768,84 @@ class PdfGenerator {
             throw new Error('Plantilla ranking_ventas.html no encontrada');
         }
 
+        const toNumber = (value) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? number : 0;
+        };
+
+        const normalizeText = (value) => String(value || '').trim();
+        const normalizeNameKey = (value) => normalizeText(value).toUpperCase().replace(/\s+/g, ' ');
+        const pickFirst = (...values) => values.find((value) => normalizeText(value) !== '') || '';
+        const formatMoney = (value) => this.formatearMoneda(toNumber(value));
+
+        const getTipoFactor = (tipoDocRaw) => {
+            const tipoDoc = normalizeText(tipoDocRaw).toUpperCase();
+            if (tipoDoc === 'NOTA_CREDITO') return -1;
+            if (tipoDoc === 'FACTURA' || tipoDoc === 'NOTA_DEBITO') return 1;
+            return 1;
+        };
+
+        const groupedByClient = new Map();
+
+        for (const venta of ventas) {
+            const clienteId = venta?.cliente_id ?? null;
+            const dni = normalizeText(venta?.dni);
+            const clienteNombre = normalizeText(venta?.cliente_nombre) || 'CLIENTE SIN NOMBRE';
+            const clienteKey = clienteId !== null && clienteId !== ''
+                ? `ID:${clienteId}`
+                : (dni ? `DNI:${dni}` : `NOMBRE:${normalizeNameKey(clienteNombre)}`);
+
+            const tipoFactor = getTipoFactor(venta?.tipo_doc);
+            const subtotalSigned = toNumber(venta?.subtotal) * tipoFactor;
+            const ivaSigned = toNumber(venta?.iva_total) * tipoFactor;
+            const totalSigned = toNumber(venta?.total) * tipoFactor;
+
+            if (!groupedByClient.has(clienteKey)) {
+                groupedByClient.set(clienteKey, {
+                    cliente_nombre: clienteNombre,
+                    direccion: normalizeText(venta?.direccion),
+                    telefono: normalizeText(venta?.telefono),
+                    email: normalizeText(venta?.email),
+                    dni,
+                    subtotal: 0,
+                    iva_total: 0,
+                    total: 0
+                });
+            }
+
+            const group = groupedByClient.get(clienteKey);
+            group.subtotal += subtotalSigned;
+            group.iva_total += ivaSigned;
+            group.total += totalSigned;
+
+            group.cliente_nombre = pickFirst(group.cliente_nombre, clienteNombre, 'CLIENTE SIN NOMBRE');
+            group.direccion = pickFirst(group.direccion, venta?.direccion);
+            group.telefono = pickFirst(group.telefono, venta?.telefono);
+            group.email = pickFirst(group.email, venta?.email);
+            group.dni = pickFirst(group.dni, venta?.dni);
+        }
+
+        const rankingConsolidado = Array.from(groupedByClient.values())
+            .sort((a, b) => b.total - a.total);
+
         let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
         htmlTemplate = htmlTemplate.replace(/{{fecha}}/g, this.formatearFecha(fecha));
 
-        const itemsHTML = ventas.map(venta => {
-            const clienteNombre = venta.cliente_nombre || '';
-            const direccion = venta.direccion || '';
-            const telefono = venta.telefono || '';
-            const email = venta.email || '';
-            const dni = venta.dni || '';
-
-            return `
+        const itemsHTML = rankingConsolidado.map((cliente) => `
                 <tr>
-                    <td>${clienteNombre}</td>
-                    <td>${direccion}</td>
-                    <td>${telefono}</td>
-                    <td>${email}</td>
-                    <td>${dni}</td>
-                    <td style="text-align: right;">${venta.subtotal.toFixed(2)}</td>
-                    <td style="text-align: right;">0.00</td>
-                    <td style="text-align: right;">${venta.iva_total.toFixed(2)}</td>
-                    <td style="text-align: right;">0.00</td>
-                    <td style="text-align: right;">0.00</td>
-                    <td style="text-align: right;">${venta.total.toFixed(2)}</td>
+                    <td>${cliente.cliente_nombre}</td>
+                    <td>${cliente.direccion}</td>
+                    <td>${cliente.telefono}</td>
+                    <td>${cliente.email}</td>
+                    <td>${cliente.dni}</td>
+                    <td style="text-align: right;">${formatMoney(cliente.subtotal)}</td>
+                    <td style="text-align: right;">0,00</td>
+                    <td style="text-align: right;">${formatMoney(cliente.iva_total)}</td>
+                    <td style="text-align: right;">0,00</td>
+                    <td style="text-align: right;">0,00</td>
+                    <td style="text-align: right;">${formatMoney(cliente.total)}</td>
                 </tr>
-            `;
-        }).join('');
+            `).join('');
 
         htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
         return await this.generatePdfFromHtml(htmlTemplate);
@@ -1075,34 +1853,52 @@ class PdfGenerator {
 
     async generarNotaPedido(pedido, productos) {
         const templatePath = path.join(this.templatesPath, 'nota_pedido2.html');
-        
         if (!fs.existsSync(templatePath)) {
             throw new Error('Plantilla nota_pedido2.html no encontrada');
         }
 
-        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-        
         const fechaFormateada = this.formatearFecha(pedido.fecha);
-        htmlTemplate = htmlTemplate
-            .replace(/{{fecha}}/g, fechaFormateada)
-            .replace(/{{id}}/g, pedido.id)
-            .replace(/{{cliente_nombre}}/g, pedido.cliente_nombre)
-            .replace(/{{cliente_direccion}}/g, pedido.cliente_direccion || 'No informado')
-            .replace(/{{cliente_telefono}}/g, pedido.cliente_telefono || 'No informado')
-            .replace(/{{empleado_nombre}}/g, pedido.empleado_nombre || 'No informado')
-            .replace(/{{pedido_observacion}}/g, pedido.observaciones || 'No informado');
+        const commonReplacements = {
+            fecha: fechaFormateada,
+            id: pedido.id,
+            cliente_nombre: pedido.cliente_nombre || 'No informado',
+            cliente_direccion: pedido.cliente_direccion || 'No informado',
+            cliente_ciudad: pedido.cliente_ciudad || 'No informado',
+            cliente_telefono: pedido.cliente_telefono || 'No informado',
+            empleado_nombre: pedido.empleado_nombre || 'No informado'
+        };
 
-        const itemsHTML = productos.map(producto => `
+        const observacionesTexto = pedido.observaciones || 'No informado';
+        const observacionesHTML = `
+        <div class="observaciones-box">
+            <strong>Observaciones</strong>
+            ${observacionesTexto}
+        </div>`;
+        const continuacionHTML = `<p class="continuacion-texto">Continuación NP Nº ${pedido.id}</p>`;
+        const footerLeyendaHTML = `<div class="footer-leyenda"><p>Gracias por su preferencia.</p></div>`;
+
+        const rowsByItem = productos.map(producto => `
             <tr>
                 <td>${producto.producto_id || ''}</td>
                 <td>${producto.producto_nombre || ''}</td>
                 <td>${producto.producto_um || ''}</td>
                 <td style="text-align: center;">${this.formatearCantidad(producto.cantidad || 0)}</td>
             </tr>
-        `).join('');
+        `);
 
-        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
-        return await this.generatePdfFromHtml(htmlTemplate);
+        const { html: finalHtml, pageCount } = this.construirHtmlMultipaginaNotaPedido({
+            templatePath,
+            commonReplacements,
+            rowsByItem,
+            observacionesHTML,
+            footerLeyendaHTML,
+            continuacionHTML
+        });
+
+        if (pageCount > 1) {
+            console.log(`📄 Nota de Pedido NP ${pedido.id}: ${productos.length} ítems, ${pageCount} página(s)`);
+        }
+        return await this.generatePdfFromHtml(finalHtml);
     }
 
     async generarListaPrecios(cliente, productos) {
@@ -1132,8 +1928,8 @@ class PdfGenerator {
                     <td>${producto.nombre}</td>
                     <td>${producto.unidad_medida}</td>
                     <td>${cantidadFormateada}</td>
-                    <td style="text-align: right;">${precioConIva.toFixed(2)}</td>
-                    <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioConIva)}</td>
+                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotal)}</td>
                 </tr>
             `;
         }).join('');
@@ -1147,7 +1943,7 @@ class PdfGenerator {
             return acc + (precioConIva * cantidad);
         }, 0);
 
-        htmlTemplate = htmlTemplate.replace(/{{total}}/g, totalConIva.toFixed(2));
+        htmlTemplate = htmlTemplate.replace(/{{total}}/g, this.formatearMoneda(totalConIva));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }
@@ -1200,7 +1996,17 @@ class PdfGenerator {
         
         console.log('📊 Generando reporte financiero PDF...');
         
-        const { periodo, resumen, comparacion_periodo_anterior, top_productos, vendedores, alertas } = dashboardData;
+        const {
+            periodo,
+            resumen,
+            comparacion_periodo_anterior,
+            top_productos,
+            vendedores,
+            clientes = [],
+            ciudades = [],
+            cuentas = [],
+            alertas
+        } = dashboardData;
         
         // ✅ Formatear fechas
         const fechaGeneracion = new Date().toLocaleDateString('es-AR', {
@@ -1225,7 +2031,7 @@ class PdfGenerator {
         const resultadoClase = resumen.resultado_neto >= 0 ? 'positivo' : 'negativo';
         const estadoBadgeClase = resumen.estado === 'GANANCIA' ? 'ganancia' : 'perdida';
         const tendenciaClase = comparacion_periodo_anterior.tendencia === 'MEJORA' ? 'mejora' : 
-                               comparacion_periodo_anterior.tendencia === 'DISMINUCIÓN' ? 'disminucion' : '';
+                               (comparacion_periodo_anterior.tendencia === 'DISMINUCION' || comparacion_periodo_anterior.tendencia === 'DISMINUCIÓN') ? 'disminucion' : '';
         const diferenciaClase = comparacion_periodo_anterior.diferencia >= 0 ? 'positivo' : 'negativo';
         
         // ✅ Generar HTML de alertas
@@ -1233,7 +2039,7 @@ class PdfGenerator {
         if (alertas && alertas.length > 0) {
             alertasHTML = '<div class="seccion"><div class="seccion-titulo">⚠️ Alertas</div>';
             alertas.forEach(alerta => {
-                const claseAlerta = alerta.tipo === 'CRÍTICO' ? 'critico' :
+                const claseAlerta = (alerta.tipo === 'CRÍTICO' || alerta.tipo === 'CRITICO') ? 'critico' :
                                    alerta.tipo === 'ADVERTENCIA' ? 'advertencia' : 'info';
                 alertasHTML += `<div class="alerta ${claseAlerta}">${alerta.mensaje}</div>`;
             });
@@ -1248,7 +2054,7 @@ class PdfGenerator {
                     <td>${p.nombre}</td>
                     <td class="text-center">${this.formatearCantidad(p.cantidad_vendida)}</td>
                     <td class="text-right">$ ${formatMoney(p.ingresos)}</td>
-                    <td class="text-center">${p.ventas}</td>
+                    <td class="text-center">${p.ventas || '-'}</td>
                 </tr>
             `).join('');
         } else {
@@ -1269,6 +2075,51 @@ class PdfGenerator {
         } else {
             vendedoresRows = '<tr><td colspan="4" class="text-center" style="padding: 20px; color: #94a3b8;">No hay datos de vendedores en este período</td></tr>';
         }
+
+        let clientesRows = '';
+        if (clientes && clientes.length > 0) {
+            clientesRows = clientes.map(c => `
+                <tr>
+                    <td>${c.nombre}</td>
+                    <td class="text-center">${c.cantidad_ventas}</td>
+                    <td class="text-right">$ ${formatMoney(c.monto_total)}</td>
+                    <td class="text-right">$ ${formatMoney(c.ticket_promedio)}</td>
+                </tr>
+            `).join('');
+        } else {
+            clientesRows = '<tr><td colspan="4" class="text-center" style="padding: 20px; color: #94a3b8;">No hay datos de clientes en este período</td></tr>';
+        }
+
+        let ciudadesRows = '';
+        if (ciudades && ciudades.length > 0) {
+            ciudadesRows = ciudades.map(c => `
+                <tr>
+                    <td>${c.ciudad}</td>
+                    <td>${c.provincia}</td>
+                    <td class="text-center">${c.clientes_unicos}</td>
+                    <td class="text-right">$ ${formatMoney(c.monto_total)}</td>
+                </tr>
+            `).join('');
+        } else {
+            ciudadesRows = '<tr><td colspan="4" class="text-center" style="padding: 20px; color: #94a3b8;">No hay datos geográficos en este período</td></tr>';
+        }
+
+        const totalCuentas = cuentas.reduce((sum, c) => sum + parseFloat(c.facturacion_neta || 0), 0);
+        let cuentasRows = '';
+        if (cuentas && cuentas.length > 0) {
+            cuentasRows = cuentas.map(c => {
+                const participacion = totalCuentas > 0 ? ((parseFloat(c.facturacion_neta || 0) / totalCuentas) * 100) : 0;
+                return `
+                    <tr>
+                        <td>${c.nombre}</td>
+                        <td class="text-right">$ ${formatMoney(c.facturacion_neta)}</td>
+                        <td class="text-right">${participacion.toFixed(1)}%</td>
+                    </tr>
+                `;
+            }).join('');
+        } else {
+            cuentasRows = '<tr><td colspan="3" class="text-center" style="padding: 20px; color: #94a3b8;">No hay datos de cuentas en este período</td></tr>';
+        }
         
         // ✅ Reemplazar variables en template
         htmlTemplate = htmlTemplate
@@ -1282,7 +2133,7 @@ class PdfGenerator {
             .replace(/{{resultado_clase}}/g, resultadoClase)
             .replace(/{{estado_texto}}/g, resumen.estado)
             .replace(/{{estado_badge_clase}}/g, estadoBadgeClase)
-            .replace(/{{porcentaje_cambio}}/g, formatMoney(comparacion_periodo_anterior.porcentaje_cambio))
+            .replace(/{{porcentaje_cambio}}/g, Number(comparacion_periodo_anterior.porcentaje_cambio || 0).toFixed(1))
             .replace(/{{tendencia_texto}}/g, comparacion_periodo_anterior.tendencia)
             .replace(/{{tendencia_clase}}/g, tendenciaClase)
             .replace(/{{dias_periodo}}/g, periodo.dias)
@@ -1293,6 +2144,9 @@ class PdfGenerator {
             .replace(/{{alertas_html}}/g, alertasHTML)
             .replace(/{{top_productos_rows}}/g, topProductosRows)
             .replace(/{{vendedores_rows}}/g, vendedoresRows)
+            .replace(/{{clientes_rows}}/g, clientesRows)
+            .replace(/{{ciudades_rows}}/g, ciudadesRows)
+            .replace(/{{cuentas_rows}}/g, cuentasRows)
             .replace(/{{fecha_generacion}}/g, fechaGeneracion);
         
         console.log('✅ Template procesado, generando PDF...');
@@ -1331,12 +2185,12 @@ class PdfGenerator {
                     <td>${venta.numero}</td>
                     <td>${venta.cliente}</td>
                     <td>${venta.cuit}</td>
-                    <td>$ ${venta.neto.toFixed(2)}</td>
-                    <td>$ ${venta.exento.toFixed(2)}</td>
-                    <td>$ ${venta.iva.toFixed(2)}</td>
-                    <td>$ ${venta.percepciones.toFixed(2)}</td>
-                    <td>$ ${venta.retenciones.toFixed(2)}</td>
-                    <td>$ ${venta.total.toFixed(2)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.neto)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.exento)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.iva)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.percepciones)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.retenciones)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.total)}</td>
                 </tr>
             `;
         }).join('');
@@ -1345,12 +2199,12 @@ class PdfGenerator {
 
         // Reemplazar totales de la tabla principal
         htmlTemplate = htmlTemplate
-            .replace(/{{total_neto}}/g, datos.totales.neto.toFixed(2))
-            .replace(/{{total_exento}}/g, datos.totales.exento.toFixed(2))
-            .replace(/{{total_iva}}/g, datos.totales.iva.toFixed(2))
-            .replace(/{{total_percepciones}}/g, datos.totales.percepciones.toFixed(2))
-            .replace(/{{total_retenciones}}/g, datos.totales.retenciones.toFixed(2))
-            .replace(/{{total_total}}/g, datos.totales.total.toFixed(2));
+            .replace(/{{total_neto}}/g, this.formatearMoneda(datos.totales.neto))
+            .replace(/{{total_exento}}/g, this.formatearMoneda(datos.totales.exento))
+            .replace(/{{total_iva}}/g, this.formatearMoneda(datos.totales.iva))
+            .replace(/{{total_percepciones}}/g, this.formatearMoneda(datos.totales.percepciones))
+            .replace(/{{total_retenciones}}/g, this.formatearMoneda(datos.totales.retenciones))
+            .replace(/{{total_total}}/g, this.formatearMoneda(datos.totales.total));
 
         // ✅ GENERAR FILAS DE LA TABLA DE DESGLOSE POR CONDICIÓN IVA
         const desglosePorCondicion = datos.desglosePorCondicion || [];
@@ -1374,11 +2228,11 @@ class PdfGenerator {
 
         // ✅ REEMPLAZAR TOTALES DEL DESGLOSE (deben coincidir con los totales principales)
         htmlTemplate = htmlTemplate
-            .replace(/{{desglose_total_neto}}/g, datos.totales.neto.toFixed(2))
-            .replace(/{{desglose_total_exento}}/g, datos.totales.exento.toFixed(2))
-            .replace(/{{desglose_total_iva}}/g, datos.totales.iva.toFixed(2))
-            .replace(/{{desglose_total_percepciones}}/g, datos.totales.percepciones.toFixed(2))
-            .replace(/{{desglose_total_total}}/g, datos.totales.total.toFixed(2));
+            .replace(/{{desglose_total_neto}}/g, this.formatearMoneda(datos.totales.neto))
+            .replace(/{{desglose_total_exento}}/g, this.formatearMoneda(datos.totales.exento))
+            .replace(/{{desglose_total_iva}}/g, this.formatearMoneda(datos.totales.iva))
+            .replace(/{{desglose_total_percepciones}}/g, this.formatearMoneda(datos.totales.percepciones))
+            .replace(/{{desglose_total_total}}/g, this.formatearMoneda(datos.totales.total));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }
@@ -1408,7 +2262,7 @@ class PdfGenerator {
                         <td>${producto.id}</td>
                         <td>${producto.nombre}</td>
                         <td>${producto.unidad_medida}</td>
-                        <td>$ ${precioConIva.toFixed(2)}</td>
+                        <td style="white-space: nowrap;">$ ${this.formatearMoneda(precioConIva)}</td>
                     </tr>
                 `;
             }).join('');
@@ -1534,12 +2388,12 @@ class PdfGenerator {
                     <td>${venta.numero}</td>
                     <td>${venta.cliente}</td>
                     <td>${venta.cuit}</td>
-                    <td>$ ${venta.neto.toFixed(2)}</td>
-                    <td>$ ${venta.exento.toFixed(2)}</td>
-                    <td>$ ${venta.iva.toFixed(2)}</td>
-                    <td>$ ${venta.percepciones.toFixed(2)}</td>
-                    <td>$ ${venta.retenciones.toFixed(2)}</td>
-                    <td>$ ${venta.total.toFixed(2)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.neto)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.exento)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.iva)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.percepciones)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.retenciones)}</td>
+                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.total)}</td>
                 </tr>
             `;
         }).join('');
@@ -1548,12 +2402,12 @@ class PdfGenerator {
 
         // Reemplazar totales
         htmlTemplate = htmlTemplate
-            .replace(/{{total_neto}}/g, datos.totales.neto.toFixed(2))
-            .replace(/{{total_exento}}/g, datos.totales.exento.toFixed(2))
-            .replace(/{{total_iva}}/g, datos.totales.iva.toFixed(2))
-            .replace(/{{total_percepciones}}/g, datos.totales.percepciones.toFixed(2))
-            .replace(/{{total_retenciones}}/g, datos.totales.retenciones.toFixed(2))
-            .replace(/{{total_total}}/g, datos.totales.total.toFixed(2));
+            .replace(/{{total_neto}}/g, this.formatearMoneda(datos.totales.neto))
+            .replace(/{{total_exento}}/g, this.formatearMoneda(datos.totales.exento))
+            .replace(/{{total_iva}}/g, this.formatearMoneda(datos.totales.iva))
+            .replace(/{{total_percepciones}}/g, this.formatearMoneda(datos.totales.percepciones))
+            .replace(/{{total_retenciones}}/g, this.formatearMoneda(datos.totales.retenciones))
+            .replace(/{{total_total}}/g, this.formatearMoneda(datos.totales.total));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }
@@ -1591,6 +2445,9 @@ class PdfGenerator {
 
     /**
      * ✅ GENERAR NOTA ARCA (A y B con CAE)
+     * Integración Etapa 5: usa construirHtmlMultipaginaARCA; mismas reglas que Factura
+     * y Notas D/C (encabezado fijo, total/QR solo última, numeración). Comprobante asociado
+     * en encabezado, se repite en todas las páginas.
      */
     async generarNotaARCA(venta, productos) {
         const esNotaDebito = venta.tipo_doc === 'NOTA_DEBITO';
@@ -1601,14 +2458,13 @@ class PdfGenerator {
             throw new Error(`Plantilla ${templateName} no encontrada`);
         }
 
-        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-
         console.log('📱 Generando QR...');
         const qrBase64 = await this.generarQRDesdeARCA(venta);
         const logoARCABase64 = this.obtenerLogoARCABase64();
         
         const tipoComprobante = venta.tipo_f;
-        const fechaFormateada = this.formatearFecha(venta.fecha);
+        const codigoComprobante = this.obtenerCodigoComprobanteVisual(tipoComprobante, venta.tipo_doc);
+        const fechaFormateada = this.formatearFecha(venta.fecha_fiscal || venta.fecha);
         const fechaVencimientoCAE = this.formatearFecha(venta.cae_fecha);
         
         // ✅ DESGLOSAR NÚMERO DE NOTA: "0004-00001"
@@ -1636,9 +2492,10 @@ class PdfGenerator {
         
         // ✅ Determinar si el cliente está EXENTO
         const condicionIVA = (venta.cliente_condicion || '').toString().trim();
-        const esExento = condicionIVA === 'Exento';
+        const ocultarIvaDiscriminado = (tipoComprobante || '').toString().trim().toUpperCase() === 'B'
+            || this.debeOcultarIvaDiscriminadoEnComprobanteB(tipoComprobante, condicionIVA);
         
-        console.log(`🔖 Cliente ${condicionIVA} ${esExento ? '(SIN IVA)' : '(CON IVA)'}`);
+        console.log(`🔖 Cliente ${condicionIVA} ${ocultarIvaDiscriminado ? '(SIN IVA DISCRIMINADO)' : '(CON IVA DISCRIMINADO)'}`);
         
         // ✅ MANEJO CONDICIONAL DE OBSERVACIONES
         let observacionesHTML = '';
@@ -1703,7 +2560,7 @@ class PdfGenerator {
                     facturaAsociadaFecha = this.formatearFecha(facturaRef.fecha);
                     
                     // Formatear total
-                    facturaAsociadaTotal = parseFloat(facturaRef.total || 0).toFixed(2);
+                    facturaAsociadaTotal = this.formatearMoneda(facturaRef.total || 0);
                     
                     console.log(`✅ Factura asociada encontrada: ${facturaAsociadaTipo} ${facturaAsociadaNumero}`);
                 } else {
@@ -1716,64 +2573,116 @@ class PdfGenerator {
             console.log('📝 No hay factura asociada (venta_referencia_id no disponible)');
         }
         
-        // Reemplazar datos generales
-        htmlTemplate = htmlTemplate
-            .replace(/{{tipo_comprobante}}/g, tipoComprobante)
-            .replace(/{{punto_venta}}/g, puntoVenta)
-            .replace(/{{numero_comprobante}}/g, numeroComprobante)
-            .replace(/{{fecha}}/g, fechaFormateada)
-            .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-            .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-            .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-            .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-            .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-            .replace(/{{cliente_cuit}}/g, venta.cliente_cuit || 'No informado')
-            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-            .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
-            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado')
-            .replace(/{{observaciones_html}}/g, observacionesHTML)
-            .replace(/{{factura_asociada_tipo}}/g, facturaAsociadaTipo)
-            .replace(/{{factura_asociada_numero}}/g, facturaAsociadaNumero)
-            .replace(/{{factura_asociada_fecha}}/g, facturaAsociadaFecha)
-            .replace(/{{factura_asociada_total}}/g, facturaAsociadaTotal);
-
         // ✅ ITEMS - Mostrar precios según si es EXENTO o no
-        const itemsHTML = productos.map(producto => {
+        const totalComprobanteCabecera = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : null;
+        const totalesVisualesComprobante = ocultarIvaDiscriminado
+            ? this.construirTotalesVisualesRedondeados(
+                productos.map((p) => (parseFloat(p.subtotal) || 0) + (parseFloat(p.iva || p.iva_calculado) || 0)),
+                totalComprobanteCabecera
+            )
+            : [];
+
+        const rowsByItem = productos.map((producto, index) => {
             const cantidad = parseFloat(producto.cantidad) || 0;
             const subtotal = parseFloat(producto.subtotal) || 0;
+            const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
             const cantidadFormateada = this.formatearCantidad(cantidad);
             
-            const precioUnitarioSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
-            const alicuotaIVA = esExento ? '0.00' : '21.00';
+            const subtotalMostrado = ocultarIvaDiscriminado
+                ? (totalesVisualesComprobante[index] ?? Math.round(subtotal + ivaItem))
+                : subtotal;
+            const precioUnitarioSinIva = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
+            if (ocultarIvaDiscriminado) {
+                return `
+                    <tr>
+                        <td style="text-align: center;">${cantidadFormateada}</td>
+                        <td>${producto.producto_nombre} - ${producto.producto_um || 'unidad'}</td>
+                        <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitarioSinIva)}</td>
+                        <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
+                    </tr>
+                `;
+            }
 
             return `
                 <tr>
                     <td style="text-align: center;">${cantidadFormateada}</td>
                     <td>${producto.producto_nombre} - ${producto.producto_um || 'unidad'}</td>
-                    <td style="text-align: center;">${alicuotaIVA}</td>
-                    <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
-                    <td style="text-align: right;">${subtotal.toFixed(2)}</td>
+                    <td style="text-align: center;">21.00</td>
+                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitarioSinIva)}</td>
+                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
                 </tr>
             `;
-        }).join('');
+        });
 
-        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
+        // ✅ TOTALES: priorizar importes persistidos en cabecera de venta
+        const subtotalCalculado = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
+        const subtotal = Number.isFinite(parseFloat(venta.subtotal))
+            ? parseFloat(venta.subtotal)
+            : subtotalCalculado;
+        const ivaTotal = Number.isFinite(parseFloat(venta.iva_total))
+            ? parseFloat(venta.iva_total)
+            : (ocultarIvaDiscriminado ? 0 : subtotal * 0.21);
+        const total = Number.isFinite(parseFloat(venta.total))
+            ? parseFloat(venta.total)
+            : (subtotal + ivaTotal);
 
-        // ✅ TOTALES: SUBTOTAL + IVA 21% (o 0% si es exento)
-        const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
-        const ivaTotal = esExento ? 0 : subtotal * 0.21;
-        const total = subtotal + ivaTotal;
+        const tableHeader = ocultarIvaDiscriminado
+            ? `
+                <thead>
+                    <tr>
+                        <th style="width: 10%;">Cantidad</th>
+                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 20%;">Precio</th>
+                        <th style="width: 20%;">Total</th>
+                    </tr>
+                </thead>
+            `
+            : undefined;
 
-        htmlTemplate = htmlTemplate
-            .replace(/{{subtotal}}/g, subtotal.toFixed(2))
-            .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
-            .replace(/{{total}}/g, total.toFixed(2))
-            .replace(/{{qr_base64}}/g, qrBase64)
-            .replace(/{{logo_arca}}/g, logoARCABase64)
-            .replace(/{{cae}}/g, venta.cae_id)
-            .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
+        const footerContent = this.construirFooterFacturaARCA({
+            observacionesHTML,
+            subtotal,
+            ivaTotal,
+            total,
+            qrBase64,
+            logoARCABase64,
+            cae: venta.cae_id,
+            fechaVencimientoCAE,
+            esExento: ocultarIvaDiscriminado
+        });
 
-        return await this.generatePdfFromHtml(htmlTemplate);
+        const commonReplacements = {
+            tipo_comprobante: tipoComprobante,
+            codigo_comprobante: codigoComprobante,
+            punto_venta: puntoVenta,
+            numero_comprobante: numeroComprobante,
+            fecha: fechaFormateada,
+            cuit_emisor: process.env.AFIP_CUIT || '30714525030',
+            ingresos_brutos: process.env.IIBB || '251491/4',
+            fecha_inicio_actividades: process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016',
+            telefono: process.env.EMPRESA_TELEFONO || '',
+            email: process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com',
+            cliente_cuit: venta.cliente_cuit || 'No informado',
+            cliente_nombre: venta.cliente_nombre || 'No informado',
+            cliente_condicion: venta.cliente_condicion || 'No informado',
+            cliente_direccion: venta.cliente_direccion || 'No informado',
+            observaciones_html: observacionesHTML,
+            factura_asociada_tipo: facturaAsociadaTipo,
+            factura_asociada_numero: facturaAsociadaNumero,
+            factura_asociada_fecha: facturaAsociadaFecha,
+            factura_asociada_total: facturaAsociadaTotal
+        };
+
+        const { html: finalHtml, pageCount } = await this.construirHtmlMultipaginaARCA({
+            templatePath,
+            commonReplacements,
+            rowsByItem,
+            footerContent,
+            tableHeader
+        });
+
+        console.log(`📄 Generando PDF de Nota ARCA - Páginas: ${pageCount}`);
+        return await this.generatePdfFromHtml(finalHtml);
     }
 
     /**
@@ -1829,8 +2738,8 @@ class PdfGenerator {
                     <td>${producto.producto_nombre}</td>
                     <td>${producto.producto_um || 'unidad'}</td>
                     <td style="text-align: center;">${cantidadFormateada}</td>
-                    <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
-                    <td style="text-align: right;">${total.toFixed(2)}</td>
+                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(productoPrecioIva)}</td>
+                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(total)}</td>
                 </tr>
             `;
         }).join('');
@@ -1843,7 +2752,8 @@ class PdfGenerator {
             return acc + subtotal + iva;
         }, 0);
 
-        htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalNota.toFixed(2));
+        const totalNotaMostrado = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : totalNota;
+        htmlTemplate = htmlTemplate.replace(/{{total}}/g, this.formatearMoneda(totalNotaMostrado));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }

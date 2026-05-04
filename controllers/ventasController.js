@@ -9,6 +9,7 @@ const crypto = require('crypto'); // ✅ Para generar hash SHA-256
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
+const { roundFacturacion } = require('../utils/rounding');
 // Nota: Las funciones de ARCA solo se usan al solicitar CAE, no al crear ventas
 
 const verificarArchivoExiste = (comprobantePath) => {
@@ -123,8 +124,58 @@ const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta 
 
 
 
+    /**
+     * Obtener ventas con paginación y filtros opcionales.
+     * Query params: pagina, porPagina, cliente, ciudad, fechaDesde, fechaHasta, tipoDocumento, tipoFiscal, empleado.
+     * Sin filtros de fecha se devuelve todo el historial (paginado).
+     * Respuesta: { success, data, total, pagina, porPagina }
+     */
     const obtenerVentas = (req, res) => {
-        const query = `
+        const pagina = Math.max(1, parseInt(req.query.pagina, 10) || 1);
+        const porPagina = Math.min(200, Math.max(10, parseInt(req.query.porPagina, 10) || 50));
+        const offset = (pagina - 1) * porPagina;
+        const cliente = (req.query.cliente || '').trim();
+        const ciudad = (req.query.ciudad || '').trim();
+        const fechaDesde = (req.query.fechaDesde || '').trim();
+        const fechaHasta = (req.query.fechaHasta || '').trim();
+        const tipoDocumento = (req.query.tipoDocumento || '').trim();
+        const tipoFiscal = (req.query.tipoFiscal || '').trim();
+        const empleado = (req.query.empleado || '').trim();
+
+        const conditions = [];
+        const params = [];
+        if (cliente) {
+            conditions.push('cliente_nombre LIKE ?');
+            params.push('%' + cliente + '%');
+        }
+        if (ciudad) {
+            conditions.push('cliente_ciudad LIKE ?');
+            params.push('%' + ciudad + '%');
+        }
+        if (fechaDesde) {
+            conditions.push('DATE(fecha) >= ?');
+            params.push(fechaDesde);
+        }
+        if (fechaHasta) {
+            conditions.push('DATE(fecha) <= ?');
+            params.push(fechaHasta);
+        }
+        if (tipoDocumento) {
+            conditions.push('tipo_doc = ?');
+            params.push(tipoDocumento);
+        }
+        if (tipoFiscal) {
+            conditions.push('tipo_f = ?');
+            params.push(tipoFiscal);
+        }
+        if (empleado) {
+            conditions.push('LOWER(TRIM(empleado_nombre)) = LOWER(?)');
+            params.push(empleado);
+        }
+        const whereClause = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+        const baseQuery = `FROM ventas ${whereClause}`;
+        const countQuery = `SELECT COUNT(*) as total ${baseQuery}`;
+        const dataQuery = `
             SELECT 
                 id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
                 cliente_direccion, cliente_ciudad, cliente_provincia, 
@@ -133,14 +184,31 @@ const obtenerSiguienteNumeroFactura = async (connection, tipoFiscal, puntoVenta 
                 empleado_id, empleado_nombre, 
                 cae_id, cae_fecha, cae_resultado, cae_observaciones, cae_solicitud_fecha,
                 comprobante_path
-            FROM ventas ORDER BY fecha DESC`;
-        db.query(query, (err, results) => {
-            if (err) {
-                console.error('Error al obtener ventas:', err);
-                res.status(500).send('Error al obtener ventas');
-            } else {
-                res.json(results);
+            ${baseQuery}
+            ORDER BY fecha DESC
+            LIMIT ? OFFSET ?
+        `;
+        const dataParams = [...params, porPagina, offset];
+
+        db.query(countQuery, params, (errCount, countRows) => {
+            if (errCount) {
+                console.error('Error al contar ventas:', errCount);
+                return res.status(500).json({ success: false, message: 'Error al obtener ventas' });
             }
+            const total = (countRows && countRows[0] && countRows[0].total) ? countRows[0].total : 0;
+            db.query(dataQuery, dataParams, (err, results) => {
+                if (err) {
+                    console.error('Error al obtener ventas:', err);
+                    return res.status(500).json({ success: false, message: 'Error al obtener ventas' });
+                }
+                res.json({
+                    success: true,
+                    data: results || [],
+                    total: total,
+                    pagina: pagina,
+                    porPagina: porPagina
+                });
+            });
         });
     };
 
@@ -297,11 +365,34 @@ const generarPdfRankingVentas = async (req, res) => {
     }
 
     try {
+        const tiposPermitidos = new Set(['FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO']);
+        const normalizeNumber = (value) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? number : 0;
+        };
+        const sanitizeText = (value) => (typeof value === 'string' ? value.trim() : (value ?? ''));
+
+        const ventasNormalizadas = ventas.map((venta) => {
+            const tipoDocumento = sanitizeText(venta?.tipo_doc).toUpperCase();
+            return {
+                cliente_id: venta?.cliente_id ?? null,
+                cliente_nombre: sanitizeText(venta?.cliente_nombre),
+                direccion: sanitizeText(venta?.direccion),
+                telefono: sanitizeText(venta?.telefono),
+                email: sanitizeText(venta?.email),
+                dni: sanitizeText(venta?.dni),
+                tipo_doc: tiposPermitidos.has(tipoDocumento) ? tipoDocumento : 'FACTURA',
+                subtotal: normalizeNumber(venta?.subtotal),
+                iva_total: normalizeNumber(venta?.iva_total),
+                total: normalizeNumber(venta?.total)
+            };
+        });
+
         console.log(`📄 Generando PDF de Ranking de Ventas para la fecha ${fecha} (${ventas.length} ventas)...`);
         const startTime = Date.now();
 
         // Call the pdfGenerator's function
-        const pdfBuffer = await pdfGenerator.generarRankingVentas(fecha, ventas);
+        const pdfBuffer = await pdfGenerator.generarRankingVentas(fecha, ventasNormalizadas);
 
         const generationTime = Date.now() - startTime;
         console.log(`✅ PDF de Ranking de Ventas generado en ${generationTime}ms`);
@@ -337,21 +428,30 @@ const generarPdfRankingVentas = async (req, res) => {
 
 
 
-// ✅ NUEVA FUNCIÓN - Generar PDFs múltiples de facturas
+// ✅ NUEVA FUNCIÓN - Generar PDFs múltiples de facturas/notas
     const generarPdfFacturasMultiples = async (req, res) => {
         const { ventasIds } = req.body;
-        
+
         if (!ventasIds || !Array.isArray(ventasIds) || ventasIds.length === 0) {
             return res.status(400).json({ error: "Debe proporcionar al menos un ID de venta válido" });
         }
 
+        let PDFDocument;
         try {
-            console.log(`📄 Generando ${ventasIds.length} facturas múltiples optimizadas...`);
+            ({ PDFDocument } = require('pdf-lib'));
+        } catch (error) {
+            console.error('❌ Dependencia faltante: pdf-lib');
+            return res.status(500).json({
+                error: "Falta dependencia para impresión múltiple",
+                details: "Instalar 'pdf-lib' en el backend y reiniciar el servicio"
+            });
+        }
+
+        try {
+            console.log(`📄 Generando ${ventasIds.length} comprobantes múltiples...`);
             const startTime = Date.now();
+            const pdfBuffers = [];
 
-            const htmlSections = [];
-
-            // ✅ PROCESAR CADA VENTA Y USAR LA PLANTILLA CORRECTA SEGÚN tipo_f
             for (const ventaId of ventasIds) {
                 try {
                     const ventaRows = await new Promise((resolve, reject) => {
@@ -360,271 +460,59 @@ const generarPdfRankingVentas = async (req, res) => {
                             resolve(results);
                         });
                     });
-                    
+
                     if (ventaRows.length === 0) {
                         console.warn(`Venta con ID ${ventaId} no encontrada, continuando`);
                         continue;
                     }
-                    
+
                     const venta = ventaRows[0];
-                    const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
-                    
                     const productos = await new Promise((resolve, reject) => {
                         db.query('SELECT *, descuento_porcentaje FROM ventas_cont WHERE venta_id = ?', [ventaId], (err, results) => {
                             if (err) return reject(err);
                             resolve(results);
                         });
                     });
-                    
+
                     if (productos.length === 0) {
                         console.warn(`No se encontraron productos para la venta ${ventaId}, continuando`);
                         continue;
                     }
-                    
-                    // ✅ DETERMINAR QUÉ PLANTILLA USAR: ARCA (A/B) o GENÉRICA (C)
-                    let htmlTemplate;
-                    let templateName;
-                    
-                    // ✅ DETECTAR SI ES UNA NOTA
+
                     const esNota = venta.tipo_doc === 'NOTA_DEBITO' || venta.tipo_doc === 'NOTA_CREDITO';
-                    
-                    if (esNota) {
-                        // ✅ NOTA DE DÉBITO O CRÉDITO
-                        if (tipoFiscal === 'A' || tipoFiscal === 'B') {
-                            // ✅ VERIFICAR SI TIENE CAE APROBADO
-                            const tieneCAEAprobado = venta.cae_id && 
-                                                    venta.cae_resultado && 
-                                                    venta.cae_resultado.toString().trim().toUpperCase() === 'A';
+                    const pdfBufferIndividual = esNota
+                        ? await pdfGenerator.generarNota(venta, productos)
+                        : await pdfGenerator.generarFactura(venta, productos);
 
-                            if (tieneCAEAprobado) {
-                                templateName = venta.tipo_doc === 'NOTA_DEBITO' ? 'nota_debito_arca.html' : 'nota_credito_arca.html';
-                                console.log(`📋 Usando plantilla ARCA para ${venta.tipo_doc} ${ventaId} tipo ${tipoFiscal}`);
-                            } else {
-                                templateName = venta.tipo_doc === 'NOTA_DEBITO' ? 'nota_debito.html' : 'nota_credito.html';
-                                console.warn(`⚠️ ${venta.tipo_doc} ${ventaId} tipo ${tipoFiscal} sin CAE, usando genérica`);
-                            }
-                        } else {
-                            templateName = venta.tipo_doc === 'NOTA_DEBITO' ? 'nota_debito.html' : 'nota_credito.html';
-                            console.log(`📋 Usando plantilla genérica para ${venta.tipo_doc} ${ventaId} tipo ${tipoFiscal}`);
-                        }
-                    } else {
-                        // ✅ FACTURA
-                        if (tipoFiscal === 'A' || tipoFiscal === 'B') {
-                            // ✅ VERIFICAR SI TIENE CAE APROBADO
-                            const tieneCAEAprobado = venta.cae_id && 
-                                                    venta.cae_resultado && 
-                                                    venta.cae_resultado.toString().trim().toUpperCase() === 'A';
-
-                            if (tieneCAEAprobado) {
-                                templateName = 'factura_arca.html';
-                                console.log(`📋 Usando plantilla ARCA para venta ${ventaId} tipo ${tipoFiscal}`);
-                            } else {
-                                templateName = 'factura.html';
-                                console.warn(`⚠️ Venta ${ventaId} tipo ${tipoFiscal} sin CAE, usando genérica`);
-                            }
-                        } else {
-                            templateName = 'factura.html';
-                            console.log(`📋 Usando plantilla genérica para venta ${ventaId} tipo ${tipoFiscal}`);
-                        }
-                    }
-
-                    const templatePath = path.join(pdfGenerator.templatesPath, templateName);
-                    htmlTemplate = fs.readFileSync(templatePath, 'utf8');
-                    
-                    // ✅ PROCESAR SEGÚN TIPO DE PLANTILLA
-                    const esNotaARCA = templateName === 'nota_debito_arca.html' || templateName === 'nota_credito_arca.html';
-                    const esNotaGenerica = templateName === 'nota_debito.html' || templateName === 'nota_credito.html';
-                    
-                    if (templateName === 'factura_arca.html' || esNotaARCA) {
-                        // ✅ FACTURA ARCA (A/B) - SIN IVA EN ITEMS
-                        const qrBase64 = await pdfGenerator.generarQRDesdeARCA(venta);
-                        const logoARCABase64 = pdfGenerator.obtenerLogoARCABase64();
-                        const fechaFormateada = pdfGenerator.formatearFecha(venta.fecha);
-                        const fechaVencimientoCAE = pdfGenerator.formatearFecha(venta.cae_fecha);
-                        
-                        htmlTemplate = htmlTemplate
-                            .replace(/{{tipo_comprobante}}/g, tipoFiscal)
-                            .replace(/{{punto_venta}}/g, String(1).padStart(4, '0'))
-                            .replace(/{{numero_comprobante}}/g, String(venta.id).padStart(8, '0'))
-                            .replace(/{{fecha}}/g, fechaFormateada)
-                            .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-                            .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-                            .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-                            .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-                            .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-                            .replace(/{{cliente_cuit}}/g, venta.cliente_cuit || 'No informado')
-                            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-                            .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
-                            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
-
-                        // ✅ DETERMINAR SI ES EXENTO
-                        const condicionIVA = (venta.cliente_condicion || '').toString().trim();
-                        const esExento = condicionIVA === 'Exento';
-                        
-                        // ✅ ITEMS SIN IVA (o con IVA 0% si es exento)
-                        const itemsHTML = productos.map(producto => {
-                            const cantidad = parseFloat(producto.cantidad) || 0;
-                            const subtotal = parseFloat(producto.subtotal) || 0;
-                            const precioUnitarioSinIva = cantidad > 0 ? (subtotal / cantidad) : 0;
-                            const cantidadFormateada = pdfGenerator.formatearCantidad(cantidad);
-                            const alicuotaIVA = esExento ? '0.00' : '21.00';
-
-                            return `
-                                <tr>
-                                    <td style="text-align: center;">${cantidadFormateada}</td>
-                                    <td>${producto.producto_nombre} - ${producto.producto_um || 'unidad'}</td>
-                                    <td style="text-align: center;">${alicuotaIVA}</td>
-                                    <td style="text-align: right;">${precioUnitarioSinIva.toFixed(2)}</td>
-                                    <td style="text-align: right;">${subtotal.toFixed(2)}</td>
-                                </tr>
-                            `;
-                        }).join('');
-
-                        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
-
-                        // ✅ TOTALES: SUBTOTAL + IVA 21% (o 0% si es exento)
-                        const subtotal = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
-                        const ivaTotal = esExento ? 0 : subtotal * 0.21;
-                        const total = subtotal + ivaTotal;
-
-                        htmlTemplate = htmlTemplate
-                            .replace(/{{subtotal}}/g, subtotal.toFixed(2))
-                            .replace(/{{iva_total}}/g, ivaTotal.toFixed(2))
-                            .replace(/{{total}}/g, total.toFixed(2))
-                            .replace(/{{qr_base64}}/g, qrBase64)
-                            .replace(/{{logo_arca}}/g, logoARCABase64)
-                            .replace(/{{cae}}/g, venta.cae_id)
-                            .replace(/{{cae_vencimiento}}/g, fechaVencimientoCAE);
-                        
-                    } else if (esNotaGenerica) {
-                        // ✅ NOTA GENÉRICA (X o sin CAE)
-                        const fechaFormateada = pdfGenerator.formatearFecha(venta.fecha);
-                        
-                        // ✅ DESGLOSAR NÚMERO DE NOTA
-                        let puntoVenta = '0004';
-                        let numeroComprobante = String(venta.id).padStart(5, '0');
-                        
-                        if (venta.numero_factura) {
-                            const regex = /^(\d{4})-(\d{5})$/;
-                            const match = venta.numero_factura.trim().match(regex);
-                            
-                            if (match) {
-                                puntoVenta = match[1];
-                                numeroComprobante = match[2];
-                            }
-                        }
-                        
-                        htmlTemplate = htmlTemplate
-                            .replace(/{{tipo_comprobante}}/g, tipoFiscal)
-                            .replace(/{{punto_venta}}/g, puntoVenta)
-                            .replace(/{{numero_comprobante}}/g, numeroComprobante)
-                            .replace(/{{fecha}}/g, fechaFormateada)
-                            .replace(/{{cuit_emisor}}/g, process.env.AFIP_CUIT || '30714525030')
-                            .replace(/{{ingresos_brutos}}/g, process.env.IIBB || '251491/4')
-                            .replace(/{{fecha_inicio_actividades}}/g, process.env.EMPRESA_INICIO_ACTIVIDADES || '01/02/2016')
-                            .replace(/{{telefono}}/g, process.env.EMPRESA_TELEFONO || '')
-                            .replace(/{{email}}/g, process.env.EMPRESA_EMAIL || 'vertimar@hotmail.com')
-                            .replace(/{{cliente_cuit}}/g, venta.cliente_cuit || 'No informado')
-                            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-                            .replace(/{{cliente_condicion}}/g, venta.cliente_condicion || 'No informado')
-                            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
-
-                        // ✅ ITEMS PARA NOTA GENÉRICA
-                        const itemsHTML = productos.map(producto => {
-                            const cantidad = parseFloat(producto.cantidad) || 0;
-                            const subtotal = parseFloat(producto.subtotal) || 0;
-                            const iva = parseFloat(producto.iva || producto.IVA) || 0;
-                            const total = subtotal + iva;
-                            const productoPrecioIva = cantidad > 0 ? (total / cantidad) : 0;
-                            const cantidadFormateada = pdfGenerator.formatearCantidad(cantidad);
-
-                            return `
-                                <tr>
-                                    <td>${producto.producto_id || ''}</td>
-                                    <td>${producto.producto_nombre}</td>
-                                    <td>${producto.producto_um || 'unidad'}</td>
-                                    <td style="text-align: center;">${cantidadFormateada}</td>
-                                    <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
-                                    <td style="text-align: right;">${total.toFixed(2)}</td>
-                                </tr>
-                            `;
-                        }).join('');
-                        
-                        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
-                        
-                        const totalNota = productos.reduce((acc, item) => {
-                            const subtotal = parseFloat(item.subtotal) || 0;
-                            const iva = parseFloat(item.iva || item.IVA) || 0;
-                            return acc + subtotal + iva;
-                        }, 0);
-
-                        htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalNota.toFixed(2));
-                        
-                    } else {
-                        // ✅ FACTURA GENÉRICA (C) - CON IVA INCLUIDO, SIN $
-                        const fechaFormateada = pdfGenerator.formatearFecha(venta.fecha);
-                        
-                        htmlTemplate = htmlTemplate
-                            .replace(/{{fecha}}/g, fechaFormateada)
-                            .replace(/{{cliente_nombre}}/g, venta.cliente_nombre || 'No informado')
-                            .replace(/{{cliente_direccion}}/g, venta.cliente_direccion || 'No informado');
-
-                        const itemsHTML = productos.map(producto => {
-                            const cantidad = parseFloat(producto.cantidad) || 0;
-                            const subtotal = parseFloat(producto.subtotal) || 0;
-                            const iva = parseFloat(producto.iva || producto.IVA) || 0;
-                            const total = subtotal + iva;
-                            const productoPrecioIva = cantidad > 0 ? (total / cantidad) : 0;
-                            const cantidadFormateada = pdfGenerator.formatearCantidad(cantidad);
-
-                            return `
-                                <tr>
-                                    <td>${producto.producto_id}</td>
-                                    <td>${producto.producto_nombre}</td>
-                                    <td>${producto.producto_um}</td>
-                                    <td style="text-align: center;">${cantidadFormateada}</td>
-                                    <td style="text-align: right;">${productoPrecioIva.toFixed(2)}</td>
-                                    <td style="text-align: right;">${total.toFixed(2)}</td>
-                                </tr>
-                            `;
-                        }).join('');
-                        
-                        htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
-                        
-                        const totalFactura = productos.reduce((acc, item) => {
-                            const subtotal = parseFloat(item.subtotal) || 0;
-                            const iva = parseFloat(item.iva || item.IVA) || 0;
-                            return acc + subtotal + iva;
-                        }, 0);
-
-                        htmlTemplate = htmlTemplate.replace(/{{total}}/g, venta.total || totalFactura.toFixed(2));
-                    }
-                    
-                    htmlSections.push(htmlTemplate);
-                    
+                    pdfBuffers.push(pdfBufferIndividual);
                 } catch (error) {
                     console.error(`Error procesando venta ID ${ventaId}:`, error);
                 }
             }
-            
-            if (htmlSections.length === 0) {
+
+            if (pdfBuffers.length === 0) {
                 return res.status(404).json({ error: "No se pudieron obtener datos para las ventas seleccionadas" });
             }
 
-            // ✅ COMBINAR TODAS LAS SECCIONES CON SALTOS DE PÁGINA
-            const combinedHTML = htmlSections.join('<div style="page-break-before: always;"></div>');
-            const pdfBuffer = await pdfGenerator.generatePdfFromHtml(combinedHTML);
+            const mergedPdf = await PDFDocument.create();
+            for (const buffer of pdfBuffers) {
+                const pdf = await PDFDocument.load(buffer);
+                const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+                copiedPages.forEach((page) => mergedPdf.addPage(page));
+            }
+
+            const mergedBytes = await mergedPdf.save();
+            const pdfBuffer = Buffer.from(mergedBytes);
 
             const generationTime = Date.now() - startTime;
-            console.log(`✅ ${htmlSections.length} facturas múltiples generadas en ${generationTime}ms`);
+            console.log(`✅ ${pdfBuffers.length} comprobantes múltiples generados en ${generationTime}ms`);
 
             res.setHeader("Content-Type", "application/pdf");
             res.setHeader("Content-Disposition", `attachment; filename="Facturas_Multiples_${new Date().toISOString().split('T')[0]}.pdf"`);
             res.end(pdfBuffer);
-            
         } catch (error) {
             console.error("❌ Error generando PDFs múltiples:", error);
-            res.status(500).json({ 
+            res.status(500).json({
                 error: "Error al generar los PDFs múltiples",
                 details: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
@@ -727,6 +615,11 @@ const generarHashFacturacion = (pedidoId, tipoFiscal, datosFacturacion) => {
         console.error('❌ Error generando hash de facturación:', error);
         return null;
     }
+};
+
+const normalizarImporte = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : NaN;
 };
 
 // ✅ FUNCIÓN PARA VERIFICAR VENTA EXISTENTE POR PEDIDO (dentro de transacción)
@@ -886,7 +779,8 @@ const facturarPedido = async (req, res) => {
                             pedidoId: pedidoId,
                             total: ventaExistente.total,
                             productosCount: productosVenta.length,
-                            requiereCAE: ventaExistente.tipo_f !== 'X'
+                            requiereCAE: ventaExistente.tipo_f !== 'X',
+                            pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
                         }
                     });
                 } else {
@@ -919,16 +813,66 @@ const facturarPedido = async (req, res) => {
             
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
             
-            // ✅ 4. GENERAR HASH DETERMINÍSTICO PARA IDEMPOTENCIA
+            // ✅ 4. VALIDAR/RECUPERAR IMPORTES DE CABECERA (blindaje contra payload inválido)
+            let subtotalSinIvaFinal = normalizarImporte(subtotalSinIva);
+            let ivaTotalFinal = normalizarImporte(ivaTotal);
+            let totalConIvaFinal = normalizarImporte(totalConIva);
+            const importesRecibidosValidos = (
+                Number.isFinite(subtotalSinIvaFinal) &&
+                Number.isFinite(ivaTotalFinal) &&
+                Number.isFinite(totalConIvaFinal) &&
+                subtotalSinIvaFinal >= 0 &&
+                ivaTotalFinal >= 0 &&
+                totalConIvaFinal > 0
+            );
+
+            if (!importesRecibidosValidos) {
+                const subtotalFallback = productos.reduce((acc, producto) => {
+                    return acc + (Number(producto.subtotal) || 0);
+                }, 0);
+                const ivaFallback = productos.reduce((acc, producto) => {
+                    return acc + (Number(producto.IVA) || 0);
+                }, 0);
+                const totalFallback = subtotalFallback + ivaFallback;
+
+                console.warn('⚠️ [Facturar Pedido] Importes inválidos recibidos. Aplicando fallback desde detalle del pedido.', {
+                    pedidoId,
+                    recibidos: { subtotalSinIva, ivaTotal, totalConIva },
+                    recalculados: {
+                        subtotalSinIva: subtotalFallback,
+                        ivaTotal: ivaFallback,
+                        totalConIva: totalFallback
+                    }
+                });
+
+                subtotalSinIvaFinal = subtotalFallback;
+                ivaTotalFinal = ivaFallback;
+                totalConIvaFinal = totalFallback;
+            }
+
+            if (
+                !Number.isFinite(subtotalSinIvaFinal) ||
+                !Number.isFinite(ivaTotalFinal) ||
+                !Number.isFinite(totalConIvaFinal) ||
+                subtotalSinIvaFinal < 0 ||
+                ivaTotalFinal < 0 ||
+                totalConIvaFinal <= 0
+            ) {
+                const validationError = new Error('Importes de facturación inválidos. No se pudo generar una cabecera de venta válida.');
+                validationError.statusCode = 400;
+                throw validationError;
+            }
+
+            // ✅ 5. GENERAR HASH DETERMINÍSTICO PARA IDEMPOTENCIA
             const hashFacturacion = generarHashFacturacion(pedidoId, tipoFiscal, {
-                subtotalSinIva,
-                ivaTotal,
-                totalConIva,
+                subtotalSinIva: subtotalSinIvaFinal,
+                ivaTotal: ivaTotalFinal,
+                totalConIva: totalConIvaFinal,
                 cuentaId
             });
             console.log(`🔐 Hash de facturación generado: ${hashFacturacion}`);
             
-            // ✅ 5. VERIFICAR VENTA EXISTENTE POR HASH (idempotencia explícita)
+            // ✅ 6. VERIFICAR VENTA EXISTENTE POR HASH (idempotencia explícita)
             const ventaExistentePorHash = await verificarVentaExistentePorHash(connection, hashFacturacion);
             if (ventaExistentePorHash) {
                 // Obtener productos y remito de la venta existente
@@ -977,12 +921,13 @@ const facturarPedido = async (req, res) => {
                         pedidoId: pedidoId,
                         total: ventaExistentePorHash.total,
                         productosCount: productosVenta.length,
-                        requiereCAE: ventaExistentePorHash.tipo_f !== 'X'
+                        requiereCAE: ventaExistentePorHash.tipo_f !== 'X',
+                        pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
                     }
                 });
             }
             
-            // ✅ 6. VERIFICAR VENTA EXISTENTE POR PEDIDO (idempotencia por entidad)
+            // ✅ 7. VERIFICAR VENTA EXISTENTE POR PEDIDO (idempotencia por entidad)
             const ventaExistentePorPedido = await verificarVentaExistentePorPedido(connection, pedidoId);
             if (ventaExistentePorPedido) {
                 // Obtener productos y remito de la venta existente
@@ -1038,12 +983,13 @@ const facturarPedido = async (req, res) => {
                         pedidoId: pedidoId,
                         total: ventaExistentePorPedido.total,
                         productosCount: productosVenta.length,
-                        requiereCAE: ventaExistentePorPedido.tipo_f !== 'X'
+                        requiereCAE: ventaExistentePorPedido.tipo_f !== 'X',
+                        pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
                     }
                 });
             }
 
-            // ✅ 7. OBTENER SIGUIENTE NÚMERO DE FACTURA (solo si no existe venta)
+            // ✅ 8. OBTENER SIGUIENTE NÚMERO DE FACTURA (solo si no existe venta)
             const { numeroFactura, numeroCompleto, puntoVenta } = await obtenerSiguienteNumeroFactura(
                 connection, 
                 tipoFiscal
@@ -1052,46 +998,17 @@ const facturarPedido = async (req, res) => {
             console.log(`📄 Número de factura asignado: ${numeroCompleto}`);
 
             // 4. Crear la venta CON NÚMERO DE FACTURA
-            // ✅ Obtener monto exento del pedido (si existe)
-            let montoExento = 0;
-            if (pedido.exento !== null && pedido.exento !== undefined && pedido.exento !== '') {
-                const exentoNum = parseFloat(pedido.exento);
-                montoExento = isNaN(exentoNum) ? 0 : exentoNum;
-            }
-            
-            // ✅ Si el monto exento es 0 pero el cliente es exento, calcularlo
+            // ✅ Política fiscal: EXENTO => exento=iva_total, no EXENTO => exento=0
             const esClienteExento = pedido.cliente_condicion?.toUpperCase() === 'EXENTO';
-            if (esClienteExento && montoExento < 0.01 && productos.length > 0) {
-                console.log('🔄 [Facturar Pedido] Calculando monto exento para cliente exento...');
-                
-                // Obtener porcentajes de IVA de los productos
-                const productoIds = productos.map(p => p.producto_id);
-                const placeholders = productoIds.map(() => '?').join(',');
-                const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
-                
-                const productosIva = await queryPromiseWithConnection(connection, queryProductos, productoIds);
-                
-                // Crear mapa de IVA
-                const ivaMap = {};
-                productosIva.forEach(row => {
-                    ivaMap[row.id] = parseFloat(row.iva) || 21;
-                });
-                
-                // Calcular monto exento
-                montoExento = productos.reduce((acc, prod) => {
-                    const porcentajeIva = ivaMap[prod.producto_id] || 21;
-                    const subtotalProducto = parseFloat(prod.subtotal) || 0;
-                    const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
-                    return acc + ivaQueDeberiaCobrarse;
-                }, 0);
-                
-                console.log(`✅ [Facturar Pedido] Monto exento calculado: $${montoExento.toFixed(2)}`);
-            }
+            const montoExento = esClienteExento ? Number(ivaTotal) || 0 : 0;
+
+            // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
+            const subtotalR = roundFacturacion(subtotalSinIvaFinal);
+            const ivaTotalR = roundFacturacion(ivaTotalFinal);
+            const exentoR = roundFacturacion(montoExento);
+            const totalR = roundFacturacion(totalConIvaFinal);
             
-            // ✅ Asegurar que montoExento sea un número válido
-            montoExento = Number(montoExento);
-            
-            console.log(`💰 [Facturar Pedido] Monto exento a guardar en venta: $${montoExento.toFixed(2)}`);
+            console.log(`💰 [Facturar Pedido] Monto exento a guardar en venta: $${montoExento.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
             
             const ventaQuery = `
                 INSERT INTO ventas 
@@ -1116,10 +1033,10 @@ const facturarPedido = async (req, res) => {
                 cuentaId,
                 'FACTURA',
                 tipoFiscal,
-                subtotalSinIva,
-                ivaTotal,
-                montoExento,  // ✅ Monto exento del pedido (validado)
-                totalConIva,
+                subtotalR,
+                ivaTotalR,
+                exentoR,  // ✅ Monto exento del pedido (validado y redondeado)
+                totalR,
                 pedido.observaciones,
                 pedido.empleado_id,
                 pedido.empleado_nombre,
@@ -1127,7 +1044,7 @@ const facturarPedido = async (req, res) => {
             ];
             
             console.log(`💾 [Facturar Pedido] Valores a insertar en venta:`);
-            console.log(`   - Exento (posición 15): ${montoExento} (${typeof montoExento})`);
+            console.log(`   - Exento (posición 15): ${exentoR} (${typeof exentoR})`);
             console.log(`   - Valores: [${ventaValues.map((v, i) => i === 15 ? `[EXENTO:${v}]` : v).join(', ')}]`);
 
             const ventaResult = await queryPromiseWithConnection(connection, ventaQuery, ventaValues);
@@ -1139,8 +1056,8 @@ const facturarPedido = async (req, res) => {
             const verifyResult = await queryPromiseWithConnection(connection, verifyQuery, [ventaId]);
             if (verifyResult.length > 0) {
                 console.log(`🔍 [VERIFICACIÓN] Exento guardado en venta: ${verifyResult[0].exento}`);
-                if (parseFloat(verifyResult[0].exento) !== montoExento) {
-                    console.error(`❌ [ERROR] El exento guardado (${verifyResult[0].exento}) NO coincide con el enviado (${montoExento})`);
+                if (parseFloat(verifyResult[0].exento) !== exentoR) {
+                    console.error(`❌ [ERROR] El exento guardado (${verifyResult[0].exento}) NO coincide con el enviado (${exentoR})`);
                 } else {
                     console.log(`✅ [VERIFICACIÓN] El exento se guardó correctamente: $${verifyResult[0].exento}`);
                 }
@@ -1232,7 +1149,7 @@ const facturarPedido = async (req, res) => {
                 cuentaId,
                 `Facturación ${tipoFiscal} - ${pedido.cliente_nombre}`,
                 ventaId,
-                totalConIva
+                totalR
             ]);
             console.log('💰 Movimiento de fondos registrado');
 
@@ -1243,7 +1160,7 @@ const facturarPedido = async (req, res) => {
                 WHERE id = ?
             `;
 
-            await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalConIva, cuentaId]);
+            await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalR, cuentaId]);
             console.log('💳 Saldo de cuenta actualizado');
 
             // 11. Cambiar estado del pedido a "Facturado"
@@ -1282,12 +1199,12 @@ const facturarPedido = async (req, res) => {
                         numero_factura: numeroCompleto,
                         pedido_origen: pedidoId,
                         cliente_nombre: pedido.cliente_nombre,
-                        total: totalConIva,
+                        total: totalR,
                         tipo_fiscal: tipoFiscal,
                         cuenta_id: cuentaId,
                         cae: caeData?.cae || null
                     },
-                    detallesAdicionales: `Pedido #${pedidoId} facturado como ${tipoFiscal} #${numeroCompleto} - Cliente: ${pedido.cliente_nombre} - Total: $${totalConIva}`
+                    detallesAdicionales: `Pedido #${pedidoId} facturado como ${tipoFiscal} #${numeroCompleto} - Cliente: ${pedido.cliente_nombre} - Total: $${totalR}`
                 });
 
                 await auditarOperacion(req, {
@@ -1317,10 +1234,11 @@ const facturarPedido = async (req, res) => {
                     tipoFactura: tipoFiscal,
                     remitoId,
                     pedidoId,
-                    total: totalConIva,
+                    total: totalR,
                     productosCount: productos.length,
                     requiereCAE: tipoFiscal !== 'X',
-                    cae: caeData?.cae || null
+                    cae: caeData?.cae || null,
+                    pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
                 }
             });
 
@@ -1354,7 +1272,8 @@ const facturarPedido = async (req, res) => {
                 console.warn('⚠️ Error en auditoría de error (no crítico):', auditError.message);
             }
             
-            res.status(500).json({ 
+            const errorStatus = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+            res.status(errorStatus).json({ 
                 success: false, 
                 message: error.message || 'Error en el proceso de facturación' 
             });
@@ -1554,17 +1473,108 @@ const obtenerMovimientosCuenta = (req, res) => {
     });
 };
 
+/**
+ * Obtener datos únicos para filtros (clientes, ciudades, empleados) desde TODAS las ventas.
+ * Usado para autocomplete y selects sin depender de la página actual.
+ */
+const obtenerDatosFiltros = (req, res) => {
+    const queryClientes = `
+        SELECT DISTINCT cliente_nombre AS valor FROM ventas
+        WHERE cliente_nombre IS NOT NULL AND TRIM(cliente_nombre) != '' AND cliente_nombre != 'Cliente no especificado'
+        ORDER BY cliente_nombre ASC
+        LIMIT 300
+    `;
+    const queryCiudades = `
+        SELECT DISTINCT cliente_ciudad AS valor FROM ventas
+        WHERE cliente_ciudad IS NOT NULL AND TRIM(cliente_ciudad) != '' AND cliente_ciudad != 'No especificada'
+        ORDER BY cliente_ciudad ASC
+        LIMIT 150
+    `;
+    const queryEmpleados = `
+        SELECT DISTINCT empleado_nombre AS valor FROM ventas
+        WHERE empleado_nombre IS NOT NULL AND TRIM(empleado_nombre) != '' AND empleado_nombre != 'No especificado'
+        ORDER BY empleado_nombre ASC
+        LIMIT 100
+    `;
+
+    db.query(queryClientes, (errC, rowsC) => {
+        if (errC) {
+            console.error('Error al obtener clientes para filtros:', errC);
+            return res.status(500).json({ success: false, message: 'Error al obtener datos de filtros' });
+        }
+        db.query(queryCiudades, (errCi, rowsCi) => {
+            if (errCi) {
+                console.error('Error al obtener ciudades para filtros:', errCi);
+                return res.status(500).json({ success: false, message: 'Error al obtener datos de filtros' });
+            }
+            db.query(queryEmpleados, (errE, rowsE) => {
+                if (errE) {
+                    console.error('Error al obtener empleados para filtros:', errE);
+                    return res.status(500).json({ success: false, message: 'Error al obtener datos de filtros' });
+                }
+                const clientes = (rowsC || []).map(r => r.valor);
+                const ciudades = (rowsCi || []).map(r => r.valor);
+                const empleados = (rowsE || []).map(r => r.valor);
+                res.json({
+                    success: true,
+                    data: { clientes, ciudades, empleados },
+                    meta: { totalClientes: clientes.length, totalCiudades: ciudades.length, totalEmpleados: empleados.length }
+                });
+            });
+        });
+    });
+};
+
+/**
+ * Sugerencias para autocomplete: busca en TODAS las ventas por tipo (cliente, ciudad, empleado).
+ * Query params: tipo (cliente|ciudad|empleado), q (texto a buscar). Limita a 25 resultados.
+ */
+const obtenerSugerenciasFiltros = (req, res) => {
+    const tipo = (req.query.tipo || '').trim().toLowerCase();
+    const q = (req.query.q || '').trim();
+    const validos = ['cliente', 'ciudad', 'empleado'];
+    if (!validos.includes(tipo)) {
+        return res.status(400).json({ success: false, message: 'Parámetro tipo debe ser cliente, ciudad o empleado' });
+    }
+    const columna = tipo === 'cliente' ? 'cliente_nombre' : tipo === 'ciudad' ? 'cliente_ciudad' : 'empleado_nombre';
+    const term = q.length ? '%' + q + '%' : '%';
+    const query = `
+        SELECT DISTINCT ${columna} AS valor FROM ventas
+        WHERE ${columna} IS NOT NULL AND TRIM(${columna}) != ''
+        AND (${columna} LIKE ?)
+        ORDER BY ${columna} ASC
+        LIMIT 25
+    `;
+    db.query(query, [term], (err, rows) => {
+        if (err) {
+            console.error('Error en sugerencias filtros:', err);
+            return res.status(500).json({ success: false, message: 'Error al buscar sugerencias' });
+        }
+        const valores = (rows || []).map(r => r.valor);
+        res.json({ success: true, data: valores });
+    });
+};
+
+/**
+ * Buscar ventas por cliente con paginación.
+ * Query params: busqueda (requerido), pagina (default 1), porPagina (default 50).
+ */
 const buscarVentasPorCliente = (req, res) => {
-    const { busqueda } = req.query;
-    
-    if (!busqueda || busqueda.trim() === '') {
-        return res.status(400).json({ 
-            success: false, 
-            message: 'El parámetro de búsqueda es requerido' 
+    const busqueda = (req.query.busqueda || '').trim();
+    const pagina = Math.max(1, parseInt(req.query.pagina, 10) || 1);
+    const porPagina = Math.min(200, Math.max(10, parseInt(req.query.porPagina, 10) || 50));
+    const offset = (pagina - 1) * porPagina;
+
+    if (!busqueda) {
+        return res.status(400).json({
+            success: false,
+            message: 'El parámetro de búsqueda es requerido'
         });
     }
 
-    const query = `
+    const searchTerm = '%' + busqueda + '%';
+    const countQuery = 'SELECT COUNT(*) as total FROM ventas WHERE cliente_nombre LIKE ?';
+    const dataQuery = `
         SELECT 
             id, fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, 
             cliente_direccion, cliente_ciudad, cliente_provincia, 
@@ -1576,23 +1586,27 @@ const buscarVentasPorCliente = (req, res) => {
         FROM ventas 
         WHERE cliente_nombre LIKE ?
         ORDER BY fecha DESC
+        LIMIT ? OFFSET ?
     `;
-    
-    const searchTerm = `%${busqueda}%`;
-    
-    db.query(query, [searchTerm], (err, results) => {
-        if (err) {
-            console.error('Error al buscar ventas:', err);
-            return res.status(500).json({ 
-                success: false, 
-                message: 'Error al buscar ventas' 
-            });
+
+    db.query(countQuery, [searchTerm], (errCount, countRows) => {
+        if (errCount) {
+            console.error('Error al contar ventas por cliente:', errCount);
+            return res.status(500).json({ success: false, message: 'Error al buscar ventas' });
         }
-        
-        res.json({ 
-            success: true, 
-            data: results,
-            count: results.length 
+        const total = (countRows && countRows[0] && countRows[0].total) ? countRows[0].total : 0;
+        db.query(dataQuery, [searchTerm, porPagina, offset], (err, results) => {
+            if (err) {
+                console.error('Error al buscar ventas:', err);
+                return res.status(500).json({ success: false, message: 'Error al buscar ventas' });
+            }
+            res.json({
+                success: true,
+                data: results || [],
+                total: total,
+                pagina: pagina,
+                porPagina: porPagina
+            });
         });
     });
 };
@@ -1778,67 +1792,22 @@ const ventaDirecta = async (req, res) => {
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturado', ?, ?, ?)
             `;
 
-            // ✅ Calcular monto exento si no viene del frontend o si el cliente es exento
+            // ✅ Política fiscal: EXENTO => exento=iva_total, no EXENTO => exento=0
             const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
+            const montoExento = esClienteExento ? Number(ivaTotal) || 0 : 0;
+
+            // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
+            const subtotalR = roundFacturacion(subtotalSinIva);
+            const ivaTotalR = roundFacturacion(ivaTotal);
+            const exentoR = roundFacturacion(montoExento);
+            const totalR = roundFacturacion(totalConIva);
             
-            // Convertir exento a número, manejando strings "0.00" o undefined
-            let montoExento = 0;
-            if (exento !== undefined && exento !== null && exento !== '') {
-                const exentoNum = parseFloat(exento);
-                montoExento = isNaN(exentoNum) ? 0 : exentoNum;
-            }
-            
-            console.log(`🔍 [Venta Directa] Exento recibido: "${exento}" (tipo: ${typeof exento}), Convertido: ${montoExento}`);
-            console.log(`🔍 [Venta Directa] Cliente es exento: ${esClienteExento}, Monto exento actual: ${montoExento}`);
-            
-            // Si el cliente es exento, calcular el monto exento SIEMPRE
-            if (esClienteExento && productos && productos.length > 0) {
-                // Calcular el monto exento desde los productos
-                console.log('🔄 [Venta Directa] Calculando monto exento en backend para cliente exento...');
-                console.log(`   - Productos a procesar: ${productos.length}`);
-                
-                // Obtener todos los IDs de productos
-                const productoIds = productos.map(p => p.id);
-                console.log(`   - IDs de productos: ${productoIds.join(', ')}`);
-                
-                if (productoIds.length > 0) {
-                    // Obtener porcentajes de IVA de todos los productos en una sola consulta
-                    const placeholders = productoIds.map(() => '?').join(',');
-                    const queryProductos = `SELECT id, iva FROM productos WHERE id IN (${placeholders})`;
-                    
-                    const productosIva = await queryPromiseWithConnection(connection, queryProductos, productoIds);
-                    
-                    console.log(`   - Productos encontrados en BD: ${productosIva.length}`);
-                    
-                    // Crear un mapa de ID -> porcentaje IVA
-                    const ivaMap = {};
-                    productosIva.forEach(row => {
-                        ivaMap[row.id] = parseFloat(row.iva) || 21;
-                        console.log(`   - Producto ${row.id}: IVA ${ivaMap[row.id]}%`);
-                    });
-                    
-                    // Calcular monto exento para cada producto
-                    montoExento = productos.reduce((acc, producto) => {
-                        const porcentajeIva = ivaMap[producto.id] || 21;
-                        const subtotalProducto = parseFloat(producto.subtotal) || 0;
-                        const ivaQueDeberiaCobrarse = parseFloat((subtotalProducto * (porcentajeIva / 100)).toFixed(2));
-                        console.log(`   - Producto ${producto.id}: Subtotal $${subtotalProducto}, IVA ${porcentajeIva}%, Exento $${ivaQueDeberiaCobrarse}`);
-                        return acc + ivaQueDeberiaCobrarse;
-                    }, 0);
-                    
-                    console.log(`✅ [Venta Directa] Monto exento calculado: $${montoExento.toFixed(2)}`);
-                }
-            }
-            
-            // ✅ Asegurar que montoExento sea un número válido
-            montoExento = Number(montoExento);
-            
-            console.log(`💰 [Venta Directa] Monto exento final a guardar: $${montoExento.toFixed(2)}`);
+            console.log(`💰 [Venta Directa] Monto exento final a guardar: $${montoExento.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
 
             const pedidoValues = [
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit, 
-                subtotalSinIva, ivaTotal, montoExento, totalConIva, 
+                subtotalR, ivaTotalR, exentoR, totalR, 
                 observaciones || '', empleado_id, empleado_nombre
             ];
 
@@ -1909,27 +1878,23 @@ const ventaDirecta = async (req, res) => {
                 (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FACTURA', ?, ?, ?, ?, ?, 'Facturada', ?, ?, ?, ?)
             `;
 
-            // ✅ Asegurar que montoExento sea un número válido antes de guardar
-            montoExento = Number(montoExento);
-            
             console.log(`💾 [Venta Directa] Preparando para guardar venta:`);
             console.log(`   - Cliente: ${cliente_nombre}`);
             console.log(`   - Condición: ${cliente_condicion}`);
             console.log(`   - Es exento: ${esClienteExento}`);
-            console.log(`   - Monto exento a guardar: $${montoExento.toFixed(2)}`);
-            console.log(`   - Tipo de montoExento: ${typeof montoExento}`);
+            console.log(`   - Monto exento a guardar: $${exentoR} (redondeado)`);
             
             const ventaValues = [
                 numeroCompleto,  // ✅ número_factura
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion,
                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit,
-                cuentaId, tipoFiscal, subtotalSinIva, ivaTotal, montoExento, totalConIva,
+                cuentaId, tipoFiscal, subtotalR, ivaTotalR, exentoR, totalR,
                 observaciones || '', empleado_id, empleado_nombre,
                 hashVentaFinal  // ✅ AGREGAR HASH AL INSERT
             ];
             
             console.log(`💾 [Venta Directa] Valores a insertar:`);
-            console.log(`   - Exento (posición 15): ${montoExento} (${typeof montoExento})`);
+            console.log(`   - Exento (posición 15): ${exentoR} (${typeof exentoR})`);
             console.log(`   - Valores: [${ventaValues.map((v, i) => i === 15 ? `[EXENTO:${v}]` : v).join(', ')}]`);
 
             const ventaResult = await queryPromiseWithConnection(connection, ventaQuery, ventaValues);
@@ -1942,8 +1907,8 @@ const ventaDirecta = async (req, res) => {
             const verifyResult = await queryPromiseWithConnection(connection, verifyQuery, [ventaId]);
             if (verifyResult.length > 0) {
                 console.log(`🔍 [VERIFICACIÓN] Exento guardado en venta: ${verifyResult[0].exento}`);
-                if (parseFloat(verifyResult[0].exento) !== montoExento) {
-                    console.error(`❌ [ERROR] El exento guardado (${verifyResult[0].exento}) NO coincide con el enviado (${montoExento})`);
+                if (parseFloat(verifyResult[0].exento) !== exentoR) {
+                    console.error(`❌ [ERROR] El exento guardado (${verifyResult[0].exento}) NO coincide con el enviado (${exentoR})`);
                 } else {
                     console.log(`✅ [VERIFICACIÓN] El exento se guardó correctamente: $${verifyResult[0].exento}`);
                 }
@@ -2035,7 +2000,7 @@ const ventaDirecta = async (req, res) => {
                 cuentaId,
                 `Venta Directa - ${cliente_nombre}`,
                 ventaId,
-                totalConIva
+                totalR
             ]);
             
             console.log('✅ [Venta Directa] Movimiento de fondos registrado');
@@ -2051,7 +2016,7 @@ const ventaDirecta = async (req, res) => {
                 WHERE id = ?
             `;
 
-            await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalConIva, cuentaId]);
+            await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalR, cuentaId]);
             console.log('✅ [Venta Directa] Saldo de cuenta actualizado');
 
             // ============================================
@@ -2084,12 +2049,12 @@ const ventaDirecta = async (req, res) => {
                         ventaId,
                         remitoId,
                         cliente_nombre,
-                        total: totalConIva,
+                        total: totalR,
                         tipo_fiscal: tipoFiscal,
                         cuenta_id: cuentaId,
                         descuento: descuentoAplicado
                     },
-                    detallesAdicionales: `Venta directa completada - Pedido #${pedidoId} → Venta #${ventaId} → Remito #${remitoId} - Cliente: ${cliente_nombre} - Total: $${totalConIva} - ${productos.length} productos`
+                    detallesAdicionales: `Venta directa completada - Pedido #${pedidoId} → Venta #${ventaId} → Remito #${remitoId} - Cliente: ${cliente_nombre} - Total: $${totalR} - ${productos.length} productos`
                 });
             } catch (auditError) {
                 console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
@@ -2107,7 +2072,7 @@ const ventaDirecta = async (req, res) => {
                     pedidoId,
                     ventaId,
                     remitoId,
-                    total: totalConIva,
+                    total: totalR,
                     productosCount: productos.length
                 }
             });
@@ -2155,7 +2120,175 @@ const ventaDirecta = async (req, res) => {
     });
 };
 
+// ✅ DUPLICAR VENTA EN MODO BORRADOR (sin solicitar CAE)
+const duplicarVentaBorrador = async (req, res) => {
+    const ventaIdOrigen = parseInt(req.params.id, 10);
 
+    if (!Number.isInteger(ventaIdOrigen) || ventaIdOrigen <= 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'ID de venta inválido'
+        });
+    }
+
+    db.beginTransaction(async (err, connection) => {
+        if (err) {
+            console.error('Error iniciando transacción:', err);
+            return res.status(500).json({ success: false, message: 'Error iniciando transacción' });
+        }
+
+        try {
+            const ventaOrigenRows = await queryPromiseWithConnection(
+                connection,
+                'SELECT * FROM ventas WHERE id = ? FOR UPDATE',
+                [ventaIdOrigen]
+            );
+
+            if (!ventaOrigenRows.length) {
+                throw new Error(`No se encontró la venta origen ID ${ventaIdOrigen}`);
+            }
+
+            const ventaOrigen = ventaOrigenRows[0];
+            const tipoFiscal = (ventaOrigen.tipo_f || '').toString().trim().toUpperCase();
+
+            if (!['A', 'B', 'X'].includes(tipoFiscal)) {
+                throw new Error(`Tipo fiscal inválido en venta origen: ${ventaOrigen.tipo_f}`);
+            }
+
+            const itemsOrigen = await queryPromiseWithConnection(
+                connection,
+                `SELECT producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, descuento_porcentaje
+                 FROM ventas_cont
+                 WHERE venta_id = ?
+                 ORDER BY id ASC`,
+                [ventaIdOrigen]
+            );
+
+            if (!itemsOrigen.length) {
+                throw new Error('La venta origen no tiene ítems para duplicar');
+            }
+
+            const { numeroCompleto } = await obtenerSiguienteNumeroFactura(connection, tipoFiscal);
+            const hashVentaDuplicada = `dup_${ventaIdOrigen}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+            const observacionesOrigen = (ventaOrigen.observaciones || '').toString().trim();
+            const observacionesDuplicada = observacionesOrigen && observacionesOrigen.toLowerCase() !== 'sin observaciones'
+                ? `${observacionesOrigen} | Duplicada de venta #${ventaIdOrigen}`
+                : `Duplicada de venta #${ventaIdOrigen}`;
+
+            const empleadoIdFinal = ventaOrigen.empleado_id || req.user?.id || 1;
+            const empleadoNombreFinal = ventaOrigen.empleado_nombre || req.user?.nombre || 'Sistema';
+
+            const insertVentaQuery = `
+                INSERT INTO ventas
+                (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion,
+                 cliente_ciudad, cliente_provincia, cliente_condicion, cliente_cuit,
+                 cuenta_id, tipo_doc, tipo_f, subtotal, iva_total, exento, total, estado,
+                 observaciones, empleado_id, empleado_nombre, hash_venta,
+                 cae_id, cae_fecha, cae_resultado, cae_observaciones, cae_solicitud_fecha, comprobante_path)
+                VALUES
+                (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL)
+            `;
+
+            const insertVentaResult = await queryPromiseWithConnection(connection, insertVentaQuery, [
+                numeroCompleto,
+                ventaOrigen.cliente_id,
+                ventaOrigen.cliente_nombre,
+                ventaOrigen.cliente_telefono,
+                ventaOrigen.cliente_direccion,
+                ventaOrigen.cliente_ciudad,
+                ventaOrigen.cliente_provincia,
+                ventaOrigen.cliente_condicion,
+                ventaOrigen.cliente_cuit,
+                ventaOrigen.cuenta_id,
+                ventaOrigen.tipo_doc,
+                tipoFiscal,
+                parseFloat(ventaOrigen.subtotal) || 0,
+                parseFloat(ventaOrigen.iva_total) || 0,
+                parseFloat(ventaOrigen.exento) || 0,
+                parseFloat(ventaOrigen.total) || 0,
+                'Facturada',
+                observacionesDuplicada,
+                empleadoIdFinal,
+                empleadoNombreFinal,
+                hashVentaDuplicada
+            ]);
+
+            const ventaNuevaId = insertVentaResult.insertId;
+
+            const insertItemQuery = `
+                INSERT INTO ventas_cont
+                (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, descuento_porcentaje)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            for (const item of itemsOrigen) {
+                await queryPromiseWithConnection(connection, insertItemQuery, [
+                    ventaNuevaId,
+                    item.producto_id,
+                    item.producto_nombre,
+                    item.producto_um,
+                    parseFloat(item.cantidad) || 0,
+                    parseFloat(item.precio) || 0,
+                    parseFloat(item.iva) || 0,
+                    parseFloat(item.subtotal) || 0,
+                    parseFloat(item.descuento_porcentaje) || 0
+                ]);
+            }
+
+            await new Promise((resolve, reject) => {
+                connection.commit((commitErr) => {
+                    if (commitErr) return reject(commitErr);
+                    connection.release();
+                    resolve();
+                });
+            });
+
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'ventas',
+                registroId: ventaNuevaId,
+                detallesAdicionales: `Venta duplicada en borrador: origen #${ventaIdOrigen} -> nueva #${ventaNuevaId} (${numeroCompleto})`,
+                datosNuevos: {
+                    venta_origen_id: ventaIdOrigen,
+                    venta_nueva_id: ventaNuevaId,
+                    numero_factura_nuevo: numeroCompleto,
+                    items_clonados: itemsOrigen.length
+                }
+            });
+
+            return res.json({
+                success: true,
+                message: 'Venta duplicada correctamente en modo borrador (sin CAE)',
+                data: {
+                    ventaOriginalId: ventaIdOrigen,
+                    ventaNuevaId,
+                    numeroFactura: numeroCompleto,
+                    productosCount: itemsOrigen.length,
+                    caeSolicitado: false
+                }
+            });
+        } catch (error) {
+            console.error('❌ Error duplicando venta:', error);
+
+            try {
+                await new Promise((resolve) => {
+                    connection.rollback(() => {
+                        connection.release();
+                        resolve();
+                    });
+                });
+            } catch (rollbackError) {
+                console.error('❌ Error adicional en rollback:', rollbackError);
+            }
+
+            return res.status(500).json({
+                success: false,
+                message: error.message || 'Error al duplicar venta'
+            });
+        }
+    });
+};
 
 module.exports = {
     obtenerVentas,
@@ -2168,6 +2301,9 @@ module.exports = {
     facturarPedido,
     obtenerMovimientosCuenta,
     generarPdfRankingVentas,
+    obtenerDatosFiltros,
+    obtenerSugerenciasFiltros,
     buscarVentasPorCliente,
-    ventaDirecta
+    ventaDirecta,
+    duplicarVentaBorrador
 };

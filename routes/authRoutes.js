@@ -4,14 +4,15 @@ const rateLimit = require('express-rate-limit');
 const authController = require('../controllers/authController');
 const { authenticateToken } = require('../middlewares/authMiddleware');
 
-// ✅ FASE 3: Rate limiting estricto para login
+// Rate limiting para login (permisivo; sistema interno 4-5 usuarios)
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 10, // Solo 10 intentos de login por IP cada 15 minutos
+    windowMs: 15 * 60 * 1000,
+    max: 50,
     message: 'Demasiados intentos de login desde esta IP, por favor intenta más tarde.',
     standardHeaders: true,
     legacyHeaders: false,
-    skipSuccessfulRequests: true // No contar requests exitosos
+    skipSuccessfulRequests: true,
+    validate: { xForwardedForHeader: false }
 });
 
 // Rutas públicas

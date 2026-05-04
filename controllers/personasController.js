@@ -1,16 +1,39 @@
 const db = require('./db');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const { invalidate } = require('../utils/cache');
+const { validarDatosCliente, normalizarCuit } = require('../utils/validadoresCliente');
 
 const nuevoCliente = async (req, res) => {
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id } = req.body;
+    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip } = req.body;
+
+    // Fase 2: validaciones antes de insertar
+    const { valido, errores } = validarDatosCliente(req.body);
+    if (!valido) {
+        return res.status(400).json({
+            success: false,
+            message: errores.join(' '),
+            errors: errores
+        });
+    }
+
+    // ciudad_id debe ser entero o null; el front puede enviar '' si no eligió ciudad
+    const ciudadIdNormalizado = (ciudad_id !== '' && ciudad_id !== undefined && ciudad_id !== null && !isNaN(Number(ciudad_id)))
+        ? Number(ciudad_id)
+        : null;
+
+    // Fase 4: marcar validación AFIP si el front envió el flag
+    const validadoAfipAt = (validado_afip === true || validado_afip === 'true') ? new Date() : null;
+
+    // Fase 3: guardar CUIT normalizado (solo dígitos) para consistencia
+    const cuitGuardar = normalizarCuit(cuit);
+    const dniGuardar = dni != null && String(dni).trim() !== '' ? String(dni).replace(/\D/g, '') : (dni || '');
 
     const query = `
-        INSERT INTO clientes (nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO clientes (nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id], async (err, results) => {
+    db.query(query, [nombre, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, provincia, telefono, email, ciudadIdNormalizado, validadoAfipAt], async (err, results) => {
         if (err) {
             console.error('Error al insertar el cliente:', err);
 
@@ -25,23 +48,51 @@ const nuevoCliente = async (req, res) => {
             return res.status(500).json({ success: false, message: "Error al insertar el cliente" });
         }
 
-        // Obtener el cliente recién creado con todos sus datos
-        const clienteId = results.insertId;
+        // Obtener el cliente recién creado con todos sus datos (Fase 1: siempre devolver data con id)
+        const clienteId = results.insertId != null ? Number(results.insertId) : null;
         db.query('SELECT * FROM clientes WHERE id = ?', [clienteId], async (err, clienteResults) => {
             if (err) {
                 console.error('Error al obtener el cliente creado:', err);
-                // Aún así devolvemos éxito porque se creó
+                // Fallback: data con id y campos del body para que el frontend siempre reciba objeto con id
+                const dataFallback = {
+                    id: clienteId,
+                    nombre: nombre || '',
+                    condicion_iva: condicion_iva || '',
+                    cuit: cuitGuardar || '',
+                    dni: dniGuardar || '',
+                    direccion: direccion || '',
+                    ciudad: ciudad || '',
+                    provincia: provincia || '',
+                    telefono: telefono || '',
+                    email: email || '',
+                    ciudad_id: ciudadIdNormalizado
+                };
                 return res.json({
                     success: true,
                     message: "Cliente agregado correctamente",
-                    data: {
-                        id: clienteId,
-                        ...req.body
-                    }
+                    data: dataFallback,
+                    insertId: clienteId
                 });
             }
 
-            const clienteCreado = clienteResults[0];
+            let clienteCreado = clienteResults && clienteResults[0];
+            if (!clienteCreado) {
+                clienteCreado = {
+                    id: clienteId,
+                    nombre: nombre || '',
+                    condicion_iva: condicion_iva || '',
+                    cuit: cuitGuardar || '',
+                    dni: dniGuardar || '',
+                    direccion: direccion || '',
+                    ciudad: ciudad || '',
+                    provincia: provincia || '',
+                    telefono: telefono || '',
+                    email: email || '',
+                    ciudad_id: ciudadIdNormalizado
+                };
+            } else if (clienteCreado.id == null) {
+                clienteCreado.id = clienteId;
+            }
 
             // Auditar creación exitosa del cliente
             await auditarOperacion(req, {
@@ -55,33 +106,79 @@ const nuevoCliente = async (req, res) => {
             res.json({
                 success: true,
                 message: "Cliente agregado correctamente",
-                data: clienteCreado
+                data: clienteCreado,
+                insertId: clienteId
             });
         });
     });
 };
 
 const buscarCliente = (req, res) => {
-    const searchTerm = req.query.search ? `%${req.query.search}%` : '%';
+    const rawSearch = (req.query.search || '').toString().trim();
+    const searchTerm = rawSearch ? `%${rawSearch}%` : '%';
 
-    const query = `
-        SELECT * FROM clientes
-        WHERE nombre LIKE ?;
-    `;
+    // Paginación opcional (compatibilidad: si no se envía pagina/porPagina, devuelve todos)
+    const paginaRaw = parseInt(req.query.pagina, 10);
+    const porPaginaRaw = parseInt(req.query.porPagina, 10);
+    const usarPaginacion = Number.isInteger(paginaRaw) && paginaRaw > 0 && Number.isInteger(porPaginaRaw) && porPaginaRaw > 0;
+    const pagina = usarPaginacion ? paginaRaw : 1;
+    const porPagina = usarPaginacion ? Math.min(Math.max(porPaginaRaw, 10), 200) : null;
+    const offset = usarPaginacion ? (pagina - 1) * porPagina : 0;
 
-    db.query(query, [searchTerm], (err, results) => {
+    const sortByParam = (req.query.sortBy || 'nombre').toString().trim().toLowerCase();
+    const sortOrderParam = (req.query.sortOrder || 'asc').toString().trim().toLowerCase();
+    const SORTABLE_COLUMNS = {
+        nombre: 'nombre',
+        condicion_iva: 'condicion_iva',
+        cuit: 'cuit',
+        direccion: 'direccion',
+        ciudad: 'ciudad'
+    };
+    const sortBy = SORTABLE_COLUMNS[sortByParam] || 'nombre';
+    const sortOrder = sortOrderParam === 'desc' ? 'DESC' : 'ASC';
+
+    const whereClause = 'WHERE (nombre LIKE ? OR cuit LIKE ? OR ciudad LIKE ?)';
+    const orderClause = `ORDER BY ${sortBy} ${sortOrder}`;
+
+    const queryData = usarPaginacion
+        ? `SELECT * FROM clientes ${whereClause} ${orderClause} LIMIT ? OFFSET ?`
+        : `SELECT * FROM clientes ${whereClause} ${orderClause}`;
+    const dataParamsBase = [searchTerm, searchTerm, searchTerm];
+    const dataParams = usarPaginacion ? [...dataParamsBase, porPagina, offset] : dataParamsBase;
+
+    db.query(queryData, dataParams, (err, results) => {
         if (err) {
             console.error('Error al obtener los clientes:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
         }
-        res.json({ success: true, data: results });
+
+        if (!usarPaginacion) {
+            return res.json({ success: true, data: results });
+        }
+
+        const queryCount = `SELECT COUNT(*) as total FROM clientes ${whereClause}`;
+        db.query(queryCount, dataParamsBase, (countErr, countRows) => {
+            if (countErr) {
+                console.error('Error al contar clientes:', countErr);
+                return res.status(500).json({ success: false, message: "Error al obtener los clientes" });
+            }
+
+            const total = Number(countRows?.[0]?.total || 0);
+            return res.json({
+                success: true,
+                data: results,
+                total,
+                pagina,
+                porPagina
+            });
+        });
     });
 };
 
 
 const actualizarCliente = async (req, res) => {
     const clienteId = req.params.id;
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email } = req.body;
+    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email, validado_afip } = req.body;
                                                            
 
     // Obtener datos anteriores para auditoría
@@ -96,10 +193,24 @@ const actualizarCliente = async (req, res) => {
 
     try {
         const datosAnteriores = await obtenerDatosAnterioresPromise();
-        
+
         if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: "Cliente no encontrado" });
         }
+
+        // Fase 2: validaciones antes de actualizar
+        const { valido, errores } = validarDatosCliente(req.body);
+        if (!valido) {
+            return res.status(400).json({
+                success: false,
+                message: errores.join(' '),
+                errors: errores
+            });
+        }
+
+        // Fase 3: normalizar CUIT/DNI al guardar
+        const cuitGuardar = normalizarCuit(cuit);
+        const dniGuardar = dni != null && String(dni).trim() !== '' ? String(dni).replace(/\D/g, '') : (dni || '');
 
         // Verificar si el cliente existe antes de actualizar
         const checkQuery = `SELECT id FROM clientes WHERE id = ?`;
@@ -113,16 +224,21 @@ const actualizarCliente = async (req, res) => {
                 return res.status(404).json({ success: false, message: "Cliente no encontrado" });
             }
 
-            // QUERY ACTUALIZADA CON ciudad_id
+            // ciudad_id: entero o null (el front puede enviar '')
+            const ciudadIdUpdate = (ciudad_id !== '' && ciudad_id !== undefined && ciudad_id !== null && !isNaN(Number(ciudad_id)))
+                ? Number(ciudad_id)
+                : null;
+
+            // Fase 4: si el front envía validado_afip = true, actualizar validado_afip_at
+            const actualizarValidadoAfip = (validado_afip === true || validado_afip === 'true') ? 1 : 0;
+
             const updateQuery = `
                 UPDATE clientes 
-                SET nombre = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ? 
+                SET nombre = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ?, validado_afip_at = IF(? = 1, NOW(), validado_afip_at)
                 WHERE id = ?
             `;
-            //                                                                           
 
-            // PARÁMETROS ACTUALIZADOS CON ciudad_id
-            db.query(updateQuery, [nombre, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email, clienteId], async (error, updateResults) => {
+            db.query(updateQuery, [nombre, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, ciudadIdUpdate, provincia, telefono, email, actualizarValidadoAfip, clienteId], async (error, updateResults) => {
                 //                                                                      ^^^^^^^^^ AGREGAR AQUÍ
                 if (error) {
                     console.error('Error al actualizar el cliente:', error);
@@ -150,17 +266,32 @@ const actualizarCliente = async (req, res) => {
                     tabla: 'clientes',
                     registroId: clienteId,
                     datosAnteriores,
-                    datosNuevos: { 
+                    datosNuevos: {
                         id: clienteId,
                         ...req.body
                     },
                     detallesAdicionales: `Cliente actualizado: ${nombre}`
                 });
 
-                // ✅ FASE 2: Invalidar caché después de actualizar
                 invalidate('clientes:*');
 
-                res.json({ success: true, message: "Cliente actualizado correctamente" });
+                // Fase 1: devolver siempre data con el cliente actualizado (cuit/dni ya normalizados en DB)
+                db.query('SELECT * FROM clientes WHERE id = ?', [clienteId], (errSel, selResults) => {
+                    if (errSel) {
+                        console.error('Error al obtener cliente actualizado:', errSel);
+                        return res.json({
+                            success: true,
+                            message: "Cliente actualizado correctamente",
+                            data: { id: clienteId, nombre, condicion_iva, cuit: cuitGuardar, dni: dniGuardar, direccion, ciudad, provincia, telefono, email, ciudad_id: ciudadIdUpdate }
+                        });
+                    }
+                    const clienteActualizado = selResults && selResults[0];
+                    res.json({
+                        success: true,
+                        message: "Cliente actualizado correctamente",
+                        data: clienteActualizado || { id: clienteId, nombre, condicion_iva, cuit: cuitGuardar, dni: dniGuardar, direccion, ciudad, provincia, telefono, email, ciudad_id: ciudadIdUpdate }
+                    });
+                });
             });
         });
     } catch (error) {
@@ -482,6 +613,36 @@ const eliminarProveedor = async (req, res) => {
     });
 };
 
+/**
+ * Consulta datos del contribuyente en AFIP por DNI o CUIT.
+ * Delega en arca-microservice (misma config cert/key que CAE).
+ * POST /personas/consulta-afip
+ * Body: { dni?: string, cuit?: string } (uno de los dos)
+ */
+const consultaAfip = async (req, res) => {
+    let billingController;
+    try {
+        const billingModule = await import('../arca-microservice/controllers/billing.controller.js');
+        billingController = billingModule.default;
+    } catch (err) {
+        console.error('Error cargando microservicio ARCA:', err.message);
+        return res.status(503).json({
+            success: false,
+            message: 'Servicio AFIP no disponible. Intente nuevamente en unos segundos.'
+        });
+    }
+
+    const mockReq = { body: req.body || {} };
+    const mockRes = {
+        statusCode: 200,
+        _body: null,
+        status(code) { this.statusCode = code; return this; },
+        json(body) { this._body = body; return this; }
+    };
+
+    await billingController.consultaContribuyente(mockReq, mockRes);
+    return res.status(mockRes.statusCode).json(mockRes._body);
+};
 
 module.exports = {
     nuevoCliente,
@@ -490,9 +651,9 @@ module.exports = {
     obtenerTodosClientes,
     obtenerClientePorId,
     eliminarCliente,
+    consultaAfip,
 
-
-    nuevoProveedor, 
+    nuevoProveedor,
     buscarProveedor,
     actualizarProveedor,
     obtenerTodosProveedores,
