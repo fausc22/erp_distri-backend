@@ -328,6 +328,20 @@ const crearNota = async (req, res) => {
                         }
                     );
                 });
+
+                // Devolución de mercadería al stock solo en Nota de Crédito y líneas con producto de catálogo
+                if (tipoNota === 'NOTA_CREDITO' && productoId != null) {
+                    await new Promise((resolve, reject) => {
+                        connection.query(
+                            `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
+                            [cantidad, productoId],
+                            (err, result) => {
+                                if (err) reject(err);
+                                else resolve(result);
+                            }
+                        );
+                    });
+                }
             }
 
             console.log(`✅ ${productos.length} productos insertados`);

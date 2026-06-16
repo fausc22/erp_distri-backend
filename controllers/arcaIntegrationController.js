@@ -130,10 +130,16 @@ const esExento = (condicionIVA) => {
  * Fecha actual en formato ARCA (YYYYMMDD)
  */
 const obtenerFechaActualARCA = () => {
-  const ahora = new Date();
-  return parseInt(
-    `${ahora.getFullYear()}${String(ahora.getMonth() + 1).padStart(2, '0')}${String(ahora.getDate()).padStart(2, '0')}`
-  );
+  // Forzar zona horaria Argentina para evitar que en servidores UTC una factura emitida
+  // después de las 21hs de Buenos Aires use el día siguiente como fecha.
+  const partes = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date());
+  const anio = partes.find(p => p.type === 'year').value;
+  const mes  = partes.find(p => p.type === 'month').value;
+  const dia  = partes.find(p => p.type === 'day').value;
+  return parseInt(`${anio}${mes}${dia}`);
 };
 
 const arcaFechaToSqlDate = (fechaArca) => {
@@ -192,7 +198,7 @@ const solicitarCAE = async (req, res) => {
     const ventaQuery = `
       SELECT 
         id, fecha, fecha_fiscal, cliente_nombre, cliente_cuit, cliente_condicion,
-        tipo_f, tipo_doc, subtotal, iva_total, total, cae_id, numero_factura,
+        tipo_f, tipo_doc, subtotal, iva_total, exento, total, cae_id, numero_factura,
         venta_referencia_id
       FROM ventas 
       WHERE id = ?
@@ -322,7 +328,7 @@ const solicitarCAE = async (req, res) => {
     // Revalidar estado de CAE dentro de la sección crítica para evitar doble emisión.
     const ventaRefrescadaRows = await executeWithConnection(
       lockConnection,
-      'SELECT id, cae_id, numero_factura, fecha, fecha_fiscal, tipo_f, tipo_doc, cliente_cuit, cliente_condicion, total, venta_referencia_id FROM ventas WHERE id = ? LIMIT 1',
+      'SELECT id, cae_id, numero_factura, fecha, fecha_fiscal, tipo_f, tipo_doc, cliente_cuit, cliente_condicion, exento, total, venta_referencia_id FROM ventas WHERE id = ? LIMIT 1',
       [ventaId]
     );
     if (!ventaRefrescadaRows || ventaRefrescadaRows.length === 0) {
@@ -544,18 +550,29 @@ const solicitarCAE = async (req, res) => {
     const exentoVentaCabecera = Number.isFinite(parseFloat(venta.exento))
       ? roundFacturacion(parseFloat(venta.exento))
       : 0;
-    const impOpExExento = clienteEsExento ? exentoVentaCabecera : 0;
-    const totalVenta = roundFacturacion(
-      subtotalVenta + (clienteEsExento ? impOpExExento : ivaVenta)
-    );
 
-    if (Math.abs(subtotalDetalle - subtotalVenta) > 1 || Math.abs(ivaDetalle - ivaVenta) > 1) {
+    const divergeCabeceraDetalle =
+      Math.abs(subtotalDetalle - subtotalVenta) > 1 ||
+      Math.abs(ivaDetalle - ivaVenta) > 1;
+
+    const subtotalFinal =
+      Math.abs(subtotalDetalle - subtotalVenta) > 1 ? subtotalDetalle : subtotalVenta;
+    const ivaFinal =
+      Math.abs(ivaDetalle - ivaVenta) > 1 ? ivaDetalle : ivaVenta;
+
+    if (subtotalFinal !== subtotalVenta || ivaFinal !== ivaVenta) {
       console.warn(
-        `⚠️ Diferencia cabecera/detalle detectada en venta ${ventaId}: ` +
-        `detalle(subtotal=${subtotalDetalle}, iva=${ivaDetalle}) vs ` +
-        `cabecera(subtotal=${subtotalVenta}, iva=${ivaVenta})`
+        `⚠️ [ARCA] Divergencia corregida en venta ${ventaId}: usando suma de detalle. ` +
+          `cabecera(subtotal=${subtotalVenta}, iva=${ivaVenta}) → detalle(subtotal=${subtotalFinal}, iva=${ivaFinal})`
       );
     }
+
+    const impOpExExento = clienteEsExento
+      ? (exentoVentaCabecera > 0 ? exentoVentaCabecera : ivaFinal)
+      : 0;
+    const totalVenta = roundFacturacion(
+      subtotalFinal + (clienteEsExento ? impOpExExento : ivaFinal)
+    );
 
     const datosFactura = {
       tipoComprobante: tipoComprobante,
@@ -569,10 +586,11 @@ const solicitarCAE = async (req, res) => {
       fecha: fechaFormateada,
       moneda: 'PES',
       cotizacionMoneda: 1,
-      // ✅ Importes explícitos desde la venta (evita que EXENTO quede en neto)
-      impNeto: subtotalVenta,
-      impIVA: clienteEsExento ? 0 : ivaVenta,
-      impOpEx: impOpExExento,
+      // ✅ Importes reconciliados (detalle si cabecera diverge > $1)
+      // Exento: todo el total en impNeto (alícuota 0%), impOpEx=0 — compatible con SDK @arcasdk/core
+      impNeto: clienteEsExento ? totalVenta : subtotalFinal,
+      impIVA: clienteEsExento ? 0 : ivaFinal,
+      impOpEx: 0,
       impTotal: totalVenta,
       // ✅ Usar el número obtenido desde ARCA (no el de la BD)
       puntoVenta: parseInt(puntoVentaARCA) || 1,
@@ -675,6 +693,16 @@ const solicitarCAE = async (req, res) => {
     
     console.log('✅ CAE extraído exitosamente:', cae);
     console.log('📅 Vencimiento:', caeVencimiento);
+
+    const impTotalAfipRaw =
+      datosRespuesta?.importes?.total ??
+      datosRespuesta?.comprobante?.total ??
+      datosRespuesta?.datosARCA?.ImpTotal;
+    // Redondear a 2 decimales para evitar que la aritmética flotante del microservicio
+    // (ej: 82989.120000001) genere un importe distinto al que AFIP registró.
+    const impTotalAfip = Number.isFinite(parseFloat(impTotalAfipRaw))
+      ? Math.round(parseFloat(impTotalAfipRaw) * 100) / 100
+      : totalVenta;
     
     // ============================================
     // 6️⃣ GUARDAR CAE EN LA BASE DE DATOS
@@ -689,7 +717,8 @@ const solicitarCAE = async (req, res) => {
         cae_fecha = ?,
         cae_resultado = ?,
         cae_solicitud_fecha = NOW(),
-        fecha_fiscal = COALESCE(?, fecha_fiscal)
+        fecha_fiscal = IF(? IS NOT NULL, ?, fecha_fiscal),
+        importe_afip = ?
       WHERE id = ?
     `;
     
@@ -698,6 +727,8 @@ const solicitarCAE = async (req, res) => {
       caeVencimiento,
       caeResultado,
       fechaFiscalSql,
+      fechaFiscalSql,
+      impTotalAfip,
       ventaId
     ]);
     
@@ -712,10 +743,11 @@ const solicitarCAE = async (req, res) => {
     // ============================================
     // 7️⃣ ACTUALIZAR NÚMERO EN BD Y SINCRONIZAR
     // ============================================
+    let numeroAprobado = datosRespuesta?.comprobante?.numero ||
+      datosRespuesta?.voucher_number ||
+      numeroARCA;
+
     try {
-      const numeroAprobado = datosRespuesta?.comprobante?.numero || 
-                            datosRespuesta?.voucher_number ||
-                            numeroARCA; // Usar el número que obtuvimos de ARCA
       
       // ✅ Formatear número según tipo de documento
       let numeroCompletoAprobado;
@@ -765,6 +797,73 @@ const solicitarCAE = async (req, res) => {
       console.warn('⚠️  Error sincronizando número (no crítico):', syncError.message);
       // No fallar la operación si la sincronización falla
     }
+
+    // ============================================
+    // 7.5️⃣ VALIDAR COHERENCIA QR vs DATOS ENVIADOS A AFIP
+    // ============================================
+    try {
+      const discrepanciasQR = [];
+      const nroDocEsperado = parseInt(String(numeroDocumento).replace(/\D/g, ''), 10) || 0;
+      const importeEnviado = parseFloat(datosFactura?.impTotal);
+      const importeCalculado = parseFloat(totalVenta);
+      const importeAfipGuardado = parseFloat(impTotalAfip);
+
+      if (Number.isFinite(importeEnviado) && Math.abs(importeEnviado - importeCalculado) > 0.01) {
+        discrepanciasQR.push(
+          `impTotal enviado (${importeEnviado}) != total calculado (${importeCalculado})`
+        );
+      }
+      if (Number.isFinite(importeAfipGuardado) && Math.abs(importeAfipGuardado - importeCalculado) > 0.01) {
+        discrepanciasQR.push(
+          `ImpTotal AFIP (${importeAfipGuardado}) != total calculado (${importeCalculado})`
+        );
+      }
+      if (Math.abs(parseFloat(venta.total || 0) - importeAfipGuardado) > 0.01) {
+        discrepanciasQR.push(
+          `venta.total (${venta.total}) != importe_afip (${importeAfipGuardado})`
+        );
+      }
+      if (parseInt(datosFactura?.puntoVenta, 10) !== parseInt(puntoVentaARCA, 10)) {
+        discrepanciasQR.push(
+          `puntoVenta enviado (${datosFactura?.puntoVenta}) != aprobado (${puntoVentaARCA})`
+        );
+      }
+      if (parseInt(datosFactura?.tipoComprobante, 10) !== parseInt(tipoComprobante, 10)) {
+        discrepanciasQR.push(
+          `tipoComprobante enviado (${datosFactura?.tipoComprobante}) != esperado (${tipoComprobante})`
+        );
+      }
+      if (parseInt(datosFactura?.cliente?.tipoDocumento, 10) !== parseInt(tipoDocumento, 10)) {
+        discrepanciasQR.push(
+          `tipoDocumento enviado (${datosFactura?.cliente?.tipoDocumento}) != esperado (${tipoDocumento})`
+        );
+      }
+      const docEnviado = parseInt(String(datosFactura?.cliente?.numeroDocumento || '').replace(/\D/g, ''), 10) || 0;
+      if (docEnviado !== nroDocEsperado) {
+        discrepanciasQR.push(
+          `numeroDocumento enviado (${docEnviado}) != esperado (${nroDocEsperado})`
+        );
+      }
+      if (!fechaFiscalSql) {
+        discrepanciasQR.push('fecha_fiscal no pudo derivarse de la fecha enviada a ARCA');
+      }
+      if (!numeroAprobado) {
+        discrepanciasQR.push('numero de comprobante aprobado no disponible para validar QR');
+      }
+
+      if (discrepanciasQR.length > 0) {
+        const mensajeValidacion = `[Validación QR post-CAE] ${discrepanciasQR.join('; ')}`;
+        console.warn(`⚠️ ${mensajeValidacion}`);
+        await db.execute(
+          'UPDATE ventas SET cae_observaciones = ? WHERE id = ?',
+          [mensajeValidacion.substring(0, 65535), ventaId]
+        );
+      } else {
+        console.log('✅ Validación post-CAE: datos QR coherentes con solicitud AFIP');
+      }
+    } catch (validacionError) {
+      console.warn('⚠️ Error en validación post-CAE (no crítico):', validacionError.message);
+    }
     
     // ============================================
     // 8️⃣ RESPONDER AL CLIENTE CON ESTRUCTURA CORRECTA
@@ -786,7 +885,9 @@ const solicitarCAE = async (req, res) => {
           tipo: tipoComprobante
         },
         importes: {
-          total: venta.total
+          total: impTotalAfip,
+          totalVenta: totalVenta,
+          totalOriginal: venta.total
         },
         esExento: clienteEsExento
       }

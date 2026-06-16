@@ -311,7 +311,7 @@ router.get('/ventas-vendedores',
 
 router.get('/ventas-productos', 
     requireEmployee,
-    middlewareAuditoria({ accion: 'VIEW', tabla: 'detalle_ventas', incluirQuery: true }),
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas_cont', incluirQuery: true }),
     (req, res, next) => {
       // ✅ Autocompletar si faltan fechas
       if (!req.query.desde || !req.query.hasta) {
@@ -374,6 +374,20 @@ router.get('/generar-pdf-reporte',
     requireManager,
     middlewareAuditoria({ accion: 'GENERATE_PDF', tabla: 'reportes', incluirQuery: true }),
     finanzasController.generarPDFReporteFinanciero
+);
+
+// ✅ Reporte Gerencial: datos JSON
+router.get('/reporte-gerencial',
+    requireManager,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'reporte_gerencial', incluirQuery: true }),
+    finanzasController.obtenerReporteGerencial
+);
+
+// ✅ Reporte Gerencial: PDF para el gerente
+router.get('/generar-pdf-gerencial',
+    requireManager,
+    middlewareAuditoria({ accion: 'GENERATE_PDF', tabla: 'reporte_gerencial', incluirQuery: true }),
+    finanzasController.generarPDFReporteGerencial
 );
 
 

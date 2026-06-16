@@ -8,7 +8,9 @@
     "discord-resumen": "node scripts/discord-resumen-diario.js",
     "test": "node utils/rounding.test.js",
     "test:nota-pedido": "node utils/notaPedidoPdf.test.js",
-    "test:nota-pedido-unit": "SKIP_PDF_GENERATE=1 node utils/notaPedidoPdf.test.js"
+    "test:nota-pedido-unit": "SKIP_PDF_GENERATE=1 node utils/notaPedidoPdf.test.js",
+    "test:arca-homo": "node arca-microservice/scripts/smoke-arca-homo.mjs",
+    "postinstall": "patch-package"
   },
   "keywords": [
     "api",
@@ -25,6 +27,7 @@
   },
   "dependencies": {
     "@afipsdk/afip.js": "^1.2.0",
+    "@arcasdk/core": "^0.3.6",
     "axios": "^1.7.9",
     "bcryptjs": "^3.0.2",
     "compression": "^1.7.4",
@@ -51,6 +54,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.1.9",
+    "patch-package": "^8.0.1"
   }
 }

@@ -1,4 +1,5 @@
 const db = require('./db');
+const dbPromise = require('./dbPromise');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
@@ -93,10 +94,9 @@ const obtenerCuenta = (req, res) => {
   });
 };
 
-const registrarMovimiento = (req, res) => {
+const registrarMovimiento = async (req, res) => {
   const { cuenta_id, tipo, origen, monto, descripcion, referencia_id = null } = req.body;
-  
-  // Validaciones
+
   if (!cuenta_id || !tipo || !monto || monto <= 0) {
     return res.status(400).json({
       success: false,
@@ -104,53 +104,53 @@ const registrarMovimiento = (req, res) => {
     });
   }
 
-  // 1. Primero insertamos el movimiento
-  const insertQuery = `
-    INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
-    VALUES (?, ?, ?, ?, ?)
-  `;
-  
-  db.query(
-    insertQuery,
-    [cuenta_id, tipo, origen, monto, referencia_id],
-    (err, insertResults) => {
-      if (err) {
-        console.error('Error al insertar movimiento:', err);
-        return res.status(500).json({ 
-          success: false, 
-          message: "Error al insertar el movimiento" 
-        });
-      }
-      
-      // 2. Luego actualizamos el saldo de la cuenta
-      const updateQuery = `
-        UPDATE CUENTA_FONDOS
-        SET saldo = saldo ${tipo === 'INGRESO' ? '+' : '-'} ?
-        WHERE id = ?
-      `;
-      
-      db.query(
-        updateQuery,
-        [monto, cuenta_id],
-        (err, updateResults) => {
-          if (err) {
-            console.error('Error al actualizar saldo:', err);
-            // Nota: Aquí no tenemos control de transacción para deshacer la inserción anterior
-            return res.status(500).json({ 
-              success: false, 
-              message: "Error al actualizar el saldo" 
-            });
-          }
-          
-          res.json({
-            success: true,
-            message: `${tipo === 'INGRESO' ? 'Ingreso' : 'Egreso'} registrado exitosamente`,
-            id: insertResults.insertId
-          });
-        }
-      );
+  if (tipo !== 'INGRESO' && tipo !== 'EGRESO') {
+    return res.status(400).json({
+      success: false,
+      message: "El tipo de movimiento debe ser INGRESO o EGRESO"
+    });
+  }
+
+  let conn;
+  try {
+    conn = await dbPromise.getConnection();
+    await conn.beginTransaction();
+
+    const insertQuery = `
+      INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    const [insertResult] = await conn.execute(
+      insertQuery,
+      [cuenta_id, tipo, origen, monto, referencia_id]
+    );
+
+    const updateQuery = `
+      UPDATE cuenta_fondos
+      SET saldo = saldo ${tipo === 'INGRESO' ? '+' : '-'} ?
+      WHERE id = ?
+    `;
+    await conn.execute(updateQuery, [monto, cuenta_id]);
+
+    await conn.commit();
+
+    res.json({
+      success: true,
+      message: `${tipo === 'INGRESO' ? 'Ingreso' : 'Egreso'} registrado exitosamente`,
+      id: insertResult.insertId
+    });
+  } catch (error) {
+    if (conn) {
+      try { await conn.rollback(); } catch (e) { /* noop */ }
     }
-  );
+    console.error('Error al registrar movimiento (transaccion revertida):', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al registrar el movimiento'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
 };
 
 const obtenerMovimientos = (req, res) => {
@@ -209,119 +209,83 @@ const obtenerMovimientos = (req, res) => {
   });
 };
 
-// Función para realizar transferencias entre cuentas (sin usar getConnection)
-const realizarTransferencia = (req, res) => {
+// Transferencia entre cuentas con transaccion atomica (rollback en cualquier fallo)
+const realizarTransferencia = async (req, res) => {
   const { cuenta_origen, cuenta_destino, monto, descripcion } = req.body;
-  
+
   if (!cuenta_origen || !cuenta_destino || !monto || monto <= 0) {
     return res.status(400).json({
       success: false,
       message: "Datos de transferencia inválidos"
     });
   }
-  
+
   if (cuenta_origen === cuenta_destino) {
     return res.status(400).json({
       success: false,
       message: "Las cuentas de origen y destino deben ser diferentes"
     });
   }
-  
-  // 1. Verificar saldo suficiente en cuenta origen
-  const checkQuery = `
-    SELECT saldo FROM cuenta_fondos WHERE id = ?
-  `;
-  
-  db.query(checkQuery, [cuenta_origen], (err, checkResults) => {
-    if (err) {
-      console.error('Error al verificar saldo:', err);
-      return res.status(500).json({ 
-        success: false, 
-        message: "Error al verificar el saldo" 
-      });
+
+  let conn;
+  try {
+    conn = await dbPromise.getConnection();
+    await conn.beginTransaction();
+
+    // Bloquea la fila origen para evitar carrera con otra transferencia
+    const [origenRows] = await conn.execute(
+      'SELECT saldo FROM cuenta_fondos WHERE id = ? FOR UPDATE',
+      [cuenta_origen]
+    );
+    if (origenRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Cuenta de origen no encontrada' });
     }
-    
-    if (checkResults.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Cuenta de origen no encontrada" 
-      });
+    if (parseFloat(origenRows[0].saldo) < parseFloat(monto)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Saldo insuficiente en la cuenta de origen' });
     }
-    
-    if (parseFloat(checkResults[0].saldo) < parseFloat(monto)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Saldo insuficiente en la cuenta de origen" 
-      });
-    }
-    
-    // 2. Registrar el egreso en la cuenta origen
-    const egresoQuery = `
-      INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
-      VALUES (?, 'EGRESO', 'transferencia', ?, NULL)
-    `;
-    
-    db.query(egresoQuery, [cuenta_origen, monto], (err, egresoResults) => {
-      if (err) {
-        console.error('Error al registrar egreso:', err);
-        return res.status(500).json({ 
-          success: false, 
-          message: "Error al registrar el egreso" 
-        });
-      }
-      
-      // 3. Registrar el ingreso en la cuenta destino
-      const ingresoQuery = `
-        INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
-        VALUES (?, 'INGRESO', 'transferencia', ?, ?)
-      `;
-      
-      db.query(ingresoQuery, [cuenta_destino, monto, egresoResults.insertId], (err, ingresoResults) => {
-        if (err) {
-          console.error('Error al registrar ingreso:', err);
-          return res.status(500).json({ 
-            success: false, 
-            message: "Error al registrar el ingreso" 
-          });
-        }
-        
-        // 4. Actualizar saldo en cuenta origen (restar)
-        const updateOrigenQuery = `
-          UPDATE cuenta_fondos SET saldo = saldo - ? WHERE id = ?
-        `;
-        
-        db.query(updateOrigenQuery, [monto, cuenta_origen], (err, updateOrigenResults) => {
-          if (err) {
-            console.error('Error al actualizar cuenta origen:', err);
-            return res.status(500).json({ 
-              success: false, 
-              message: "Error al actualizar la cuenta de origen" 
-            });
-          }
-          
-          // 5. Actualizar saldo en cuenta destino (sumar)
-          const updateDestinoQuery = `
-            UPDATE cuenta_fondos SET saldo = saldo + ? WHERE id = ?
-          `;
-          
-          db.query(updateDestinoQuery, [monto, cuenta_destino], (err, updateDestinoResults) => {
-            if (err) {
-              console.error('Error al actualizar cuenta destino:', err);
-              return res.status(500).json({ 
-                success: false, 
-                message: "Error al actualizar la cuenta de destino" 
-              });
-            }
-            
-            res.json({
-              success: true,
-              message: "Transferencia realizada exitosamente"
-            });
-          });
-        });
-      });
+
+    const [egresoResult] = await conn.execute(
+      `INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
+       VALUES (?, 'EGRESO', 'transferencia', ?, NULL)`,
+      [cuenta_origen, monto]
+    );
+
+    await conn.execute(
+      `INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id)
+       VALUES (?, 'INGRESO', 'transferencia', ?, ?)`,
+      [cuenta_destino, monto, egresoResult.insertId]
+    );
+
+    await conn.execute(
+      'UPDATE cuenta_fondos SET saldo = saldo - ? WHERE id = ?',
+      [monto, cuenta_origen]
+    );
+
+    await conn.execute(
+      'UPDATE cuenta_fondos SET saldo = saldo + ? WHERE id = ?',
+      [monto, cuenta_destino]
+    );
+
+    await conn.commit();
+
+    res.json({
+      success: true,
+      message: 'Transferencia realizada exitosamente'
     });
-  });
+  } catch (error) {
+    if (conn) {
+      try { await conn.rollback(); } catch (e) { /* noop */ }
+    }
+    console.error('Error en transferencia (transaccion revertida):', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al realizar la transferencia'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
 };
 
 const obtenerIngresos = (req, res) => {
@@ -329,36 +293,37 @@ const obtenerIngresos = (req, res) => {
   let { desde, hasta, tipo, cuenta, busqueda, limit = 100 } = req.query;
   
   // Construimos la consulta base que une ventas y solo los ingresos manuales (no automáticos)
+  // - En ventas filtramos por estado/tipo_doc reales y aplicamos signo negativo a NOTA_CREDITO
+  //   para que el listado y su total no sumen creditos como si fueran ingresos.
+  // - Usamos COALESCE(fecha_fiscal, fecha) como referencia de fecha al igual que en el resto
+  //   de los reportes financieros.
+  // - Los ingresos automaticos (referencia_id IS NOT NULL) ya estan representados por las
+  //   ventas, por eso aqui solo se traen los manuales (referencia_id IS NULL).
   let query = `
-    SELECT 
-      'Venta' AS tipo, 
-      v.id AS referencia, 
+    SELECT
+      'Venta' AS tipo,
+      v.id AS referencia,
       v.cliente_nombre AS descripcion,
-      v.total AS monto, 
-      v.fecha, 
+      (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -v.total ELSE v.total END) AS monto,
+      COALESCE(v.fecha_fiscal, v.fecha) AS fecha,
       'Venta' AS origen,
-      'Cuenta Corriente' AS cuenta 
-    FROM ventas v 
-    UNION ALL 
-    SELECT 
-      mf.tipo, 
-      mf.referencia_id, 
+      'Cuenta Corriente' AS cuenta
+    FROM ventas v
+    WHERE v.estado = 'Facturada'
+      AND v.tipo_doc IN ('FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO')
+    UNION ALL
+    SELECT
+      mf.tipo,
+      mf.referencia_id,
       mf.origen AS descripcion,
-      mf.monto, 
-      mf.fecha, 
+      mf.monto,
+      mf.fecha,
       mf.origen,
-      cf.nombre AS cuenta 
-    FROM movimiento_fondos mf 
-    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id 
-    WHERE mf.tipo = 'INGRESO' 
-    AND (
-      mf.origen = 'ingreso manual' OR 
-      mf.origen = 'cobro' OR 
-      mf.origen = 'reintegro' OR 
-      mf.origen = 'ajuste' OR 
-      mf.origen = 'otro' OR
-      (mf.origen != 'venta' AND mf.referencia_id IS NULL)
-    )
+      cf.nombre AS cuenta
+    FROM movimiento_fondos mf
+    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id
+    WHERE mf.tipo = 'INGRESO'
+      AND mf.referencia_id IS NULL
   `;
   
   // Aplicamos filtros
@@ -1040,18 +1005,16 @@ const obtenerDistribucionIngresos = (req, res) => {
     
     const totalVentas = ventasResults[0].total || 0;
     
+    // Solo ingresos manuales: los automaticos generados por ventas siempre
+    // tienen referencia_id = venta_id. Asi evitamos doble conteo con queryVentas
+    // independientemente del texto exacto del campo `origen` (que puede tener
+    // tildes y variantes que rompen un LIKE).
     const queryIngresos = `
       SELECT ROUND(COALESCE(SUM(monto), 0), 2) AS total
       FROM movimiento_fondos
       WHERE tipo = 'INGRESO'
         ${filtroFechaMovs}
-        AND (
-          referencia_id IS NULL
-          OR (
-            LOWER(COALESCE(origen, '')) NOT LIKE '%facturacion%'
-            AND LOWER(COALESCE(origen, '')) NOT LIKE '%venta directa%'
-          )
-        )
+        AND referencia_id IS NULL
     `;
     
     db.query(queryIngresos, paramsMovs, (err, ingresosResults) => {
@@ -1122,6 +1085,7 @@ const obtenerGastosPorCategoria = (req, res) => {
       FROM movimiento_fondos mf
       ${filtroFecha.replace(/fecha/g, 'mf.fecha')}
       ${filtroFecha ? 'AND mf.tipo = \'EGRESO\'' : 'WHERE mf.tipo = \'EGRESO\''}
+      AND mf.referencia_id IS NULL
     ) egresos_unificados
     GROUP BY categoria
     ORDER BY total DESC
@@ -1495,35 +1459,39 @@ const obtenerTopProductosTabla = async (req, res) => {
 
     const { whereSql, params } = construirWhereVentas(filtros, 'v');
 
+    // Importante: NO incluir p.costo en el GROUP BY. Si el costo del producto cambio
+    // historicamente, agruparlo separa al mismo producto en varias filas y la suma
+    // posterior infla los totales. Lo agregamos como MAX() para mostrar el costo
+    // actual de referencia (informativo).
     const query = `
-      SELECT 
+      SELECT
         vc.producto_id,
         vc.producto_nombre,
-        c.nombre as categoria,
-        p.costo,
-        ROUND(AVG(vc.precio), 2) as precio_promedio,
-        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) as cantidad_vendida,
-        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) as ingresos_producto,
+        c.nombre AS categoria,
+        MAX(p.costo) AS costo,
+        ROUND(AVG(vc.precio), 2) AS precio_promedio,
+        ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS cantidad_vendida,
+        ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS ingresos_producto,
         SUM(
-          CASE 
+          CASE
             WHEN p.costo > 0 AND p.costo IS NOT NULL
             THEN (vc.precio - p.costo) * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)
             ELSE vc.precio * vc.cantidad * 0.25 * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)
           END
-        ) as ganancia_total,
+        ) AS ganancia_total,
         (
-          CASE 
-            WHEN p.costo > 0 AND p.costo IS NOT NULL 
+          CASE
+            WHEN MAX(p.costo) > 0 AND MAX(p.costo) IS NOT NULL
             THEN 'Con costo'
             ELSE 'Estimado'
           END
-        ) as tipo_calculo
+        ) AS tipo_calculo
       FROM ventas_cont vc
       JOIN ventas v ON vc.venta_id = v.id
       LEFT JOIN productos p ON vc.producto_id = p.id
       LEFT JOIN categorias c ON p.categoria_id = c.id
       WHERE ${whereSql}
-      GROUP BY vc.producto_id, vc.producto_nombre, c.nombre, p.costo
+      GROUP BY vc.producto_id, vc.producto_nombre, c.nombre
       ORDER BY ganancia_total DESC
     `;
 
@@ -2297,6 +2265,286 @@ const generarPDFReporteFinanciero = async (req, res) => {
 };
 
 
+/* ============================================================
+ * REPORTE GERENCIAL
+ * ------------------------------------------------------------
+ * Datasets concretos pensados para el gerente:
+ *   1) Ventas por mes (excluyendo ventas con productos FLETE)
+ *   2) Top 10 productos por cantidad vendida (excluye lineas FLETE)
+ *   3) Top 10 ciudades por cantidad de ventas
+ *   4) Todos los vendedores con cantidad y total vendido
+ *   5) Resumen agregado del periodo
+ * Se asume que el filtro principal es por mes/rango de meses,
+ * pero el endpoint acepta cualquier { desde, hasta } en formato YYYY-MM-DD.
+ * ============================================================ */
+
+const validarRangoReporteGerencial = (desde, hasta) => {
+  if (!desde || !hasta) {
+    return { ok: false, message: 'Faltan parametros desde/hasta (YYYY-MM-DD)' };
+  }
+  const d = new Date(desde);
+  const h = new Date(hasta);
+  if (isNaN(d.getTime()) || isNaN(h.getTime())) {
+    return { ok: false, message: 'Formato de fecha invalido. Use YYYY-MM-DD' };
+  }
+  if (d > h) {
+    return { ok: false, message: 'La fecha desde no puede ser mayor que hasta' };
+  }
+  return { ok: true };
+};
+
+const obtenerDatosReporteGerencial = async (desde, hasta) => {
+  const ventasFiltroBase = `
+    v.estado = 'Facturada'
+    AND v.tipo_doc IN ('FACTURA','NOTA_DEBITO','NOTA_CREDITO')
+    AND DATE(COALESCE(v.fecha_fiscal, v.fecha)) BETWEEN ? AND ?
+  `;
+
+  // 1) Ventas por mes excluyendo cualquier venta que tenga al menos un item FLETE
+  // Nota: solo seleccionamos `mes` (YYYY-MM) para evitar conflictos con
+  // sql_mode=only_full_group_by; anio y mes_numero se derivan en JS al mapear.
+  const queryVentasPorMes = `
+    SELECT
+      DATE_FORMAT(COALESCE(v.fecha_fiscal, v.fecha), '%Y-%m') AS mes,
+      COUNT(DISTINCT v.id) AS cantidad_ventas,
+      ROUND(SUM(CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -v.total ELSE v.total END), 2) AS total_facturado
+    FROM ventas v
+    WHERE ${ventasFiltroBase}
+      AND v.id NOT IN (
+        SELECT DISTINCT vc.venta_id
+        FROM ventas_cont vc
+        WHERE UPPER(vc.producto_nombre) LIKE '%FLETE%'
+      )
+    GROUP BY DATE_FORMAT(COALESCE(v.fecha_fiscal, v.fecha), '%Y-%m')
+    ORDER BY mes ASC
+  `;
+
+  // 2) Top 10 productos por cantidad (excluye lineas que sean FLETE)
+  const queryTopProductos = `
+    SELECT
+      vc.producto_nombre,
+      ROUND(SUM(vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS total_cantidad,
+      ROUND(SUM(vc.precio * vc.cantidad * (CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)), 2) AS total_ingresos,
+      COUNT(DISTINCT v.id) AS en_cuantas_ventas
+    FROM ventas_cont vc
+    JOIN ventas v ON v.id = vc.venta_id
+    WHERE ${ventasFiltroBase}
+      AND UPPER(vc.producto_nombre) NOT LIKE '%FLETE%'
+    GROUP BY vc.producto_nombre
+    HAVING total_cantidad > 0
+    ORDER BY total_cantidad DESC
+    LIMIT 10
+  `;
+
+  // 3) Top 10 ciudades ordenadas por cantidad de ventas
+  const queryTopCiudades = `
+    SELECT
+      COALESCE(NULLIF(TRIM(v.cliente_ciudad), ''), 'Sin ciudad') AS ciudad,
+      COALESCE(NULLIF(TRIM(v.cliente_provincia), ''), '') AS provincia,
+      COUNT(DISTINCT v.id) AS cantidad_ventas,
+      COUNT(DISTINCT v.cliente_id) AS clientes_unicos,
+      ROUND(SUM(CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -v.total ELSE v.total END), 2) AS total_facturado
+    FROM ventas v
+    WHERE ${ventasFiltroBase}
+    GROUP BY
+      COALESCE(NULLIF(TRIM(v.cliente_ciudad), ''), 'Sin ciudad'),
+      COALESCE(NULLIF(TRIM(v.cliente_provincia), ''), '')
+    ORDER BY cantidad_ventas DESC, total_facturado DESC
+    LIMIT 10
+  `;
+
+  // 4) Todos los vendedores con cantidad y total vendido
+  const queryVendedores = `
+    SELECT
+      COALESCE(NULLIF(TRIM(v.empleado_nombre), ''), 'Sin vendedor') AS vendedor,
+      COUNT(DISTINCT CASE WHEN v.tipo_doc <> 'NOTA_CREDITO' THEN v.id END) AS cantidad_ventas,
+      ROUND(SUM(CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -v.total ELSE v.total END), 2) AS total_vendido,
+      ROUND(AVG(CASE WHEN v.tipo_doc <> 'NOTA_CREDITO' THEN v.total END), 2) AS ticket_promedio,
+      MIN(DATE(COALESCE(v.fecha_fiscal, v.fecha))) AS primera_venta,
+      MAX(DATE(COALESCE(v.fecha_fiscal, v.fecha))) AS ultima_venta
+    FROM ventas v
+    WHERE ${ventasFiltroBase}
+    GROUP BY COALESCE(NULLIF(TRIM(v.empleado_nombre), ''), 'Sin vendedor')
+    ORDER BY total_vendido DESC
+  `;
+
+  const params = [desde, hasta];
+
+  const [
+    ventasPorMes,
+    topProductos,
+    topCiudades,
+    vendedores
+  ] = await Promise.all([
+    ejecutarQuery(queryVentasPorMes, params),
+    ejecutarQuery(queryTopProductos, params),
+    ejecutarQuery(queryTopCiudades, params),
+    ejecutarQuery(queryVendedores, params)
+  ]);
+
+  // Resumen agregado a partir de los datasets ya calculados
+  const totalFacturadoSinFletes = ventasPorMes.reduce(
+    (acc, row) => acc + Number(row.total_facturado || 0), 0
+  );
+  const totalVentasSinFletes = ventasPorMes.reduce(
+    (acc, row) => acc + Number(row.cantidad_ventas || 0), 0
+  );
+  // topCiudades viene con LIMIT 10: usarlo como "global" subestima el total real.
+  // vendedores devuelve TODAS las filas del periodo (sin LIMIT), por lo que su
+  // sumatoria si representa el universo completo de ventas filtradas.
+  const totalVentasGlobal = vendedores.reduce(
+    (acc, row) => acc + Number(row.cantidad_ventas || 0), 0
+  );
+  const totalFacturadoGlobal = vendedores.reduce(
+    (acc, row) => acc + Number(row.total_vendido || 0), 0
+  );
+
+  const mejorMes = ventasPorMes.reduce((best, row) => {
+    if (!best || Number(row.total_facturado || 0) > Number(best.total_facturado || 0)) return row;
+    return best;
+  }, null);
+
+  const mejorVendedor = vendedores[0] || null;
+  const productoEstrella = topProductos[0] || null;
+  const ciudadTop = topCiudades[0] || null;
+
+  return {
+    periodo: { desde, hasta },
+    resumen: {
+      total_facturado_sin_fletes: Math.round(totalFacturadoSinFletes * 100) / 100,
+      cantidad_ventas_sin_fletes: totalVentasSinFletes,
+      total_facturado_global: Math.round(totalFacturadoGlobal * 100) / 100,
+      cantidad_ventas_global: totalVentasGlobal,
+      ticket_promedio_sin_fletes: totalVentasSinFletes > 0
+        ? Math.round((totalFacturadoSinFletes / totalVentasSinFletes) * 100) / 100
+        : 0,
+      mejor_mes: mejorMes ? {
+        mes: mejorMes.mes,
+        total_facturado: Number(mejorMes.total_facturado || 0),
+        cantidad_ventas: Number(mejorMes.cantidad_ventas || 0)
+      } : null,
+      mejor_vendedor: mejorVendedor ? {
+        vendedor: mejorVendedor.vendedor,
+        total_vendido: Number(mejorVendedor.total_vendido || 0),
+        cantidad_ventas: Number(mejorVendedor.cantidad_ventas || 0)
+      } : null,
+      producto_estrella: productoEstrella ? {
+        producto_nombre: productoEstrella.producto_nombre,
+        total_cantidad: Number(productoEstrella.total_cantidad || 0)
+      } : null,
+      ciudad_top: ciudadTop ? {
+        ciudad: ciudadTop.ciudad,
+        provincia: ciudadTop.provincia,
+        cantidad_ventas: Number(ciudadTop.cantidad_ventas || 0)
+      } : null
+    },
+    ventas_por_mes: ventasPorMes.map(r => {
+      const [anio, mesNumero] = String(r.mes || '').split('-');
+      return {
+        mes: r.mes,
+        anio: anio || '',
+        mes_numero: mesNumero || '',
+        cantidad_ventas: Number(r.cantidad_ventas || 0),
+        total_facturado: Number(r.total_facturado || 0)
+      };
+    }),
+    top_productos: topProductos.map(r => ({
+      producto_nombre: r.producto_nombre,
+      total_cantidad: Number(r.total_cantidad || 0),
+      total_ingresos: Number(r.total_ingresos || 0),
+      en_cuantas_ventas: Number(r.en_cuantas_ventas || 0)
+    })),
+    top_ciudades: topCiudades.map(r => ({
+      ciudad: r.ciudad,
+      provincia: r.provincia,
+      cantidad_ventas: Number(r.cantidad_ventas || 0),
+      clientes_unicos: Number(r.clientes_unicos || 0),
+      total_facturado: Number(r.total_facturado || 0)
+    })),
+    vendedores: vendedores.map(r => ({
+      vendedor: r.vendedor,
+      cantidad_ventas: Number(r.cantidad_ventas || 0),
+      total_vendido: Number(r.total_vendido || 0),
+      ticket_promedio: Number(r.ticket_promedio || 0),
+      primera_venta: r.primera_venta,
+      ultima_venta: r.ultima_venta
+    }))
+  };
+};
+
+const obtenerReporteGerencial = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    const validacion = validarRangoReporteGerencial(desde, hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
+
+    const data = await obtenerDatosReporteGerencial(desde, hasta);
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error obteniendo reporte gerencial:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener el reporte gerencial: ' + error.message
+    });
+  }
+};
+
+const generarPDFReporteGerencial = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    console.log('📄 [reporte gerencial PDF] solicitando:', { desde, hasta });
+
+    const validacion = validarRangoReporteGerencial(desde, hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
+
+    const data = await obtenerDatosReporteGerencial(desde, hasta);
+    console.log('📄 [reporte gerencial PDF] datos listos:', {
+      ventas_por_mes: data.ventas_por_mes.length,
+      top_productos: data.top_productos.length,
+      top_ciudades: data.top_ciudades.length,
+      vendedores: data.vendedores.length
+    });
+
+    const pdfGenerator = require('../utils/pdfGenerator');
+    const pdfRaw = await pdfGenerator.generarReporteGerencial(data);
+
+    if (!pdfRaw || pdfRaw.length === 0) {
+      throw new Error('El generador de PDF devolvio un buffer vacio');
+    }
+
+    // Puppeteer >= 23 retorna Uint8Array; Express serializa mal los Uint8Array en res.send().
+    // Forzamos a Buffer y usamos res.end() para asegurar transferencia binaria correcta.
+    const pdfBuffer = Buffer.isBuffer(pdfRaw) ? pdfRaw : Buffer.from(pdfRaw);
+
+    console.log(`📄 [reporte gerencial PDF] enviando ${pdfBuffer.length} bytes`);
+
+    const fechaActual = new Date().toISOString().split('T')[0];
+    const nombreArchivo = `reporte_gerencial_${desde}_a_${hasta}_${fechaActual}.pdf`;
+
+    res.status(200);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${nombreArchivo}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'no-store');
+    // Evita que el middleware de compresion altere el binario en algunos proxys.
+    res.setHeader('Content-Encoding', 'identity');
+    res.end(pdfBuffer);
+  } catch (error) {
+    console.error('💥 Error generando PDF reporte gerencial:', error);
+    if (error?.stack) console.error(error.stack);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Error al generar el PDF del reporte gerencial: ' + error.message
+      });
+    }
+  }
+};
+
 // IMPORTANTE: Exportar todas las funciones
 module.exports = {
   // Funciones de cuentas y movimientos
@@ -2340,5 +2588,9 @@ module.exports = {
   obtenerTopProductosTabla,
   // ✅ NUEVOS
   obtenerDashboardSimplificado,
-  generarPDFReporteFinanciero
+  generarPDFReporteFinanciero,
+
+  // Reporte Gerencial
+  obtenerReporteGerencial,
+  generarPDFReporteGerencial
 };

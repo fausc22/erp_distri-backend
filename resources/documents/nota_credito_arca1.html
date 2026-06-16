@@ -3,85 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FACTURA ELECTRÓNICA - DISTRIBUIDORA VERTI-MAR</title>
+    <title>NOTA DE CRÉDITO ELECTRÓNICA - DISTRIBUIDORA VERTI-MAR</title>
     <style>
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
         }
-        html, body {
+        body {
             font-family: Arial, sans-serif;
             font-size: 13px;
             background-color: #ffffff;
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            min-height: 0;
-        }
-        
-        /* Página A4: área imprimible (297mm - 8mm*2 = 281mm) */
-        .factura-page {
-            width: 100%;
-            max-width: 198mm;
-            margin: 0 auto;
-            height: 281mm;
-            min-height: 281mm;
-            max-height: 281mm;
-            display: flex;
-            flex-direction: column;
-            box-sizing: border-box;
-            page-break-after: always;
-        }
-
-        .factura-page.last-page {
-            page-break-after: auto;
-        }
-        
-        .bill-container {
-            flex: 1 1 auto;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-            border: 1px solid #000;
-            border-top: none;
-            box-sizing: border-box;
-        }
-        
-        .row-details {
-            flex: 1 1 auto;
-            min-height: 0;
-        }
-        
-        .row-details table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 5px 0;
-            font-size: 12px;
-        }
-        .row-details table td, .row-details table th {
-            padding: 8px;
-            border: 1px solid #666;
-            font-size: 12px;
-        }
-        .row-details table th {
-            background-color: #e0e0e0;
-            font-weight: bold;
-            text-align: center;
-            font-size: 13px;
-        }
-        .row-details table tbody tr {
-            page-break-inside: avoid;
-        }
-        
-        /* Bloque totales + legal + QR: fijado al final de la hoja */
-        .factura-footer-wrapper {
-            flex-shrink: 0;
-            margin-top: auto;
-        }
-
-        .factura-footer-wrapper.is-empty {
-            display: none;
         }
         
         @page {
@@ -90,19 +22,19 @@
         }
         
         .original-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
             background-color: #cfe2f3;
-            padding: 8px 12px;
+            text-align: center;
+            padding: 8px;
             font-weight: bold;
             font-size: 18px;
             border: 1px solid #000;
-            flex-shrink: 0;
         }
-        .original-header .header-page-num {
-            font-size: 12px;
-            font-weight: 600;
+        .bill-container {
+            width: 750px;
+            margin: 0 auto;
+            border: 1px solid #000;
+            border-top: none;
+            page-break-after: avoid;
         }
         .bill-emitter-row {
             display: table;
@@ -150,22 +82,42 @@
             padding: 10px 12px;
             border-bottom: 1px solid #000;
             page-break-inside: avoid;
-            flex-shrink: 0;
         }
         .bill-row p {
             font-size: 13px;
             margin: 3px 0;
         }
-        /* Contenedor observaciones y totales */
+        .row-details table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 5px 0;
+        }
+        .row-details table td, .row-details table th {
+            padding: 8px;
+            border: 1px solid #666;
+            font-size: 12px;
+        }
+        .row-details table th {
+            background-color: #e0e0e0;
+            font-weight: bold;
+            text-align: center;
+            font-size: 13px;
+        }
+        .row-details table tbody tr {
+            page-break-inside: avoid;
+        }
+        
+        /* ✅ Contenedor para observaciones y totales */
         .totales-observaciones-container {
             padding: 10px 12px;
             border-bottom: 1px solid #000;
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            flex-shrink: 0;
+            page-break-inside: avoid;
         }
         
+        /* ✅ Sección de observaciones (izquierda) */
         .observaciones-section {
             flex: 1;
             padding-right: 15px;
@@ -182,6 +134,7 @@
             font-size: 13px;
         }
         
+        /* ✅ Sección de totales (derecha) */
         .totales-box {
             width: 240px;
             border: 1px solid #000;
@@ -228,7 +181,7 @@
             display: table;
             width: 100%;
             border-top: 1px solid #000;
-            flex-shrink: 0;
+            page-break-inside: avoid;
         }
         .qr-section {
             display: table-cell;
@@ -266,11 +219,7 @@
             padding: 10px;
             font-size: 11px;
             border-top: 1px solid #000;
-            flex-shrink: 0;
-        }
-        .legal-footer p {
-            margin: 0;
-            line-height: 1.25;
+            page-break-inside: avoid;
         }
         p {
             margin: 2px 0;
@@ -281,19 +230,22 @@
         .page-break {
             page-break-before: always;
         }
+        .factura-asociada {
+            background-color: #fff3cd;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ffc107;
+            border-radius: 4px;
+        }
+        .factura-asociada p {
+            font-size: 12px;
+            margin: 2px 0;
+        }
     </style>
 </head>
 <body>
-    <!--
-      PAGINACIÓN ARCA: encabezado idéntico en todas las páginas;
-      totales + legal + QR + CAE solo en la última; numeración Página X/Y.
-    -->
-    <!-- PAGE_TEMPLATE_START -->
-    <div class="factura-page {{page_class}}">
-    <div class="original-header">
-        <span>ORIGINAL</span>
-        <span class="header-page-num">Página {{page_number}}/{{page_total}}</span>
-    </div>
+    <!-- ✅ SOLO ORIGINAL -->
+    <div class="original-header">ORIGINAL</div>
     <div class="bill-container">
         <div class="bill-emitter-row">
             <div class="bill-emitter-left">
@@ -305,10 +257,10 @@
             </div>
             <div class="bill-type-container">
                 <div class="bill-type">{{tipo_comprobante}}</div>
-                <div class="bill-cod">COD. {{codigo_comprobante}}</div>
+                <div class="bill-cod">COD. 3</div>
             </div>
             <div class="bill-emitter-right">
-                <div class="text-lg">FACTURA</div>
+                <div class="text-lg">NOTA DE CRÉDITO</div>
                 <p><strong>Punto de Venta:</strong> {{punto_venta}} <strong>Comp. Nro:</strong> {{numero_comprobante}}</p>
                 <p><strong>CUIT:</strong> {{cuit_emisor}}</p>
                 <p><strong>Ingresos Brutos:</strong> {{ingresos_brutos}}</p>
@@ -322,6 +274,14 @@
             <p>{{cliente_direccion}}</p>
             <p><strong>CUIT:</strong> {{cliente_cuit}}</p>
             <p><strong>Categoría de IVA:</strong> {{cliente_condicion}}</p>
+        </div>
+
+        <!-- ✅ FACTURA ASOCIADA -->
+        <div class="bill-row">
+            <div class="factura-asociada">
+                <p><strong>REFERENCIA A COMPROBANTE ASOCIADO:</strong></p>
+                <p><strong>Tipo:</strong> {{factura_asociada_tipo}} | <strong>Número:</strong> {{factura_asociada_numero}} | <strong>Fecha:</strong> {{factura_asociada_fecha}} | <strong>Monto Total:</strong> ${{factura_asociada_total}}</p>
+            </div>
         </div>
 
         <div class="bill-row" style="display: table; width: 100%;">
@@ -356,9 +316,62 @@
             </table>
         </div>
 
-        {{footer_content}}
+        <!-- ✅ Contenedor con observaciones + totales -->
+        <div class="totales-observaciones-container">
+            <!-- ✅ Observaciones a la izquierda (solo si existen) -->
+            <div class="observaciones-section">
+                {{observaciones_html}}
+            </div>
+            
+            <!-- ✅ Totales a la derecha -->
+            <div class="totales-box">
+                <div class="totales-box-header">
+                    <strong>PESOS</strong>
+                </div>
+                <table>
+                    <tr>
+                        <td>Neto Gravado:</td>
+                        <td class="text-right"><strong>{{subtotal}}</strong></td>
+                    </tr>
+                    <tr>
+                        <td>Exento:</td>
+                        <td class="text-right"><strong>0,00</strong></td>
+                    </tr>
+                    <tr>
+                        <td>IVA:</td>
+                        <td class="text-right"><strong>{{iva_total}}</strong></td>
+                    </tr>
+                    <tr>
+                        <td>Percepciones:</td>
+                        <td class="text-right"><strong>0,00</strong></td>
+                    </tr>
+                    <tr class="total-row">
+                        <td><strong>TOTAL:</strong></td>
+                        <td class="text-right"><strong>{{total}}</strong></td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="legal-footer">
+            <p><strong>Observaciones:</strong> El crédito fiscal discriminado en el presente comprobante, sólo podrá ser computado a efectos del Régimen de Sostenimiento e Inclusión Fiscal para Pequeños Contribuyentes de la Ley N° 27.618.</p>
+        </div>
+
+        <div class="qr-footer">
+            <div class="qr-section">
+                <img src="{{qr_base64}}" alt="Código QR AFIP">
+                <div class="qr-text-content">
+                    <p style="font-weight: bold; margin-bottom: 5px;">Comprobante Autorizado</p>
+                    <img src="{{logo_arca}}" alt="Logo ARCA" style="width: 100px; height: 35px; object-fit: contain;">
+                </div>
+                <div style="clear: both;"></div>
+            </div>
+            <div class="cae-section">
+                <p><strong>CAE Nº:</strong> {{cae}}</p>
+                <p><strong>Fecha de Vto. de CAE:</strong> {{cae_vencimiento}}</p>
+            </div>
+        </div>
     </div>
-    </div>
-    <!-- PAGE_TEMPLATE_END -->
 </body>
 </html>
+

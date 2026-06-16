@@ -1,0 +1,22 @@
+diff --git a/node_modules/@arcasdk/core/lib/infrastructure/outbound/adapters/register/register-inscription-proof.repository.js b/node_modules/@arcasdk/core/lib/infrastructure/outbound/adapters/register/register-inscription-proof.repository.js
+index 4a6978a..36a04f3 100644
+--- a/node_modules/@arcasdk/core/lib/infrastructure/outbound/adapters/register/register-inscription-proof.repository.js
++++ b/node_modules/@arcasdk/core/lib/infrastructure/outbound/adapters/register/register-inscription-proof.repository.js
+@@ -66,7 +66,16 @@ class RegisterInscriptionProofRepository extends base_soap_repository_1.BaseSoap
+                     idPersona: identifier,
+                 });
+                 const personaReturn = output.personaReturn;
+-                if (!personaReturn || !personaReturn.persona) {
++                if (!personaReturn) {
++                    return null;
++                }
++                // getPersona_v2: AFIP devuelve datosGenerales en personaReturn (sin wrapper "persona").
++                // Exigir .persona anulaba respuestas válidas (siempre null). Ver WSDL personaReturn.
++                const hasPersonaWrapper = personaReturn.persona != null;
++                const hasDirectBlocks = personaReturn.datosGenerales != null ||
++                    personaReturn.datosMonotributo != null ||
++                    personaReturn.datosRegimenGeneral != null;
++                if (!hasPersonaWrapper && !hasDirectBlocks) {
+                     return null;
+                 }
+                 return this.mapPersonaReturnToDto(personaReturn);

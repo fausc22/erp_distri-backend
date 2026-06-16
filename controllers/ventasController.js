@@ -282,27 +282,29 @@ const formatearFecha = (fechaBD) => {
 
 
 const generarPdfFactura = async (req, res) => {
-    const { venta, productos } = req.body;
+    let { venta, productos } = req.body;
 
-    if (!venta || productos.length === 0) {
-        return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
+    if (!venta?.id) {
+        return res.status(400).json({ error: "Se requiere venta con id para generar el PDF" });
     }
 
     try {
-        // ✅ OBTENER venta_referencia_id SI NO VIENE EN EL OBJETO VENTA
-        if (!venta.venta_referencia_id && venta.id) {
-            try {
-                const [ventaRows] = await db.execute(
-                    `SELECT venta_referencia_id FROM ventas WHERE id = ?`,
-                    [venta.id]
-                );
-                if (ventaRows.length > 0 && ventaRows[0].venta_referencia_id) {
-                    venta.venta_referencia_id = ventaRows[0].venta_referencia_id;
-                    console.log(`✅ venta_referencia_id obtenido desde BD: ${venta.venta_referencia_id}`);
-                }
-            } catch (error) {
-                console.warn(`⚠️ Error obteniendo venta_referencia_id:`, error.message);
-            }
+        const [ventaRows] = await db.execute('SELECT * FROM ventas WHERE id = ?', [venta.id]);
+        if (!ventaRows.length) {
+            return res.status(404).json({ error: "Venta no encontrada" });
+        }
+        venta = ventaRows[0];
+
+        const [prodRows] = await db.execute(
+            'SELECT *, descuento_porcentaje FROM ventas_cont WHERE venta_id = ?',
+            [venta.id]
+        );
+        if (prodRows.length > 0) {
+            productos = prodRows;
+        }
+
+        if (!productos || productos.length === 0) {
+            return res.status(400).json({ error: "Datos insuficientes para generar el PDF" });
         }
         
         // ✅ DETECTAR SI ES UNA NOTA
@@ -813,42 +815,22 @@ const facturarPedido = async (req, res) => {
             
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
             
-            // ✅ 4. VALIDAR/RECUPERAR IMPORTES DE CABECERA (blindaje contra payload inválido)
-            let subtotalSinIvaFinal = normalizarImporte(subtotalSinIva);
-            let ivaTotalFinal = normalizarImporte(ivaTotal);
-            let totalConIvaFinal = normalizarImporte(totalConIva);
-            const importesRecibidosValidos = (
-                Number.isFinite(subtotalSinIvaFinal) &&
-                Number.isFinite(ivaTotalFinal) &&
-                Number.isFinite(totalConIvaFinal) &&
-                subtotalSinIvaFinal >= 0 &&
-                ivaTotalFinal >= 0 &&
-                totalConIvaFinal > 0
-            );
+            // ✅ 4. IMPORTES: fuente única = suma de líneas en pedidos_cont (coherencia BD / PDF / ARCA).
+            // totalConIva del front puede ser menor (descuento global), nunca mayor que neto+IVA de líneas.
+            const lineSubtotal = productos.reduce((acc, p) => acc + (Number(p.subtotal) || 0), 0);
+            const lineIva = productos.reduce((acc, p) => acc + (Number(p.IVA) || 0), 0);
+            const lineTotal = lineSubtotal + lineIva;
 
-            if (!importesRecibidosValidos) {
-                const subtotalFallback = productos.reduce((acc, producto) => {
-                    return acc + (Number(producto.subtotal) || 0);
-                }, 0);
-                const ivaFallback = productos.reduce((acc, producto) => {
-                    return acc + (Number(producto.IVA) || 0);
-                }, 0);
-                const totalFallback = subtotalFallback + ivaFallback;
+            const subtotalSinIvaFinal = lineSubtotal;
+            const ivaTotalFinal = lineIva;
 
-                console.warn('⚠️ [Facturar Pedido] Importes inválidos recibidos. Aplicando fallback desde detalle del pedido.', {
-                    pedidoId,
-                    recibidos: { subtotalSinIva, ivaTotal, totalConIva },
-                    recalculados: {
-                        subtotalSinIva: subtotalFallback,
-                        ivaTotal: ivaFallback,
-                        totalConIva: totalFallback
-                    }
-                });
-
-                subtotalSinIvaFinal = subtotalFallback;
-                ivaTotalFinal = ivaFallback;
-                totalConIvaFinal = totalFallback;
-            }
+            const totalConIvaRaw = normalizarImporte(totalConIva);
+            const totalConIvaFinal =
+                Number.isFinite(totalConIvaRaw) &&
+                totalConIvaRaw > 0 &&
+                totalConIvaRaw <= lineTotal
+                    ? totalConIvaRaw
+                    : lineTotal;
 
             if (
                 !Number.isFinite(subtotalSinIvaFinal) ||
@@ -998,9 +980,9 @@ const facturarPedido = async (req, res) => {
             console.log(`📄 Número de factura asignado: ${numeroCompleto}`);
 
             // 4. Crear la venta CON NÚMERO DE FACTURA
-            // ✅ Política fiscal: EXENTO => exento=iva_total, no EXENTO => exento=0
+            // ✅ Política fiscal: EXENTO => exento=iva_total (desde líneas), no EXENTO => exento=0
             const esClienteExento = pedido.cliente_condicion?.toUpperCase() === 'EXENTO';
-            const montoExento = esClienteExento ? Number(ivaTotal) || 0 : 0;
+            const montoExento = esClienteExento ? ivaTotalFinal : 0;
 
             // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
             const subtotalR = roundFacturacion(subtotalSinIvaFinal);
@@ -1783,6 +1765,33 @@ const ventaDirecta = async (req, res) => {
             // ============================================
             console.log('📋 [Venta Directa] Paso 1: Creando pedido...');
             
+            // ✅ Importes desde líneas del body (fuente única); total clampado ≤ neto+IVA (descuento global).
+            const lineSubtotal = productos.reduce((acc, p) => acc + (Number(p.subtotal) || 0), 0);
+            const lineIva = productos.reduce((acc, p) => acc + (Number(p.iva) || 0), 0);
+            const lineTotal = lineSubtotal + lineIva;
+
+            const subtotalSinIvaFinal = lineSubtotal;
+            const ivaTotalFinal = lineIva;
+
+            const totalConIvaRaw = normalizarImporte(totalConIva);
+            const totalConIvaFinal =
+                Number.isFinite(totalConIvaRaw) &&
+                totalConIvaRaw > 0 &&
+                totalConIvaRaw <= lineTotal
+                    ? totalConIvaRaw
+                    : lineTotal;
+
+            if (
+                !Number.isFinite(subtotalSinIvaFinal) ||
+                !Number.isFinite(ivaTotalFinal) ||
+                !Number.isFinite(totalConIvaFinal) ||
+                subtotalSinIvaFinal < 0 ||
+                ivaTotalFinal < 0 ||
+                totalConIvaFinal <= 0
+            ) {
+                throw new Error('Importes de venta directa inválidos. No se pudo generar pedido/venta válidos.');
+            }
+
             const pedidoQuery = `
                 INSERT INTO pedidos 
                 (cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, cliente_ciudad, 
@@ -1792,15 +1801,15 @@ const ventaDirecta = async (req, res) => {
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturado', ?, ?, ?)
             `;
 
-            // ✅ Política fiscal: EXENTO => exento=iva_total, no EXENTO => exento=0
+            // ✅ Política fiscal: EXENTO => exento=iva_total (desde líneas), no EXENTO => exento=0
             const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
-            const montoExento = esClienteExento ? Number(ivaTotal) || 0 : 0;
+            const montoExento = esClienteExento ? ivaTotalFinal : 0;
 
-            // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
-            const subtotalR = roundFacturacion(subtotalSinIva);
-            const ivaTotalR = roundFacturacion(ivaTotal);
+            // ✅ Redondeo para facturación
+            const subtotalR = roundFacturacion(subtotalSinIvaFinal);
+            const ivaTotalR = roundFacturacion(ivaTotalFinal);
             const exentoR = roundFacturacion(montoExento);
-            const totalR = roundFacturacion(totalConIva);
+            const totalR = roundFacturacion(totalConIvaFinal);
             
             console.log(`💰 [Venta Directa] Monto exento final a guardar: $${montoExento.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
 

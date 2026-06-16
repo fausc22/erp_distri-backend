@@ -2,6 +2,9 @@ const db = require('./db');
 const pdfGenerator = require('../utils/pdfGenerator');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 
+/** Excluye productos cuyo nombre contiene "flete" (servicios internos, no mercadería de listados). */
+const SQL_EXCLUIR_FLETE_PRODUCTO = `AND UPPER(p.nombre) NOT LIKE '%FLETE%'`;
+
 // Función auxiliar para convertir consultas callback a promesas
 const queryPromise = (query, params = []) => {
     return new Promise((resolve, reject) => {
@@ -245,6 +248,7 @@ const generarPdfListaPrecios = async (req, res) => {
             FROM productos p
             LEFT JOIN categorias c ON p.categoria_id = c.id
             WHERE p.stock_actual > 0
+            ${SQL_EXCLUIR_FLETE_PRODUCTO}
         `;
 
         let params = [];
@@ -357,6 +361,7 @@ const generarPdfControlStockFiltro = async (req, res) => {
                 c.nombre as categoria_nombre
             FROM productos p
             LEFT JOIN categorias c ON p.categoria_id = c.id
+            WHERE UPPER(p.nombre) NOT LIKE '%FLETE%'
             ORDER BY p.stock_actual ${orderDirection}
             LIMIT ?
         `;
@@ -437,12 +442,20 @@ const generarPdfControlStockSeleccion = async (req, res) => {
         return res.status(400).json({ error: "Debe proporcionar al menos un producto" });
     }
 
+    const productosSinFlete = productos.filter(
+        (p) => !String(p.nombre || '').toUpperCase().includes('FLETE')
+    );
+
+    if (productosSinFlete.length === 0) {
+        return res.status(400).json({ error: "No hay productos válidos (se excluyen ítems de flete)" });
+    }
+
     try {
-        console.log(`📄 Generando Control de Stock para ${productos.length} productos seleccionados...`);
+        console.log(`📄 Generando Control de Stock para ${productosSinFlete.length} productos seleccionados...`);
         const startTime = Date.now();
 
         // Agrupar productos por categoría
-        const productosPorCategoria = productos.reduce((acc, producto) => {
+        const productosPorCategoria = productosSinFlete.reduce((acc, producto) => {
             const categoriaNombre = producto.categoria_nombre || 'Sin Categoría';
             if (!acc[categoriaNombre]) {
                 acc[categoriaNombre] = [];
@@ -463,7 +476,7 @@ const generarPdfControlStockSeleccion = async (req, res) => {
         // Generar PDF usando el generador con la plantilla
         const pdfBuffer = await pdfGenerator.generarControlStock({
             tipo: 'seleccion',
-            cantidad: productos.length,
+            cantidad: productosSinFlete.length,
             categorias: categoriasOrdenadas,
             productosPorCategoria
         });
@@ -474,11 +487,11 @@ const generarPdfControlStockSeleccion = async (req, res) => {
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'productos',
-            detallesAdicionales: `Control de Stock generado - selección manual - ${productos.length} productos en ${generationTime}ms`
+            detallesAdicionales: `Control de Stock generado - selección manual - ${productosSinFlete.length} productos en ${generationTime}ms`
         });
 
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `inline; filename="Control_Stock_Seleccion_${productos.length}_productos.pdf"`);
+        res.setHeader("Content-Disposition", `inline; filename="Control_Stock_Seleccion_${productosSinFlete.length}_productos.pdf"`);
         res.end(pdfBuffer);
 
         console.log('✅ Control de Stock enviado exitosamente');
@@ -604,19 +617,23 @@ const generarPdfListadoVendedores = async (req, res) => {
             const exentoCabecera = parseFloat(venta.exento) || 0;
             const totalCabecera = parseFloat(venta.total) || 0;
 
+            // Listado gerencial: A/B → subtotal (sin IVA); X (u otra letra) → total (con IVA). Mismo signo comercial.
+            const baseImputable =
+                tipoFiscal === 'A' || tipoFiscal === 'B' ? netoCabecera : totalCabecera;
+
             return {
                 fecha: venta.fecha,
                 comprobante: comprobante,
                 numero: venta.numero_factura || '-',
                 cliente: venta.cliente_nombre || 'Sin nombre',
                 cuit: venta.cliente_cuit || '-',
-                // Fuente única para reportes: cabecera fiscal de ventas con signo comercial
+                // Desglose fiscal de cabecera (sin cambiar criterio de columnas neto/exento/iva)
                 neto: netoCabecera * multiplicador,
                 exento: exentoCabecera * multiplicador,
                 iva: ivaCabecera * multiplicador,
                 percepciones: 0, // Siempre 0 según especificación
                 retenciones: 0, // Siempre 0 según especificación
-                total: totalCabecera * multiplicador
+                total: baseImputable * multiplicador
             };
         });
 

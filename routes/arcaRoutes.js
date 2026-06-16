@@ -168,17 +168,17 @@ router.post('/generar-qr', async (req, res) => {
     console.log('🔐 Datos codificados en Base64');
     
     // ✅ CONSTRUIR URL SEGÚN ESPECIFICACIÓN ARCA
-    const qrUrl = `https://www.arca.gob.ar/fe/qr/?p=${base64Data}`;
+    const qrUrl = `https://www.arca.gob.ar/fe/qr/?p=${encodeURIComponent(base64Data)}`;
     
     console.log('🔗 URL del QR:', qrUrl);
     
-    // ✅ GENERAR IMAGEN QR
-    const qrBase64 = await QRCode.toDataURL(qrUrl, {
-      errorCorrectionLevel: 'M',
-      type: 'image/png',
-      width: 200,
-      margin: 1
+    // ✅ GENERAR QR (SVG vectorial, ECC Q, quiet zone 4 módulos)
+    const svgString = await QRCode.toString(qrUrl, {
+      type: 'svg',
+      errorCorrectionLevel: 'Q',
+      margin: 4
     });
+    const qrBase64 = `data:image/svg+xml;base64,${Buffer.from(svgString).toString('base64')}`;
 
     console.log('✅ QR generado exitosamente');
 

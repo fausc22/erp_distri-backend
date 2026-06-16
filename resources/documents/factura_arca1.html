@@ -90,19 +90,13 @@
         }
         
         .original-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
             background-color: #cfe2f3;
-            padding: 8px 12px;
+            text-align: center;
+            padding: 8px;
             font-weight: bold;
             font-size: 18px;
             border: 1px solid #000;
             flex-shrink: 0;
-        }
-        .original-header .header-page-num {
-            font-size: 12px;
-            font-weight: 600;
         }
         .bill-emitter-row {
             display: table;
@@ -284,16 +278,9 @@
     </style>
 </head>
 <body>
-    <!--
-      PAGINACIÓN ARCA: encabezado idéntico en todas las páginas;
-      totales + legal + QR + CAE solo en la última; numeración Página X/Y.
-    -->
     <!-- PAGE_TEMPLATE_START -->
     <div class="factura-page {{page_class}}">
-    <div class="original-header">
-        <span>ORIGINAL</span>
-        <span class="header-page-num">Página {{page_number}}/{{page_total}}</span>
-    </div>
+    <div class="original-header">ORIGINAL</div>
     <div class="bill-container">
         <div class="bill-emitter-row">
             <div class="bill-emitter-left">
@@ -305,7 +292,7 @@
             </div>
             <div class="bill-type-container">
                 <div class="bill-type">{{tipo_comprobante}}</div>
-                <div class="bill-cod">COD. {{codigo_comprobante}}</div>
+                <div class="bill-cod">COD. 1</div>
             </div>
             <div class="bill-emitter-right">
                 <div class="text-lg">FACTURA</div>
