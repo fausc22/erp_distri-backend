@@ -79,6 +79,49 @@ class AfipConfig {
   }
 
   /**
+   * Configuración para @arcasdk/core (conexión directa a ARCA, sin app.afipsdk.com).
+   * Requiere certificado y clave PEM; crea directorio de tickets WSAA bajo backend/storage/arca-tickets.
+   *
+   * @returns {{ cuit: number, cert: string, key: string, production: boolean, useHttpsAgent: boolean, ticketPath: string }}
+   */
+  getArcaSDKConfig() {
+    const production = this.environment === 'prod';
+    const cuitStr = String(this.CUIT || '').replace(/\D/g, '');
+    const cuitNum = parseInt(cuitStr, 10);
+    if (!cuitStr || cuitStr.length !== 11 || Number.isNaN(cuitNum)) {
+      throw new Error('AFIP_CUIT debe ser un CUIT válido de 11 dígitos para @arcasdk/core');
+    }
+
+    if (!process.env.AFIP_CERT_PATH || !process.env.AFIP_KEY_PATH) {
+      throw new Error('AFIP_CERT_PATH y AFIP_KEY_PATH son obligatorios para @arcasdk/core');
+    }
+
+    const certPath = path.resolve(backendRoot, process.env.AFIP_CERT_PATH.replace(/^\.\//, ''));
+    const keyPath = path.resolve(backendRoot, process.env.AFIP_KEY_PATH.replace(/^\.\//, ''));
+
+    let cert;
+    let key;
+    try {
+      cert = fs.readFileSync(certPath, { encoding: 'utf8' });
+      key = fs.readFileSync(keyPath, { encoding: 'utf8' });
+    } catch (error) {
+      throw new Error(`Error al cargar certificados para @arcasdk/core: ${error.message}`);
+    }
+
+    const ticketPath = path.join(backendRoot, 'storage', 'arca-tickets');
+    fs.mkdirSync(ticketPath, { recursive: true });
+
+    return {
+      cuit: cuitNum,
+      cert,
+      key,
+      production,
+      useHttpsAgent: true,
+      ticketPath
+    };
+  }
+
+  /**
    * Validar que la configuración es correcta
    */
   validate() {
@@ -86,10 +129,6 @@ class AfipConfig {
 
     if (!this.CUIT) {
       errors.push('AFIP_CUIT no está configurado en .env');
-    }
-
-    if (!process.env.AFIP_ACCESS_TOKEN) {
-      errors.push('AFIP_ACCESS_TOKEN no está configurado en .env. Obtén uno desde https://app.afipsdk.com/');
     }
 
     if (this.environment === 'prod' && (!process.env.AFIP_CERT_PATH || !process.env.AFIP_KEY_PATH)) {

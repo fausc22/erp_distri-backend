@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REPORTE GERENCIAL - DISTRIBUIDORA VERTI-MAR</title>
+    <style>
+        @page {
+            size: A4 portrait;
+            margin: 12mm 10mm 12mm 10mm;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #ffffff;
+            color: #1a1a1a;
+            font-size: 11px;
+            line-height: 1.35;
+            -webkit-print-color-adjust: exact;
+            color-adjust: exact;
+        }
+
+        .container {
+            width: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        .header {
+            text-align: center;
+            border-bottom: 2px solid #2980b9;
+            padding-bottom: 8px;
+            margin-bottom: 12px;
+        }
+
+        .header .empresa {
+            font-size: 13px;
+            font-weight: bold;
+            color: #2c3e50;
+            letter-spacing: 1px;
+            margin-bottom: 2px;
+        }
+
+        .header .titulo {
+            font-size: 19px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 4px;
+        }
+
+        .header .periodo {
+            font-size: 12px;
+            font-weight: 600;
+            color: #34495e;
+        }
+
+        .header .meta {
+            font-size: 10px;
+            color: #7f8c8d;
+            margin-top: 3px;
+        }
+
+        .seccion {
+            margin-bottom: 14px;
+            page-break-inside: avoid;
+        }
+
+        .seccion-titulo {
+            background-color: #ecf0f1;
+            color: #2c3e50;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            border-left: 4px solid #2980b9;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .resumen {
+            display: table;
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 6px;
+        }
+
+        .resumen-row {
+            display: table-row;
+        }
+
+        .resumen-cell {
+            display: table-cell;
+            border: 1px solid #bdc3c7;
+            padding: 6px 8px;
+            vertical-align: top;
+            width: 50%;
+        }
+
+        .resumen-label {
+            font-size: 10px;
+            color: #7f8c8d;
+            text-transform: uppercase;
+            font-weight: bold;
+            letter-spacing: 0.4px;
+            margin-bottom: 2px;
+        }
+
+        .resumen-valor {
+            font-size: 13px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .resumen-valor.money {
+            color: #27ae60;
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 4px;
+            font-size: 11px;
+        }
+
+        .table th {
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: #ffffff;
+            font-weight: bold;
+            padding: 7px 6px;
+            text-align: center;
+            border: 1px solid #2980b9;
+            font-size: 11px;
+        }
+
+        .table td {
+            border: 1px solid #bdc3c7;
+            padding: 6px 8px;
+            vertical-align: middle;
+            font-size: 11px;
+            line-height: 1.3;
+            word-wrap: break-word;
+        }
+
+        .table tbody tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+
+        .table tbody tr:nth-child(odd) {
+            background-color: #ffffff;
+        }
+
+        .table tbody tr.row-total td {
+            background-color: #2c3e50;
+            color: #ffffff;
+            font-weight: bold;
+            border-color: #2c3e50;
+        }
+
+        .table tbody tr.row-total .money {
+            color: #ffffff;
+        }
+
+        .text-center { text-align: center; }
+        .text-right  { text-align: right; }
+        .text-left   { text-align: left; }
+
+        .money {
+            font-weight: bold;
+            color: #27ae60;
+            white-space: nowrap;
+        }
+
+        .empty {
+            color: #95a5a6;
+            font-style: italic;
+            padding: 14px 8px;
+        }
+
+        .footer {
+            margin-top: 18px;
+            padding-top: 6px;
+            border-top: 1px solid #bdc3c7;
+            text-align: center;
+            font-size: 9px;
+            color: #7f8c8d;
+        }
+
+        /* Anchos sugeridos por tabla */
+        .col-pos { width: 5%; }
+        .col-prod-nombre { width: 50%; }
+        .col-num-md { width: 12%; }
+        .col-num-sm { width: 10%; }
+        .col-money-sm { width: 14%; }
+        .col-money-md { width: 18%; }
+
+        .seccion-tablas-pares {
+            display: block;
+        }
+
+        @media print {
+            .seccion {
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="empresa">DISTRIBUIDORA VERTI-MAR</div>
+            <div class="titulo">REPORTE GERENCIAL</div>
+            <div class="periodo">Periodo: {{periodo_texto}}</div>
+            <div class="meta">Generado el {{fecha_generacion}}</div>
+        </div>
+
+        <!-- ===== RESUMEN EJECUTIVO ===== -->
+        <div class="seccion">
+            <div class="seccion-titulo">Resumen ejecutivo</div>
+            <div class="resumen">
+                <div class="resumen-row">
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Facturacion sin fletes</div>
+                        <div class="resumen-valor money">$ {{total_facturado_sin_fletes}}</div>
+                    </div>
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Ventas sin fletes</div>
+                        <div class="resumen-valor">{{cantidad_ventas_sin_fletes}}</div>
+                    </div>
+                </div>
+                <div class="resumen-row">
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Ticket promedio (sin fletes)</div>
+                        <div class="resumen-valor money">$ {{ticket_promedio_sin_fletes}}</div>
+                    </div>
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Facturacion total (incluye fletes)</div>
+                        <div class="resumen-valor money">$ {{total_facturado_global}}</div>
+                    </div>
+                </div>
+                <div class="resumen-row">
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Mejor mes</div>
+                        <div class="resumen-valor">{{mejor_mes_texto}}</div>
+                    </div>
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Mejor vendedor</div>
+                        <div class="resumen-valor">{{mejor_vendedor_texto}}</div>
+                    </div>
+                </div>
+                <div class="resumen-row">
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Producto estrella</div>
+                        <div class="resumen-valor">{{producto_estrella_texto}}</div>
+                    </div>
+                    <div class="resumen-cell">
+                        <div class="resumen-label">Ciudad top</div>
+                        <div class="resumen-valor">{{ciudad_top_texto}}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== VENTAS POR MES (sin FLETES) ===== -->
+        <div class="seccion">
+            <div class="seccion-titulo">Ventas por mes (excluye ventas con flete)</div>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th class="col-prod-nombre">Mes</th>
+                        <th class="col-num-md">Cantidad de ventas</th>
+                        <th class="col-money-md">Total facturado</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ventas_por_mes_rows}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ===== TOP 10 PRODUCTOS POR CANTIDAD ===== -->
+        <div class="seccion">
+            <div class="seccion-titulo">Top 10 productos por cantidad vendida (sin fletes)</div>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th class="col-pos">#</th>
+                        <th class="col-prod-nombre">Producto</th>
+                        <th class="col-num-md">Cantidad total</th>
+                        <th class="col-money-md">Ingresos</th>
+                        <th class="col-num-sm">En cuantas ventas</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{top_productos_rows}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ===== TOP 10 CIUDADES ===== -->
+        <div class="seccion">
+            <div class="seccion-titulo">Top 10 ciudades por cantidad de ventas</div>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th class="col-pos">#</th>
+                        <th>Ciudad</th>
+                        <th>Provincia</th>
+                        <th class="col-num-md">Cant. ventas</th>
+                        <th class="col-num-sm">Clientes</th>
+                        <th class="col-money-md">Total facturado</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{top_ciudades_rows}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ===== VENDEDORES ===== -->
+        <div class="seccion">
+            <div class="seccion-titulo">Rendimiento por vendedor</div>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Vendedor</th>
+                        <th class="col-num-md">Cant. ventas</th>
+                        <th class="col-money-md">Total vendido</th>
+                        <th class="col-money-sm">Ticket prom.</th>
+                        <th class="col-num-sm">Primera</th>
+                        <th class="col-num-sm">Ultima</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{vendedores_rows}}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="footer">
+            Documento generado automaticamente por el sistema VERTI-MAR | {{fecha_generacion}}
+        </div>
+    </div>
+</body>
+</html>

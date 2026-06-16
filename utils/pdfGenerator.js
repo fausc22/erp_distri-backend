@@ -50,9 +50,28 @@ class PdfGenerator {
     formatearFechaFiscalQR(venta) {
         const fuenteFecha = venta?.fecha_fiscal || venta?.cae_solicitud_fecha || venta?.fecha;
         if (!fuenteFecha) return null;
+
+        if (typeof fuenteFecha === 'string') {
+            const match = fuenteFecha.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+            if (match) return match[1];
+        }
+
+        if (fuenteFecha instanceof Date && !isNaN(fuenteFecha.getTime())) {
+            // Las columnas DATE de MySQL llegan como Date midnight UTC en servidores con timezone: 'local' = UTC.
+            // Usar métodos UTC evita el desplazamiento -3h que daría un día menos en Argentina.
+            const y = fuenteFecha.getUTCFullYear();
+            const m = String(fuenteFecha.getUTCMonth() + 1).padStart(2, '0');
+            const d = String(fuenteFecha.getUTCDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
         const fecha = new Date(fuenteFecha);
         if (isNaN(fecha.getTime())) return null;
-        return fecha.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
+        // Mismo criterio: extraer fecha UTC para no perder un día en servidores UTC.
+        const y = fecha.getUTCFullYear();
+        const m = String(fecha.getUTCMonth() + 1).padStart(2, '0');
+        const d = String(fecha.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
     }
 
     obtenerCuitEmisorQR() {
@@ -262,7 +281,7 @@ class PdfGenerator {
             await page.setViewport({
                 width: 794,
                 height: 1123,
-                deviceScaleFactor: 1
+                deviceScaleFactor: 2
             });
             
             // Configurar contenido HTML
@@ -406,7 +425,7 @@ class PdfGenerator {
                 ptoVta: puntoVenta,                               // Punto de venta
                 tipoCmp: tipoComprobante,                        // Tipo comprobante
                 nroCmp: numeroComprobante,                        // Número de comprobante
-                importe: parseFloat(venta.total),                // Importe total
+                importe: parseFloat(venta.importe_afip ?? venta.total),                // Importe total (AFIP)
                 moneda: "PES",                                   // Moneda (PES = Pesos)
                 ctz: 1,                                          // Cotización (1 para pesos)
                 tipoDocRec: tipoDocReceptor,                     // Tipo doc receptor
@@ -525,7 +544,7 @@ class PdfGenerator {
                 ptoVta: puntoVenta,
                 tipoCmp: tipoComprobante,
                 nroCmp: numeroComprobante,
-                importe: parseFloat(venta.total),
+                importe: parseFloat(venta.importe_afip ?? venta.total),
                 moneda: "PES",
                 ctz: 1,
                 tipoDocRec: tipoDocReceptor,
@@ -544,16 +563,16 @@ class PdfGenerator {
             console.log('📋 URL del QR:', qrUrl);
             console.log('📋 JSON QR:', jsonString);
             
-            // ✅ GENERAR QR
-            const qrDataURL = await QRCode.toDataURL(qrUrl, {
-                errorCorrectionLevel: 'M',
-                type: 'image/png',
-                width: 200,
-                margin: 1
+            // ✅ GENERAR QR (SVG vectorial, ECC Q, quiet zone 4 módulos)
+            const svgString = await QRCode.toString(qrUrl, {
+                type: 'svg',
+                errorCorrectionLevel: 'Q',
+                margin: 4
             });
+            const svgBase64 = Buffer.from(svgString).toString('base64');
             
             console.log('✅ QR generado localmente correctamente');
-            return qrDataURL;
+            return `data:image/svg+xml;base64,${svgBase64}`;
             
         } catch (error) {
             console.error('❌ Error generando QR local:', error);
@@ -684,7 +703,7 @@ class PdfGenerator {
             await page.setViewport({
                 width: 794,
                 height: 1123,
-                deviceScaleFactor: 1
+                deviceScaleFactor: 2
             });
 
             await page.setContent(htmlMedicion, {
@@ -1100,7 +1119,11 @@ class PdfGenerator {
     const totalFacturaCabecera = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : null;
     const totalesVisualesFacturaB = esFacturaB
       ? this.construirTotalesVisualesRedondeados(
-          productos.map((p) => (parseFloat(p.subtotal) || 0) + (parseFloat(p.iva || 0))),
+          productos.map((p) => {
+            const subtotalLinea = parseFloat(p.subtotal) || 0;
+            const ivaLinea = parseFloat(p.iva ?? p.IVA ?? p.iva_calculado ?? 0) || 0;
+            return subtotalLinea + ivaLinea;
+          }),
           totalFacturaCabecera
         )
       : [];
@@ -1113,7 +1136,7 @@ class PdfGenerator {
     const rowsByItem = productos.map((producto, index) => {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotalItem = parseFloat(producto.subtotal) || 0;
-      const ivaItem = parseFloat(producto.iva || 0);
+      const ivaItem = parseFloat(producto.iva ?? producto.IVA ?? producto.iva_calculado ?? 0) || 0;
       const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const cantidadFormateada = this.formatearCantidad(cantidad);
 
@@ -2400,14 +2423,16 @@ class PdfGenerator {
 
         htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
-        // Reemplazar totales
+        // Totales tabla detalle (NETO/EXENTO/IVA = cabecera fiscal; última columna = regla A/B vs X por fila)
+        const importeFinal = Number(datos.totales.total) || 0;
         htmlTemplate = htmlTemplate
             .replace(/{{total_neto}}/g, this.formatearMoneda(datos.totales.neto))
             .replace(/{{total_exento}}/g, this.formatearMoneda(datos.totales.exento))
             .replace(/{{total_iva}}/g, this.formatearMoneda(datos.totales.iva))
             .replace(/{{total_percepciones}}/g, this.formatearMoneda(datos.totales.percepciones))
             .replace(/{{total_retenciones}}/g, this.formatearMoneda(datos.totales.retenciones))
-            .replace(/{{total_total}}/g, this.formatearMoneda(datos.totales.total));
+            .replace(/{{total_total}}/g, this.formatearMoneda(datos.totales.total))
+            .replace(/{{importe_final}}/g, this.formatearMoneda(importeFinal));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }
@@ -2754,6 +2779,180 @@ class PdfGenerator {
 
         const totalNotaMostrado = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : totalNota;
         htmlTemplate = htmlTemplate.replace(/{{total}}/g, this.formatearMoneda(totalNotaMostrado));
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
+    // ============================================================
+    // REPORTE GERENCIAL: documento ejecutivo, sin graficos ni iconos.
+    // Linea visual alineada con ranking_ventas.html / libro_iva.html.
+    // ============================================================
+    async generarReporteGerencial(data) {
+        const templatePath = path.join(this.templatesPath, 'reporte_gerencial.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla reporte_gerencial.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        const {
+            periodo = {},
+            resumen = {},
+            ventas_por_mes = [],
+            top_productos = [],
+            top_ciudades = [],
+            vendedores = []
+        } = data || {};
+
+        const formatMoney = (valor) => this.formatearMoneda(valor);
+        const formatCantidad = (valor) => this.formatearCantidad(valor);
+        const formatNumero = (valor) => {
+            const num = Number(valor || 0);
+            return num.toLocaleString('es-AR');
+        };
+
+        const mesesEs = [
+            'Enero','Febrero','Marzo','Abril','Mayo','Junio',
+            'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'
+        ];
+        const formatearMesYYYYMM = (yyyymm) => {
+            if (!yyyymm) return '-';
+            const [y, m] = String(yyyymm).split('-');
+            const mIdx = parseInt(m, 10) - 1;
+            if (!y || isNaN(mIdx) || mIdx < 0 || mIdx > 11) return yyyymm;
+            return `${mesesEs[mIdx]} ${y}`;
+        };
+
+        const fechaGeneracion = new Date().toLocaleString('es-AR', {
+            timeZone: 'America/Argentina/Buenos_Aires',
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+        });
+
+        const periodoTexto = `${this.formatearFecha(periodo.desde)} al ${this.formatearFecha(periodo.hasta)}`;
+
+        // Tabla 1: Ventas por mes
+        let totalVentasMes = 0;
+        let totalFacturadoMes = 0;
+        let ventasPorMesRows = '';
+        if (ventas_por_mes.length > 0) {
+            ventasPorMesRows = ventas_por_mes.map(r => {
+                totalVentasMes += Number(r.cantidad_ventas || 0);
+                totalFacturadoMes += Number(r.total_facturado || 0);
+                return `
+                    <tr>
+                        <td>${formatearMesYYYYMM(r.mes)}</td>
+                        <td class="text-center">${formatNumero(r.cantidad_ventas)}</td>
+                        <td class="text-right money">$ ${formatMoney(r.total_facturado)}</td>
+                    </tr>
+                `;
+            }).join('');
+            ventasPorMesRows += `
+                <tr class="row-total">
+                    <td><strong>TOTAL</strong></td>
+                    <td class="text-center"><strong>${formatNumero(totalVentasMes)}</strong></td>
+                    <td class="text-right money"><strong>$ ${formatMoney(totalFacturadoMes)}</strong></td>
+                </tr>
+            `;
+        } else {
+            ventasPorMesRows = '<tr><td colspan="3" class="text-center empty">Sin ventas en el periodo</td></tr>';
+        }
+
+        // Tabla 2: Top 10 productos por cantidad
+        let topProductosRows = '';
+        if (top_productos.length > 0) {
+            topProductosRows = top_productos.map((r, idx) => `
+                <tr>
+                    <td class="text-center">${idx + 1}</td>
+                    <td>${r.producto_nombre || '-'}</td>
+                    <td class="text-center">${formatCantidad(r.total_cantidad)}</td>
+                    <td class="text-right money">$ ${formatMoney(r.total_ingresos)}</td>
+                    <td class="text-center">${formatNumero(r.en_cuantas_ventas)}</td>
+                </tr>
+            `).join('');
+        } else {
+            topProductosRows = '<tr><td colspan="5" class="text-center empty">Sin datos de productos</td></tr>';
+        }
+
+        // Tabla 3: Top 10 ciudades por cantidad de ventas
+        let topCiudadesRows = '';
+        if (top_ciudades.length > 0) {
+            topCiudadesRows = top_ciudades.map((r, idx) => `
+                <tr>
+                    <td class="text-center">${idx + 1}</td>
+                    <td>${r.ciudad || '-'}</td>
+                    <td>${r.provincia || '-'}</td>
+                    <td class="text-center">${formatNumero(r.cantidad_ventas)}</td>
+                    <td class="text-center">${formatNumero(r.clientes_unicos)}</td>
+                    <td class="text-right money">$ ${formatMoney(r.total_facturado)}</td>
+                </tr>
+            `).join('');
+        } else {
+            topCiudadesRows = '<tr><td colspan="6" class="text-center empty">Sin datos de ciudades</td></tr>';
+        }
+
+        // Tabla 4: Vendedores (todos)
+        let totalVendidoVend = 0;
+        let totalVentasVend = 0;
+        let vendedoresRows = '';
+        if (vendedores.length > 0) {
+            vendedoresRows = vendedores.map(r => {
+                totalVendidoVend += Number(r.total_vendido || 0);
+                totalVentasVend += Number(r.cantidad_ventas || 0);
+                return `
+                    <tr>
+                        <td>${r.vendedor || '-'}</td>
+                        <td class="text-center">${formatNumero(r.cantidad_ventas)}</td>
+                        <td class="text-right money">$ ${formatMoney(r.total_vendido)}</td>
+                        <td class="text-right">$ ${formatMoney(r.ticket_promedio)}</td>
+                        <td class="text-center">${this.formatearFecha(r.primera_venta)}</td>
+                        <td class="text-center">${this.formatearFecha(r.ultima_venta)}</td>
+                    </tr>
+                `;
+            }).join('');
+            vendedoresRows += `
+                <tr class="row-total">
+                    <td><strong>TOTAL</strong></td>
+                    <td class="text-center"><strong>${formatNumero(totalVentasVend)}</strong></td>
+                    <td class="text-right money"><strong>$ ${formatMoney(totalVendidoVend)}</strong></td>
+                    <td colspan="3"></td>
+                </tr>
+            `;
+        } else {
+            vendedoresRows = '<tr><td colspan="6" class="text-center empty">Sin datos de vendedores</td></tr>';
+        }
+
+        // Resumen
+        const mejorMesTexto = resumen.mejor_mes
+            ? `${formatearMesYYYYMM(resumen.mejor_mes.mes)} - $ ${formatMoney(resumen.mejor_mes.total_facturado)} (${formatNumero(resumen.mejor_mes.cantidad_ventas)} ventas)`
+            : '-';
+        const mejorVendedorTexto = resumen.mejor_vendedor
+            ? `${resumen.mejor_vendedor.vendedor} - $ ${formatMoney(resumen.mejor_vendedor.total_vendido)}`
+            : '-';
+        const productoEstrellaTexto = resumen.producto_estrella
+            ? `${resumen.producto_estrella.producto_nombre} (${formatCantidad(resumen.producto_estrella.total_cantidad)} u.)`
+            : '-';
+        const ciudadTopTexto = resumen.ciudad_top
+            ? `${resumen.ciudad_top.ciudad} - ${formatNumero(resumen.ciudad_top.cantidad_ventas)} ventas`
+            : '-';
+
+        htmlTemplate = htmlTemplate
+            .replace(/{{periodo_texto}}/g, periodoTexto)
+            .replace(/{{fecha_generacion}}/g, fechaGeneracion)
+            .replace(/{{total_facturado_sin_fletes}}/g, formatMoney(resumen.total_facturado_sin_fletes))
+            .replace(/{{cantidad_ventas_sin_fletes}}/g, formatNumero(resumen.cantidad_ventas_sin_fletes))
+            .replace(/{{ticket_promedio_sin_fletes}}/g, formatMoney(resumen.ticket_promedio_sin_fletes))
+            .replace(/{{total_facturado_global}}/g, formatMoney(resumen.total_facturado_global))
+            .replace(/{{cantidad_ventas_global}}/g, formatNumero(resumen.cantidad_ventas_global))
+            .replace(/{{mejor_mes_texto}}/g, mejorMesTexto)
+            .replace(/{{mejor_vendedor_texto}}/g, mejorVendedorTexto)
+            .replace(/{{producto_estrella_texto}}/g, productoEstrellaTexto)
+            .replace(/{{ciudad_top_texto}}/g, ciudadTopTexto)
+            .replace(/{{ventas_por_mes_rows}}/g, ventasPorMesRows)
+            .replace(/{{top_productos_rows}}/g, topProductosRows)
+            .replace(/{{top_ciudades_rows}}/g, topCiudadesRows)
+            .replace(/{{vendedores_rows}}/g, vendedoresRows);
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }

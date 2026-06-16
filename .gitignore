@@ -16,3 +16,6 @@ yarn.lock
 
 erp_distri-structure.sql
 arca-microservice/certs/
+
+# Tickets WSAA generados en runtime (@arcasdk/core)
+storage/arca-tickets/
