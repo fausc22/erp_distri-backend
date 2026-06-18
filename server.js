@@ -198,7 +198,7 @@ app.get('/health', async (req, res) => {
         const startTime = Date.now();
         
         // Test de conexión a BD
-        const db = require('./controllers/dbPromise');
+        const db = require('./db');
         const dbStartTime = Date.now();
         await db.execute('SELECT 1');
         const dbResponseTime = Date.now() - dbStartTime;
@@ -252,7 +252,7 @@ app.get('/health', async (req, res) => {
         let dbError = error.message;
         
         try {
-            const db = require('./controllers/dbPromise');
+            const db = require('./db');
             const dbStatusInfo = db.getStatus();
             if (dbStatusInfo.poolExists && !dbStatusInfo.isConnected) {
                 dbStatus = '❌ Pool inicializado pero desconectado';
@@ -411,7 +411,7 @@ const gracefulShutdown = async (signal) => {
         });
         
         // Cerrar conexiones de base de datos
-        const db = require('./controllers/dbPromise');
+        const db = require('./db');
         await db.end();
         console.log('✅ Conexión a base de datos cerrada');
         

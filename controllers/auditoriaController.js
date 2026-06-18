@@ -1,5 +1,5 @@
 // controllers/auditoriaController.js - VERSIÓN CORREGIDA CON PARÁMETROS SEGUROS
-const db = require('./dbPromise');
+const db = require('../db');
 
 /**
  * Obtener registros de auditoría - CON PARÁMETROS SEGUROS Y LIMIT/OFFSET CORREGIDOS

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REPORTE FLETES - DISTRIBUIDORA VERTI-MAR</title>
+    <style>
+        @page {
+            size: A4 landscape;
+            margin: 8mm 6mm 8mm 6mm;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            font-size: 10px;
+            color: #1a1a1a;
+        }
+
+        .container {
+            width: 100%;
+            margin: 0 auto;
+            padding: 8px;
+            border: 1px solid #000;
+            box-sizing: border-box;
+        }
+
+        .header {
+            text-align: center;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .header2 {
+            text-align: center;
+            font-size: 15px;
+            font-weight: bold;
+            margin-bottom: 6px;
+            text-decoration: underline;
+        }
+
+        .header3 {
+            text-align: center;
+            font-size: 12px;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .info {
+            font-size: 10px;
+            line-height: 1.4;
+            border: 1px solid #666;
+            background-color: #f9f9f9;
+            padding: 8px 10px;
+            margin-bottom: 12px;
+        }
+
+        .info p {
+            margin: 3px 0;
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            font-size: 9px;
+        }
+
+        .table th,
+        .table td {
+            border: 1px solid #333;
+            padding: 4px 6px;
+            line-height: 1.3;
+            vertical-align: middle;
+        }
+
+        .table th {
+            background-color: #d9d9d9;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .total-row {
+            font-weight: bold;
+            background-color: #e8e8e8;
+            border-top: 2px solid #000 !important;
+        }
+
+        .footer {
+            margin-top: 14px;
+            text-align: center;
+            font-style: italic;
+            font-size: 9px;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">DISTRIBUIDORA VERTI-MAR SRL</div>
+        <div class="header2">REPORTE MENSUAL DE FLETES</div>
+        <div class="header3">Período: {{mes}}/{{anio}}</div>
+
+        <div class="info">
+            <p><strong>Comprobantes con flete:</strong> {{cantidad_comprobantes}}</p>
+            <p><strong>Líneas de flete incluidas:</strong> {{cantidad_lineas}}</p>
+            <p><strong>Criterio:</strong> solo líneas con producto cuyo nombre contiene "FLETE".</p>
+        </div>
+
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>FECHA</th>
+                    <th>COMPROBANTE</th>
+                    <th>NÚMERO</th>
+                    <th>CLIENTE</th>
+                    <th>CUIT/DNI</th>
+                    <th>PRODUCTO FLETE</th>
+                    <th>CANTIDAD</th>
+                    <th>NETO</th>
+                    <th>IVA</th>
+                    <th>TOTAL</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{items}}
+                <tr class="total-row">
+                    <td colspan="7" style="text-align: right; font-weight: bold;">TOTALES:</td>
+                    <td style="text-align: right; white-space: nowrap;">$ {{total_neto}}</td>
+                    <td style="text-align: right; white-space: nowrap;">$ {{total_iva}}</td>
+                    <td style="text-align: right; white-space: nowrap;">$ {{total_total}}</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="footer">
+            <p>Reporte de fletes generado electrónicamente - Distribuidora Verti-Mar SRL</p>
+            <p>Montos calculados desde líneas de detalle de venta filtradas por "FLETE".</p>
+        </div>
+    </div>
+</body>
+</html>

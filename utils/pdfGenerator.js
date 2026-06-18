@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const QRCode = require('qrcode');
-const db = require('../controllers/db.js');   
+const db = require('../db/legacyAdapter');
 
 // URL del microservicio ARCA (desde .env)
 const ARCA_MICROSERVICE_URL = process.env.ARCA_MICROSERVICE_URL;
@@ -2256,6 +2256,52 @@ class PdfGenerator {
             .replace(/{{desglose_total_iva}}/g, this.formatearMoneda(datos.totales.iva))
             .replace(/{{desglose_total_percepciones}}/g, this.formatearMoneda(datos.totales.percepciones))
             .replace(/{{desglose_total_total}}/g, this.formatearMoneda(datos.totales.total));
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
+    // ✅ GENERAR PDF - Reporte mensual de fletes
+    async generarReporteFletes(datos) {
+        const templatePath = path.join(this.templatesPath, 'reporte_fletes.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla reporte_fletes.html no encontrada');
+        }
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+
+        const mesesNombres = [
+            'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+            'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+        ];
+        const mesNombre = mesesNombres[parseInt(datos.mes) - 1];
+
+        htmlTemplate = htmlTemplate
+            .replace(/{{mes}}/g, mesNombre)
+            .replace(/{{anio}}/g, datos.anio)
+            .replace(/{{cantidad_comprobantes}}/g, String(datos.cantidadComprobantes || 0))
+            .replace(/{{cantidad_lineas}}/g, String((datos.lineas || []).length));
+
+        const itemsHTML = (datos.lineas || []).map(item => `
+            <tr>
+                <td>${this.formatearFecha(item.fecha)}</td>
+                <td>${item.comprobante}</td>
+                <td>${item.numero}</td>
+                <td>${item.cliente}</td>
+                <td>${item.cuit}</td>
+                <td>${item.producto}</td>
+                <td style="text-align: right; white-space: nowrap;">${(parseFloat(item.cantidad) || 0).toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>
+                <td style="text-align: right; white-space: nowrap;">$ ${this.formatearMoneda(item.neto)}</td>
+                <td style="text-align: right; white-space: nowrap;">$ ${this.formatearMoneda(item.iva)}</td>
+                <td style="text-align: right; white-space: nowrap;">$ ${this.formatearMoneda(item.total)}</td>
+            </tr>
+        `).join('');
+
+        htmlTemplate = htmlTemplate
+            .replace(/{{items}}/g, itemsHTML)
+            .replace(/{{total_neto}}/g, this.formatearMoneda(datos.totales.neto))
+            .replace(/{{total_iva}}/g, this.formatearMoneda(datos.totales.iva))
+            .replace(/{{total_total}}/g, this.formatearMoneda(datos.totales.total));
 
         return await this.generatePdfFromHtml(htmlTemplate);
     }

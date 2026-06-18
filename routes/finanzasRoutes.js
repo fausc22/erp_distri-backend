@@ -109,7 +109,7 @@ router.get('/egresos/detalle-egreso/:egresoId',
 
 // Rutas para reportes financieros (solo gerentes para algunos)
 router.get('/balance-general', 
-    requireManager,
+    requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'movimiento_fondos', incluirQuery: true }),
     finanzasController.obtenerBalanceGeneral
 );

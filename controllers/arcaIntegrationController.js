@@ -1,4 +1,4 @@
-const db = require('./db.js');
+const db = require('../db/legacyAdapter');
 const { sincronizarNumeroAprobado } = require('../utils/numeracionARCA');
 const { validarCuit } = require('../utils/validadoresCliente');
 const { roundFacturacion } = require('../utils/rounding');

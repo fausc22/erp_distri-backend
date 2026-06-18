@@ -1,5 +1,5 @@
 
-const db = require('../controllers/dbPromise');
+const db = require('../db');
 
 /**
  * Obtiene la dirección IP real del cliente

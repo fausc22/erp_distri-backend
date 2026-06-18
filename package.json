@@ -6,7 +6,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "discord-resumen": "node scripts/discord-resumen-diario.js",
-    "test": "node utils/rounding.test.js",
+    "test": "node utils/rounding.test.js && node utils/notaPedidoPdf.test.js && node tests/compras.registrarCompra.test.js && node tests/pedidos.nuevoPedido.test.js && node tests/ventas.facturarPedido.test.js && node tests/finanzas.transferencia.test.js && node tests/read.consistency.test.js && node tests/concurrency.guards.test.js && node tests/db.pagination.test.js && node tests/finanzas.consistency.test.js",
     "test:nota-pedido": "node utils/notaPedidoPdf.test.js",
     "test:nota-pedido-unit": "SKIP_PDF_GENERATE=1 node utils/notaPedidoPdf.test.js",
     "test:arca-homo": "node arca-microservice/scripts/smoke-arca-homo.mjs",

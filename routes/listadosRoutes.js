@@ -11,6 +11,13 @@ router.post('/generarpdf-libro-iva',
     listadosController.generarPdfLibroIva
 );
 
+// Ruta para generar PDF del Reporte de Fletes mensual
+router.post('/generarpdf-reporte-fletes',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
+    listadosController.generarPdfReporteFletes
+);
+
 // Ruta para generar PDF de Lista de Precios (por categorías)
 router.post('/generarpdf-lista-precios',
     requireEmployee,

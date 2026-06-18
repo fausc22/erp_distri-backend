@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const db = require('./dbPromise');
+const db = require('../db');
 const { auditarAuth, limpiarDatosSensibles } = require('../middlewares/auditoriaMiddleware');
 
 // ✅ FASE 5: Política nueva de expiración + rotación de refresh token

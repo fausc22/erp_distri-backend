@@ -1,5 +1,5 @@
 const bcrypt = require('bcryptjs');
-const db = require('./dbPromise');
+const db = require('../db');
 const { auditarOperacion, obtenerDatosAnteriores, limpiarDatosSensibles } = require('../middlewares/auditoriaMiddleware');
 
 // Crear nuevo empleado

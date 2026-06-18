@@ -56,8 +56,8 @@ if (process.env.NODE_ENV === 'development') {
         soloGerentes,
         async (req, res) => {
             try {
-                const dbStatus = require('../controllers/dbPromise').getStatus();
-                const poolStats = await require('../controllers/dbPromise').getPoolStats();
+                const dbStatus = require('../db').getStatus();
+                const poolStats = await require('../db').getPoolStats();
                 
                 res.json({
                     success: true,
