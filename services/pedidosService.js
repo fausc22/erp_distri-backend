@@ -1,6 +1,7 @@
 const db = require('../db/legacyAdapter');
 const { parsePagination, parseLimit } = require('../utils/pagination');
 const { withTransaction } = require('../db/transaction');
+const { query: cQuery } = require('../db/connectionQuery');
 const pedidosRepository = require('../repositories/pedidosRepository');
 const axios = require('axios');
 const dotenv = require('dotenv');
@@ -122,17 +123,9 @@ const canEditPedido = (pedido, user) => {
 };
 
 /** Queries dentro de una transacción MySQL (misma conexión). */
-const queryPromiseWithConnection = (connection, query, params) => {
-    return new Promise((resolve, reject) => {
-        connection.query(query, params, (err, results) => {
-            if (err) {
-                console.error('❌ Error en query (pedidos tx):', err.message);
-                reject(err);
-            } else {
-                resolve(results);
-            }
-        });
-    });
+const queryPromiseWithConnection = async (connection, query, params) => {
+    const [results] = await connection.query(query, params);
+    return results;
 };
 
 
@@ -233,73 +226,53 @@ const buscarProducto = (req, res) => {
  * Actualiza stock de forma atómica (evita lost-update entre lecturas concurrentes).
  * @param {object|null} connection Conexión de transacción; si es null usa el pool global.
  */
-const actualizarStockProducto = (productoId, cantidadCambio, motivo = 'pedido', connection = null) => {
-    return new Promise((resolve, reject) => {
-        const runner = connection || db;
-        const delta = parseFloat(cantidadCambio);
+const actualizarStockProducto = async (productoId, cantidadCambio, motivo = 'pedido', connection = null) => {
+    const delta = parseFloat(cantidadCambio);
 
-        if (Number.isNaN(delta)) {
-            return reject(new Error(`Cantidad de stock inválida para producto ${productoId}`));
-        }
+    if (Number.isNaN(delta)) {
+        throw new Error(`Cantidad de stock inválida para producto ${productoId}`);
+    }
 
-        if (delta < 0) {
-            const sql = `
-                UPDATE productos
-                SET stock_actual = stock_actual + ?
-                WHERE id = ? AND stock_actual + ? >= 0
-            `;
-            runner.query(sql, [delta, productoId, delta], (err, result) => {
-                if (err) {
-                    console.error(`Error al actualizar stock (atómico) producto ${productoId}:`, err);
-                    return reject(err);
-                }
-                if (!result || result.affectedRows === 0) {
-                    runner.query(
-                        `SELECT id, stock_actual FROM productos WHERE id = ?`,
-                        [productoId],
-                        (err2, rows) => {
-                            if (err2) return reject(err2);
-                            if (!rows || rows.length === 0) {
-                                return reject(new Error(`Producto ${productoId} no encontrado`));
-                            }
-                            const stockActual = rows[0].stock_actual;
-                            return reject(
-                                new Error(`Stock insuficiente. Stock disponible: ${stockActual}`)
-                            );
-                        }
-                    );
-                    return;
-                }
-                console.log(
-                    `✅ Stock actualizado (atómico) - Producto: ${productoId}, Cambio: ${delta}, Motivo: ${motivo}`
-                );
-                resolve(result);
-            });
-            return;
-        }
-
-        const sqlInc = `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`;
-        runner.query(sqlInc, [delta, productoId], (err, result) => {
-            if (err) {
-                console.error(`Error al incrementar stock producto ${productoId}:`, err);
-                return reject(err);
-            }
-            if (!result || result.affectedRows === 0) {
-                runner.query(`SELECT id FROM productos WHERE id = ?`, [productoId], (err2, rows) => {
-                    if (err2) return reject(err2);
-                    if (!rows || rows.length === 0) {
-                        return reject(new Error(`Producto ${productoId} no encontrado`));
-                    }
-                    return reject(new Error(`No se pudo actualizar stock del producto ${productoId}`));
-                });
-                return;
-            }
-            console.log(
-                `✅ Stock incrementado - Producto: ${productoId}, Cambio: +${delta}, Motivo: ${motivo}`
+    if (delta < 0) {
+        const sql = `
+            UPDATE productos
+            SET stock_actual = stock_actual + ?
+            WHERE id = ? AND stock_actual + ? >= 0
+        `;
+        const result = await cQuery(sql, [delta, productoId, delta], connection);
+        if (!result?.affectedRows) {
+            const rows = await cQuery(
+                `SELECT id, stock_actual FROM productos WHERE id = ?`,
+                [productoId],
+                connection
             );
-            resolve(result);
-        });
-    });
+            if (!rows?.length) {
+                throw new Error(`Producto ${productoId} no encontrado`);
+            }
+            throw new Error(`Stock insuficiente. Stock disponible: ${rows[0].stock_actual}`);
+        }
+        console.log(
+            `✅ Stock actualizado (atómico) - Producto: ${productoId}, Cambio: ${delta}, Motivo: ${motivo}`
+        );
+        return result;
+    }
+
+    const result = await cQuery(
+        `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
+        [delta, productoId],
+        connection
+    );
+    if (!result?.affectedRows) {
+        const rows = await cQuery(`SELECT id FROM productos WHERE id = ?`, [productoId], connection);
+        if (!rows?.length) {
+            throw new Error(`Producto ${productoId} no encontrado`);
+        }
+        throw new Error(`No se pudo actualizar stock del producto ${productoId}`);
+    }
+    console.log(
+        `✅ Stock incrementado - Producto: ${productoId}, Cambio: +${delta}, Motivo: ${motivo}`
+    );
+    return result;
 };
 
 const INSERT_PEDIDO_QUERY = `
@@ -1786,14 +1759,10 @@ const recalcularYActualizarTotalesPedido = async (
     condicionIvaCliente = null,
     connection = null
 ) => {
-    const execSql = (sql, params = []) =>
-        new Promise((resolve, reject) => {
-            const runner = connection || db;
-            runner.query(sql, params, (err, results) => {
-                if (err) reject(err);
-                else resolve(results);
-            });
-        });
+    const execSql = async (sql, params = []) => {
+        const [rows] = await (connection || db.pool).query(sql, params);
+        return rows;
+    };
 
     let condicionParaExento = condicionIvaCliente;
     if (!condicionParaExento) {

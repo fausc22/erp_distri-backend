@@ -724,21 +724,9 @@ const facturarPedido = async (req, res) => {
                 const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
                 const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorHash.id]);
                 const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
-                
-                // Confirmar transacción antes de responder
-                await new Promise((resolve, reject) => {
-                    connection.commit((err) => {
-                        if (err) {
-                            console.error('❌ Error confirmando transacción:', err);
-                            return reject(err);
-                        }
-                        connection.release();
-                        resolve();
-                    });
-                });
-                
+
                 console.log(`✅ Retornando venta existente por hash ID ${ventaExistentePorHash.id}`);
-                
+
                 // Auditar detección de duplicado
                 try {
                     await auditarOperacion(req, {
@@ -750,8 +738,9 @@ const facturarPedido = async (req, res) => {
                 } catch (auditError) {
                     console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
                 }
-                
-                return res.json({
+
+                return {
+                    statusCode: 200,
                     success: true,
                     message: 'Esta facturación ya fue procesada anteriormente',
                     existing: true,
@@ -766,7 +755,7 @@ const facturarPedido = async (req, res) => {
                         requiereCAE: ventaExistentePorHash.tipo_f !== 'X',
                         pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
                     }
-                });
+                };
             }
             
             // ✅ 7. VERIFICAR VENTA EXISTENTE POR PEDIDO (idempotencia por entidad)
@@ -786,21 +775,9 @@ const facturarPedido = async (req, res) => {
                     await queryPromiseWithConnection(connection, actualizarPedidoQuery, [pedidoId]);
                     console.log('📋 Estado del pedido actualizado a "Facturado"');
                 }
-                
-                // Confirmar transacción antes de responder
-                await new Promise((resolve, reject) => {
-                    connection.commit((err) => {
-                        if (err) {
-                            console.error('❌ Error confirmando transacción:', err);
-                            return reject(err);
-                        }
-                        connection.release();
-                        resolve();
-                    });
-                });
-                
+
                 console.log(`✅ Retornando venta existente por pedido ID ${ventaExistentePorPedido.id}`);
-                
+
                 // Auditar detección de duplicado
                 try {
                     await auditarOperacion(req, {
@@ -812,8 +789,9 @@ const facturarPedido = async (req, res) => {
                 } catch (auditError) {
                     console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
                 }
-                
-                return res.json({
+
+                return {
+                    statusCode: 200,
                     success: true,
                     message: 'Este pedido ya fue facturado anteriormente',
                     existing: true,
@@ -828,7 +806,7 @@ const facturarPedido = async (req, res) => {
                         requiereCAE: ventaExistentePorPedido.tipo_f !== 'X',
                         pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
                     }
-                });
+                };
             }
 
             // ✅ 8. OBTENER SIGUIENTE NÚMERO DE FACTURA (solo si no existe venta)
@@ -1074,87 +1052,54 @@ const facturarPedido = async (req, res) => {
     }
 };
 
-const queryPromiseWithConnection = (connection, query, params) => {
-    return new Promise((resolve, reject) => {
-        connection.query(query, params, (err, results) => {
-            if (err) {
-                console.error('❌ Error en query:', err.message);
-                console.error('📄 Query:', query);
-                console.error('📋 Parámetros:', params);
-                reject(err);
-            } else {
-                resolve(results);
-            }
-        });
-    });
+const queryPromiseWithConnection = async (connection, query, params) => {
+    const [results] = await connection.query(query, params);
+    return results;
 };
 
-// ✅ FUNCIÓN PARA REMITO CON CONNECTION
-const registrarRemitoPromiseWithConnection = (connection, pedidoData) => {
-    return new Promise((resolve, reject) => {
-        const { 
-            venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
-            cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
-            estado, observaciones, empleado_id, empleado_nombre 
-        } = pedidoData;
+// FUNCIÓN PARA REMITO CON CONNECTION
+const registrarRemitoPromiseWithConnection = async (connection, pedidoData) => {
+    const {
+        venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit,
+        cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia,
+        estado, observaciones, empleado_id, empleado_nombre
+    } = pedidoData;
 
-        const registrarRemitoQuery = `
-            INSERT INTO remitos
-            (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
-             cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
-             estado, observaciones, empleado_id, empleado_nombre)
-            VALUES 
-            (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
+    const registrarRemitoQuery = `
+        INSERT INTO remitos
+        (venta_id, fecha, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit,
+         cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia,
+         estado, observaciones, empleado_id, empleado_nombre)
+        VALUES
+        (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
 
-        const remitoValues = [
-            venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit, 
-            cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia, 
-            estado, observaciones, empleado_id, empleado_nombre
-        ];
+    const remitoValues = [
+        venta_id, cliente_id, cliente_nombre, cliente_condicion, cliente_cuit,
+        cliente_telefono, cliente_direccion, cliente_ciudad, cliente_provincia,
+        estado, observaciones, empleado_id, empleado_nombre
+    ];
 
-        connection.query(registrarRemitoQuery, remitoValues, (err, result) => {
-            if (err) {
-                console.error('❌ Error al insertar el remito:', err);
-                return reject(err);
-            }
-            console.log('✅ Remito registrado con ID:', result.insertId, '- Empleado:', empleado_nombre);
-            resolve(result.insertId);
-        });
-    });
+    const [result] = await connection.query(registrarRemitoQuery, remitoValues);
+    console.log('✅ Remito registrado con ID:', result.insertId, '- Empleado:', empleado_nombre);
+    return result.insertId;
 };
 
-// ✅ FUNCIÓN PARA PRODUCTOS REMITO CON CONNECTION
+// FUNCIÓN PARA PRODUCTOS REMITO CON CONNECTION
 const insertarProductosRemitoPromiseWithConnection = async (connection, remitoId, productos) => {
     const insertProductoQuery = `
-        INSERT INTO detalle_remitos (remito_id, producto_id, producto_nombre, producto_um, cantidad) 
+        INSERT INTO detalle_remitos (remito_id, producto_id, producto_nombre, producto_um, cantidad)
         VALUES (?, ?, ?, ?, ?)
     `;
 
-    try {
-        const promesasInsert = productos.map(producto => {
-            const { producto_id, producto_nombre, producto_um, cantidad } = producto;
-            const productoValues = [remitoId, producto_id, producto_nombre, producto_um, cantidad];
+    await Promise.all(productos.map(async (producto) => {
+        const { producto_id, producto_nombre, producto_um, cantidad } = producto;
+        const productoValues = [remitoId, producto_id, producto_nombre, producto_um, cantidad];
+        await connection.query(insertProductoQuery, productoValues);
+        console.log(`✅ Producto ${producto_nombre} insertado en remito`);
+    }));
 
-            return new Promise((resolve, reject) => {
-                connection.query(insertProductoQuery, productoValues, (err, result) => {
-                    if (err) {
-                        console.error('❌ Error al insertar producto del remito:', err);
-                        return reject(err);
-                    }
-                    console.log(`✅ Producto ${producto_nombre} insertado en remito`);
-                    resolve(result);
-                });
-            });
-        });
-
-        await Promise.all(promesasInsert);
-        console.log('✅ Todos los productos del remito insertados correctamente');
-        return null;
-    } catch (error) {
-        console.error('❌ Error general insertando productos del remito:', error);
-        return error;
-    }
+    console.log('✅ Todos los productos del remito insertados correctamente');
 };
 
 // ✅ MANTENER FUNCIONES ORIGINALES PARA COMPATIBILIDAD
