@@ -1874,6 +1874,89 @@ class PdfGenerator {
         return await this.generatePdfFromHtml(htmlTemplate);
     }
 
+    async generarResumenCuenta({ cliente, ventas, totales }) {
+        const templatePath = path.join(this.templatesPath, 'resumen_cuenta.html');
+
+        if (!fs.existsSync(templatePath)) {
+            throw new Error('Plantilla resumen_cuenta.html no encontrada');
+        }
+
+        const toNumber = (value) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? number : 0;
+        };
+
+        const normalizeText = (value) => String(value || '').trim();
+
+        const getTipoFactor = (tipoDocRaw) => {
+            const tipoDoc = normalizeText(tipoDocRaw).toUpperCase();
+            if (tipoDoc === 'NOTA_CREDITO') return -1;
+            if (tipoDoc === 'FACTURA' || tipoDoc === 'NOTA_DEBITO') return 1;
+            return 1;
+        };
+
+        const getTipoLabel = (tipoDocRaw, tipoFRaw) => {
+            const tipoDoc = normalizeText(tipoDocRaw).toUpperCase();
+            const tipoF = normalizeText(tipoFRaw).toUpperCase();
+            if (tipoDoc === 'NOTA_DEBITO') return `ND ${tipoF}`.trim();
+            if (tipoDoc === 'NOTA_CREDITO') return `NC ${tipoF}`.trim();
+            return `Factura ${tipoF}`.trim();
+        };
+
+        const getFechaReferencia = (venta) => venta?.fecha_fiscal || venta?.fecha;
+
+        const ventasOrdenadas = [...ventas].sort((a, b) => {
+            const fechaA = new Date(getFechaReferencia(a)).getTime();
+            const fechaB = new Date(getFechaReferencia(b)).getTime();
+            return fechaA - fechaB;
+        });
+
+        const fechas = ventasOrdenadas
+            .map((venta) => getFechaReferencia(venta))
+            .filter(Boolean);
+
+        const periodoDesde = fechas.length > 0 ? this.formatearFecha(fechas[0]) : '-';
+        const periodoHasta = fechas.length > 0 ? this.formatearFecha(fechas[fechas.length - 1]) : '-';
+
+        const itemsHTML = ventasOrdenadas.map((venta) => {
+            const factor = getTipoFactor(venta.tipo_doc);
+            const subtotal = toNumber(venta.subtotal) * factor;
+            const iva = toNumber(venta.iva_total) * factor;
+            const total = toNumber(venta.total) * factor;
+            const negativeClass = total < 0 ? ' class="negative"' : '';
+
+            return `
+                <tr>
+                    <td class="col-fecha">${this.formatearFecha(getFechaReferencia(venta))}</td>
+                    <td class="col-tipo">${getTipoLabel(venta.tipo_doc, venta.tipo_f)}</td>
+                    <td class="col-numero">${normalizeText(venta.numero_factura) || '-'}</td>
+                    <td class="col-neto">${this.formatearMoneda(subtotal)}</td>
+                    <td class="col-iva">${this.formatearMoneda(iva)}</td>
+                    <td class="col-total"${negativeClass}>${this.formatearMoneda(total)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        let htmlTemplate = fs.readFileSync(templatePath, 'utf8');
+        const hoy = new Date().toISOString().split('T')[0];
+
+        htmlTemplate = htmlTemplate
+            .replace(/{{fecha_emision}}/g, this.formatearFecha(hoy))
+            .replace(/{{cliente_nombre}}/g, normalizeText(cliente?.cliente_nombre) || 'No informado')
+            .replace(/{{cliente_cuit}}/g, normalizeText(cliente?.cliente_cuit) || 'No informado')
+            .replace(/{{cliente_direccion}}/g, normalizeText(cliente?.cliente_direccion) || 'No informado')
+            .replace(/{{cliente_ciudad}}/g, normalizeText(cliente?.cliente_ciudad) || 'No informado')
+            .replace(/{{periodo_desde}}/g, periodoDesde)
+            .replace(/{{periodo_hasta}}/g, periodoHasta)
+            .replace(/{{cantidad}}/g, String(ventasOrdenadas.length))
+            .replace(/{{items}}/g, itemsHTML)
+            .replace(/{{total_neto}}/g, this.formatearMoneda(totales?.neto ?? 0))
+            .replace(/{{total_iva}}/g, this.formatearMoneda(totales?.iva ?? 0))
+            .replace(/{{total_final}}/g, this.formatearMoneda(totales?.total ?? 0));
+
+        return await this.generatePdfFromHtml(htmlTemplate);
+    }
+
     async generarNotaPedido(pedido, productos) {
         const templatePath = path.join(this.templatesPath, 'nota_pedido2.html');
         if (!fs.existsSync(templatePath)) {

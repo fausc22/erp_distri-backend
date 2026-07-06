@@ -829,11 +829,118 @@ const generarPdfListadoVendedores = async (req, res) => {
     }
 };
 
+const getTipoFactorResumen = (tipoDocRaw) => {
+    const tipoDoc = (tipoDocRaw || '').toString().trim().toUpperCase();
+    if (tipoDoc === 'NOTA_CREDITO') return -1;
+    if (tipoDoc === 'FACTURA' || tipoDoc === 'NOTA_DEBITO') return 1;
+    return 1;
+};
+
+const generarPdfResumenCuenta = async (req, res) => {
+    const { ventasIds } = req.body;
+
+    if (!ventasIds || !Array.isArray(ventasIds) || ventasIds.length === 0) {
+        return res.status(400).json({ error: 'Debe proporcionar al menos un ID de venta válido' });
+    }
+
+    const ids = ventasIds
+        .map((id) => parseInt(id, 10))
+        .filter((id) => Number.isFinite(id) && id > 0);
+
+    if (ids.length === 0) {
+        return res.status(400).json({ error: 'No se encontraron IDs de venta válidos' });
+    }
+
+    if (ids.length !== ventasIds.length) {
+        return res.status(400).json({ error: 'Uno o más IDs de venta no son válidos' });
+    }
+
+    try {
+        console.log(`📄 Generando Resumen de Cuenta para ${ids.length} comprobante(s)...`);
+        const startTime = Date.now();
+
+        const placeholders = ids.map(() => '?').join(', ');
+        const query = `
+            SELECT
+                id, fecha, fecha_fiscal, numero_factura, cliente_id, cliente_nombre,
+                cliente_direccion, cliente_ciudad, cliente_cuit, tipo_doc, tipo_f,
+                subtotal, iva_total, total, estado
+            FROM ventas
+            WHERE id IN (${placeholders})
+              AND estado = 'Facturada'
+              AND tipo_doc IN ('FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO')
+        `;
+
+        const ventas = await queryPromise(query, ids);
+
+        if (ventas.length !== ids.length) {
+            return res.status(400).json({
+                error: 'Una o más ventas no existen, no están facturadas o no son comprobantes válidos para el resumen'
+            });
+        }
+
+        const clienteIds = new Set(ventas.map((venta) => venta.cliente_id).filter((id) => id != null));
+        if (clienteIds.size > 1) {
+            return res.status(400).json({
+                error: 'Todas las facturas deben pertenecer al mismo cliente'
+            });
+        }
+
+        const primeraVenta = ventas[0];
+        const cliente = {
+            cliente_nombre: primeraVenta.cliente_nombre,
+            cliente_cuit: primeraVenta.cliente_cuit,
+            cliente_direccion: primeraVenta.cliente_direccion,
+            cliente_ciudad: primeraVenta.cliente_ciudad
+        };
+
+        const totales = ventas.reduce((acc, venta) => {
+            const factor = getTipoFactorResumen(venta.tipo_doc);
+            return {
+                neto: acc.neto + (Number(venta.subtotal) || 0) * factor,
+                iva: acc.iva + (Number(venta.iva_total) || 0) * factor,
+                total: acc.total + (Number(venta.total) || 0) * factor
+            };
+        }, { neto: 0, iva: 0, total: 0 });
+
+        const pdfBuffer = await pdfGenerator.generarResumenCuenta({ cliente, ventas, totales });
+
+        const generationTime = Date.now() - startTime;
+        const clienteSlug = (cliente.cliente_nombre || 'cliente').replace(/[^a-zA-Z0-9]/g, '_');
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ventas',
+            detallesAdicionales: `Resumen de Cuenta generado - ${cliente.cliente_nombre} - ${ventas.length} comprobante(s) en ${generationTime}ms`
+        });
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="Resumen_Cuenta_${clienteSlug}.pdf"`);
+        res.end(pdfBuffer);
+
+        console.log('✅ Resumen de Cuenta enviado exitosamente');
+    } catch (error) {
+        console.error('❌ Error generando Resumen de Cuenta:', error);
+
+        await auditarOperacion(req, {
+            accion: 'EXPORT',
+            tabla: 'ventas',
+            detallesAdicionales: `Error generando Resumen de Cuenta: ${error.message}`
+        });
+
+        res.status(500).json({
+            error: 'Error al generar el Resumen de Cuenta',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
 module.exports = {
     generarPdfLibroIva,
     generarPdfReporteFletes,
     generarPdfListaPrecios,
     generarPdfControlStockFiltro,
     generarPdfControlStockSeleccion,
-    generarPdfListadoVendedores
+    generarPdfListadoVendedores,
+    generarPdfResumenCuenta
 };

@@ -46,4 +46,11 @@ router.post('/generarpdf-listado-vendedores',
     listadosController.generarPdfListadoVendedores
 );
 
+// Ruta para generar PDF de Resumen de Cuenta
+router.post('/generarpdf-resumen-cuenta',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
+    listadosController.generarPdfResumenCuenta
+);
+
 module.exports = router;
