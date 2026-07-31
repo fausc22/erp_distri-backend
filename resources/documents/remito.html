@@ -18,6 +18,38 @@
             border: 1px solid #000;
             box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.1);
         }
+
+        .brand-bar {
+            display: table;
+            width: 100%;
+            margin-bottom: 8px;
+            page-break-after: avoid;
+        }
+        .brand-bar-left {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: left;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .brand-bar-right {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: right;
+            width: 320px;
+        }
+        .logo-empresa {
+            display: inline-block;
+            width: auto;
+            object-fit: contain;
+        }
+        .logo-empresa--doc {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            object-fit: contain;
+        }
+
         .header {
             text-align: center;
             font-size: 24px;
@@ -85,7 +117,12 @@
 </head>
 <body>
     <div class="container">
-        <div class="header">DISTRIBUIDORA VERTI-MAR SRL</div>
+        <div class="brand-bar">
+            <div class="brand-bar-left">DISTRIBUIDORA VERTI-MAR SRL</div>
+            <div class="brand-bar-right">
+                <img class="logo-empresa logo-empresa--doc" src="{{logo_empresa}}" alt="Distribuidora Verti-Mar SRL">
+            </div>
+        </div>
         <div class="header2">REMITO</div>
         <div class="header3">DOCUMENTO NO VALIDO COMO FACTURA</div>
 

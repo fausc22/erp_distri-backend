@@ -39,6 +39,38 @@
             margin-bottom: 12px;
         }
 
+        .header .brand-bar {
+            display: table;
+            width: 100%;
+            margin-bottom: 4px;
+        }
+
+        .header .brand-bar-left {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: left;
+        }
+
+        .header .brand-bar-right {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: right;
+            width: 320px;
+        }
+
+        .logo-empresa {
+            display: inline-block;
+            width: auto;
+            object-fit: contain;
+        }
+
+        .logo-empresa--doc {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            object-fit: contain;
+        }
+
         .header .empresa {
             font-size: 13px;
             font-weight: bold;
@@ -213,7 +245,14 @@
 <body>
     <div class="container">
         <div class="header">
-            <div class="empresa">DISTRIBUIDORA VERTI-MAR</div>
+            <div class="brand-bar">
+                <div class="brand-bar-left">
+                    <div class="empresa">DISTRIBUIDORA VERTI-MAR</div>
+                </div>
+                <div class="brand-bar-right">
+                    <img class="logo-empresa logo-empresa--doc" src="{{logo_empresa}}" alt="Distribuidora Verti-Mar SRL">
+                </div>
+            </div>
             <div class="titulo">REPORTE GERENCIAL</div>
             <div class="periodo">Periodo: {{periodo_texto}}</div>
             <div class="meta">Generado el {{fecha_generacion}}</div>

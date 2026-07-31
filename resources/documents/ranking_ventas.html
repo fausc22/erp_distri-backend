@@ -35,6 +35,40 @@
             border-bottom: 2px solid #3498db;
             padding-bottom: 8px;
         }
+
+        .header .brand-bar {
+            display: table;
+            width: 100%;
+            margin-bottom: 6px;
+        }
+
+        .header .brand-bar-left {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: left;
+            font-size: 16px;
+            color: #3498db;
+        }
+
+        .header .brand-bar-right {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: right;
+            width: 320px;
+        }
+
+        .logo-empresa {
+            display: inline-block;
+            width: auto;
+            object-fit: contain;
+        }
+
+        .logo-empresa--doc {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            object-fit: contain;
+        }
         
         .fecha {
             text-align: center;
@@ -145,12 +179,6 @@
             font-size: 12px;
             color: #2c3e50;
         }
-        
-        .logo-empresa {
-            font-size: 16px;
-            color: #3498db;
-            margin-bottom: 5px;
-        }
 
         /* Estilos para información de contacto */
         .contacto-info {
@@ -169,7 +197,12 @@
 <body>
     <div class="container">
         <div class="header">
-            <div class="logo-empresa">📊 DISTRIBUIDORA VERTI-MAR SRL</div>
+            <div class="brand-bar">
+                <div class="brand-bar-left">DISTRIBUIDORA VERTI-MAR SRL</div>
+                <div class="brand-bar-right">
+                    <img class="logo-empresa logo-empresa--doc" src="{{logo_empresa}}" alt="Distribuidora Verti-Mar SRL">
+                </div>
+            </div>
             RANKING DE VENTAS
         </div>
         

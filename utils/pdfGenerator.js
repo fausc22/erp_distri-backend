@@ -254,6 +254,8 @@ class PdfGenerator {
         try {
             const environment = process.env.NODE_ENV === 'production' ? 'PRODUCCIÓN' : 'DESARROLLO';
             console.log(`🔧 Generando PDF con Puppeteer (${environment})...`);
+
+            htmlContent = this.inyectarLogoEmpresa(htmlContent);
             
             const pdfOptions = this.getOptions(options);
             
@@ -338,6 +340,30 @@ class PdfGenerator {
         } catch (error) {
             console.error('❌ Error cargando logo ARCA:', error);
         }
+    }
+
+    obtenerLogoEmpresaBase64() {
+        if (this._logoEmpresaBase64 !== undefined) {
+            return this._logoEmpresaBase64;
+        }
+        try {
+            const logoPath = path.join(this.templatesPath, 'logo_empresa.jpg');
+            if (fs.existsSync(logoPath)) {
+                const logoBuffer = fs.readFileSync(logoPath);
+                this._logoEmpresaBase64 = `data:image/jpeg;base64,${logoBuffer.toString('base64')}`;
+                return this._logoEmpresaBase64;
+            }
+            console.warn('⚠️ Logo empresa no encontrado en:', logoPath);
+        } catch (error) {
+            console.error('❌ Error cargando logo empresa:', error);
+        }
+        this._logoEmpresaBase64 = '';
+        return this._logoEmpresaBase64;
+    }
+
+    inyectarLogoEmpresa(html) {
+        if (!html || typeof html !== 'string') return html;
+        return html.replace(/\{\{logo_empresa\}\}/g, this.obtenerLogoEmpresaBase64());
     }
 
     async generarQRDesdeARCA(venta) {
@@ -877,7 +903,10 @@ class PdfGenerator {
             pageTemplate = pageTemplate.replace(/<thead>[\s\S]*?<\/thead>/m, tableHeader);
         }
 
-        pageTemplate = this.reemplazarPlaceholders(pageTemplate, commonReplacements);
+        pageTemplate = this.reemplazarPlaceholders(pageTemplate, {
+            ...commonReplacements,
+            logo_empresa: this.obtenerLogoEmpresaBase64()
+        });
 
         const rowsHtml = rowsByItem.join('');
         const emptyFooter = '<div class="factura-footer-wrapper is-empty"></div>';
@@ -980,7 +1009,10 @@ class PdfGenerator {
         }
         const htmlSkeleton = htmlTemplate.replace(templateMatch[0], '{{pages_html}}');
         let pageTemplate = templateMatch[1].trim();
-        pageTemplate = this.reemplazarPlaceholders(pageTemplate, commonReplacements);
+        pageTemplate = this.reemplazarPlaceholders(pageTemplate, {
+            ...commonReplacements,
+            logo_empresa: this.obtenerLogoEmpresaBase64()
+        });
 
         const totalRows = rowsByItem.length;
         const pages = this.paginarFilasNotaPedido(totalRows);

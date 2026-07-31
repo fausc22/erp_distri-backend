@@ -56,14 +56,44 @@
             border-bottom: 1px solid #333;
             padding-bottom: 8px;
             margin-bottom: 10px;
-            text-align: center;
         }
 
-        .header-section h1 {
-            font-size: 18px;
-            font-weight: bold;
+        .header-brand {
+            display: table;
+            width: 100%;
             margin-bottom: 6px;
+        }
+
+        .header-brand-logo {
+            display: table-cell;
+            vertical-align: middle;
+            width: 320px;
+        }
+
+        .header-brand-title {
+            display: table-cell;
+            vertical-align: middle;
+            text-align: right;
+        }
+
+        .header-brand-title h1 {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 0;
             letter-spacing: 0.02em;
+        }
+
+        .logo-empresa {
+            display: block;
+            width: auto;
+            object-fit: contain;
+        }
+
+        .logo-empresa--np {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            object-fit: contain;
         }
 
         .header-datos {
@@ -218,7 +248,14 @@
     <div class="np-page {{page_class}}">
         <div class="page-container">
             <div class="header-section">
-                <h1>DISTRIBUIDORA VERTI-MAR SRL</h1>
+                <div class="header-brand">
+                    <div class="header-brand-logo">
+                        <img class="logo-empresa logo-empresa--np" src="{{logo_empresa}}" alt="Distribuidora Verti-Mar SRL">
+                    </div>
+                    <div class="header-brand-title">
+                        <h1>DISTRIBUIDORA VERTI-MAR SRL</h1>
+                    </div>
+                </div>
                 <div class="header-datos">
                     <div class="header-datos-left">
                         <p><strong>Dirección:</strong> 31 1555 - GENERAL PICO - LA PAMPA</p>

@@ -78,6 +78,19 @@
             display: table-cell;
             vertical-align: top;
         }
+        .logo-empresa {
+            display: block;
+            width: auto;
+            object-fit: contain;
+        }
+        .logo-empresa--arca {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            margin-bottom: 6px;
+            object-fit: contain;
+            object-position: left center;
+        }
         .bill-type-container {
             width: 10%;
             display: table-cell;
@@ -300,7 +313,7 @@
     <div class="bill-container">
         <div class="bill-emitter-row">
             <div class="bill-emitter-left">
-                <div class="text-lg">DISTRIBUIDORA VERTI-MAR SRL</div>
+                <img class="logo-empresa logo-empresa--arca" src="{{logo_empresa}}" alt="Distribuidora Verti-Mar SRL">
                 <p><strong>Domicilio:</strong> 31 1555 - GENERAL PICO - LA PAMPA</p>
                 <p><strong>Teléfono:</strong> {{telefono}}</p>
                 <p><strong>E-mail:</strong> {{email}}</p>
