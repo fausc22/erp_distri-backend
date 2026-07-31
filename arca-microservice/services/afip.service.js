@@ -181,9 +181,24 @@ class AfipService {
   async crearComprobante(datosComprobante, _respuestaCompleta = false) {
     const maxIntentos = 3;
     const esperaBaseMs = 700;
+    const ptoVta = datosComprobante?.PtoVta;
+    const cbteTipo = datosComprobante?.CbteTipo;
+    const cbteDesde = datosComprobante?.CbteDesde;
 
     for (let intento = 1; intento <= maxIntentos; intento++) {
       try {
+        // Antes de reintentar: si AFIP ya autorizó el nº, recuperar CAE (no re-emitir)
+        if (intento > 1 && ptoVta != null && cbteTipo != null && cbteDesde != null) {
+          const recuperado = await this._intentarRecuperarComprobanteAutorizado(
+            ptoVta,
+            cbteTipo,
+            cbteDesde
+          );
+          if (recuperado) {
+            return recuperado;
+          }
+        }
+
         arcaLog(`📝 Creando comprobante en ARCA... (intento ${intento}/${maxIntentos})`);
 
         const raw = await this.arca.electronicBillingService.createVoucher(datosComprobante);
@@ -192,12 +207,28 @@ class AfipService {
         arcaLog(`✓ Comprobante creado exitosamente | CAE: ${resultado.CAE} | Vto: ${resultado.CAEFchVto}`);
         return resultado;
       } catch (error) {
+        if (String(error?.message || '').includes('Reconciliar')) {
+          throw error;
+        }
+
         const status = getHttpStatus(error);
         const esTransitorio = esErrorTransitorio(error);
         const ultimoIntento = intento === maxIntentos;
         const detalle = `status=${status || 'N/A'} code=${error?.code || 'N/A'} msg=${error.message}`;
 
         if (!esTransitorio || ultimoIntento) {
+          // Último intento: intentar recuperar si el comprobante ya quedó autorizado
+          if (esTransitorio && ptoVta != null && cbteTipo != null && cbteDesde != null) {
+            const recuperado = await this._intentarRecuperarComprobanteAutorizado(
+              ptoVta,
+              cbteTipo,
+              cbteDesde
+            );
+            if (recuperado) {
+              return recuperado;
+            }
+          }
+
           arcaErr('❌ Error al crear comprobante: ' + error.message);
 
           if (error.response?.data) {
@@ -213,6 +244,54 @@ class AfipService {
         await sleep(esperaMs);
       }
     }
+  }
+
+  /**
+   * Si el último nº AFIP ya cubre CbteDesde, intenta obtener el CAE vía getVoucherInfo.
+   * Evita doble emisión tras timeout ambiguo.
+   * @returns {Promise<{CAE: string, CAEFchVto: string, Resultado: string}|null>}
+   *   null = el nº aún no existe en ARCA (se puede crear).
+   *   Si el nº ya existe y no hay CAE legible, lanza error de reconciliación (no re-emitir).
+   */
+  async _intentarRecuperarComprobanteAutorizado(puntoVenta, tipoComprobante, numeroComprobante) {
+    let ultimo;
+    try {
+      ultimo = await this.obtenerUltimoComprobante(puntoVenta, tipoComprobante);
+    } catch (error) {
+      arcaLog(`⚠️ No se pudo consultar último comprobante para reconciliar: ${error.message}`);
+      return null;
+    }
+
+    if (ultimo < numeroComprobante) {
+      return null;
+    }
+
+    arcaLog(
+      `🔎 Comprobante ${numeroComprobante} ya figura en ARCA (último=${ultimo}). Consultando CAE...`
+    );
+
+    let info = null;
+    try {
+      info = await this.obtenerInfoComprobante(numeroComprobante, puntoVenta, tipoComprobante);
+    } catch (error) {
+      arcaErr(`❌ No se pudo leer comprobante ya emitido: ${error.message}`);
+    }
+
+    const cae = info?.CodAutorizacion;
+    if (!cae) {
+      throw new Error(
+        `El comprobante ${puntoVenta}-${numeroComprobante} ya existe en ARCA pero no se pudo obtener el CAE. Reconciliar manualmente (no se reintentó la emisión).`
+      );
+    }
+
+    const resultado = {
+      CAE: String(cae),
+      CAEFchVto: formatCaeFchVto(info.FchVto),
+      Resultado: info.Resultado || 'A'
+    };
+
+    arcaLog(`✓ CAE recuperado sin re-emitir | CAE: ${resultado.CAE} | Vto: ${resultado.CAEFchVto}`);
+    return resultado;
   }
 
   async crearSiguienteComprobante(datosComprobante) {

@@ -23,11 +23,9 @@ dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 class AfipConfig {
   constructor() {
-    // Determinar si estamos en desarrollo o producción
-    // Prioridad: AFIP_PRODUCTION > NODE_ENV
+    // Solo AFIP_PRODUCTION=true fuerza AFIP real (no heredar de NODE_ENV)
     const afipProduction = process.env.AFIP_PRODUCTION === 'true' || process.env.AFIP_PRODUCTION === true;
-    const nodeEnvProd = process.env.NODE_ENV === 'prod' || process.env.NODE_ENV === 'production';
-    this.environment = (afipProduction || nodeEnvProd) ? 'prod' : 'dev';
+    this.environment = afipProduction ? 'prod' : 'dev';
     
     // CUIT de la empresa
     this.CUIT = process.env.AFIP_CUIT;

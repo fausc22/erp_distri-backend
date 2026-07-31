@@ -6,10 +6,10 @@
 // TIPOS DE COMPROBANTES AFIP
 // ============================================
 export const TIPOS_COMPROBANTE = {
-  FACTURA_A: 1,           // Para Responsables Inscriptos y Monotributistas
+  FACTURA_A: 1,           // Para Responsables Inscriptos (emisor RI)
   NOTA_DEBITO_A: 2,
   NOTA_CREDITO_A: 3,
-  FACTURA_B: 6,           // Para Consumidores Finales y Exentos
+  FACTURA_B: 6,           // Para Consumidores Finales, Exentos y Monotributo
   NOTA_DEBITO_B: 7,
   NOTA_CREDITO_B: 8,
   FACTURA_C: 11,          // Para operaciones exentas
@@ -131,14 +131,18 @@ export function getNombreComprobante(codigo) {
  * Validar combinación de tipo de comprobante y condición IVA
  */
 export function validarCombinaciónComprobanteIVA(tipoComprobante, condicionIVA) {
-  // Factura A solo para Responsables Inscriptos y Monotributistas
+  // Tipo A: solo Responsable Inscripto (emisor RI)
   if ([1, 2, 3].includes(tipoComprobante)) {
-    return [CONDICIONES_IVA.RESPONSABLE_INSCRIPTO, CONDICIONES_IVA.MONOTRIBUTO].includes(condicionIVA);
+    return condicionIVA === CONDICIONES_IVA.RESPONSABLE_INSCRIPTO;
   }
   
-  // Factura B para Consumidor Final y Exento
+  // Tipo B: Consumidor Final, Exento y Monotributo
   if ([6, 7, 8].includes(tipoComprobante)) {
-    return [CONDICIONES_IVA.CONSUMIDOR_FINAL, CONDICIONES_IVA.EXENTO].includes(condicionIVA);
+    return [
+      CONDICIONES_IVA.CONSUMIDOR_FINAL,
+      CONDICIONES_IVA.EXENTO,
+      CONDICIONES_IVA.MONOTRIBUTO,
+    ].includes(condicionIVA);
   }
   
   return true;

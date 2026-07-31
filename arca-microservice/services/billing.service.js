@@ -156,7 +156,7 @@ class BillingService {
    */
   async crearFacturaMonotributista(cuit, items, opciones = {}) {
     const datosFactura = {
-      tipoComprobante: TIPOS_COMPROBANTE.FACTURA_A,
+      tipoComprobante: TIPOS_COMPROBANTE.FACTURA_B,
       concepto: opciones.concepto || 1,
       cliente: {
         tipoDocumento: 80, // CUIT
