@@ -71,13 +71,9 @@ const obtenerSiguienteNumeroFacturaDesdeARCA = async (connection, tipoFiscal, pu
       WHERE punto_venta = ? AND tipo_factura = ?
     `;
     
-    const queryPromiseWithConnection = (connection, query, params) => {
-      return new Promise((resolve, reject) => {
-        connection.query(query, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results);
-        });
-      });
+    const queryPromiseWithConnection = async (connection, query, params) => {
+      const [rows] = await connection.query(query, params);
+      return rows;
     };
     
     const checkResults = await queryPromiseWithConnection(
@@ -156,13 +152,9 @@ const sincronizarNumeroAprobado = async (connection, tipoFiscal, numeroAprobado,
     const pv = puntoVenta || parseInt(process.env.DEFAULT_PUNTO_VENTA) || 1;
     const puntoVentaFormateado = String(pv).padStart(4, '0');
     
-    const queryPromiseWithConnection = (connection, query, params) => {
-      return new Promise((resolve, reject) => {
-        connection.query(query, params, (err, results) => {
-          if (err) reject(err);
-          else resolve(results);
-        });
-      });
+    const queryPromiseWithConnection = async (connection, query, params) => {
+      const [rows] = await connection.query(query, params);
+      return rows;
     };
     
     const updateQuery = `

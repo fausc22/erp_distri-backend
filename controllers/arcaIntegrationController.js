@@ -148,22 +148,11 @@ const arcaFechaToSqlDate = (fechaArca) => {
   return `${fechaStr.slice(0, 4)}-${fechaStr.slice(4, 6)}-${fechaStr.slice(6, 8)}`;
 };
 
-const getDbConnection = () => {
-  return new Promise((resolve, reject) => {
-    db.getConnection((err, conn) => {
-      if (err) reject(err);
-      else resolve(conn);
-    });
-  });
-};
+const getDbConnection = () => db.getConnection();
 
-const executeWithConnection = (connection, query, params = []) => {
-  return new Promise((resolve, reject) => {
-    connection.query(query, params, (err, results) => {
-      if (err) reject(err);
-      else resolve(results);
-    });
-  });
+const executeWithConnection = async (connection, query, params = []) => {
+  const [rows] = await connection.query(query, params);
+  return rows;
 };
 
 /**

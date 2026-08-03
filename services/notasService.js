@@ -3,6 +3,11 @@ const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 const axios = require('axios');
 const { roundFacturacion } = require('../utils/rounding');
 
+const queryWithConnection = async (connection, sql, params = []) => {
+    const [rows] = await connection.query(sql, params);
+    return rows;
+};
+
 /**
  * ✅ OBTENER SIGUIENTE NÚMERO DE NOTA (NUMERACIÓN LOCAL)
  * 
@@ -20,15 +25,6 @@ const obtenerSiguienteNumeroNota = async (connection, tipoNota, tipoFiscal, punt
         
         console.log(`🔢 Obteniendo siguiente número para ${tipoNota} ${tipoFiscal} - Punto de Venta: ${puntoVentaFormateado} (LOCAL)`);
         
-        const queryPromiseWithConnection = (connection, query, params) => {
-            return new Promise((resolve, reject) => {
-                connection.query(query, params, (err, results) => {
-                    if (err) reject(err);
-                    else resolve(results);
-                });
-            });
-        };
-        
         // ✅ 1. VERIFICAR SI EXISTE EN control_numeracion_facturas
         // Usamos la misma tabla pero con tipo_factura = tipoCompleto
         const checkQuery = `
@@ -37,7 +33,7 @@ const obtenerSiguienteNumeroNota = async (connection, tipoNota, tipoFiscal, punt
             WHERE punto_venta = ? AND tipo_factura = ?
         `;
         
-        let checkResults = await queryPromiseWithConnection(connection, checkQuery, [puntoVentaFormateado, tipoCompleto]);
+        let checkResults = await queryWithConnection(connection, checkQuery, [puntoVentaFormateado, tipoCompleto]);
         
         console.log(`🔍 Número actual en BD:`, checkResults[0]?.ultimo_numero || 'No existe');
         
@@ -50,7 +46,7 @@ const obtenerSiguienteNumeroNota = async (connection, tipoNota, tipoFiscal, punt
                 VALUES (?, ?, 0)
             `;
             
-            await queryPromiseWithConnection(connection, insertQuery, [puntoVentaFormateado, tipoCompleto]);
+            await queryWithConnection(connection, insertQuery, [puntoVentaFormateado, tipoCompleto]);
             console.log(`✅ Control creado - Empezará en 1`);
         }
         
@@ -61,7 +57,7 @@ const obtenerSiguienteNumeroNota = async (connection, tipoNota, tipoFiscal, punt
             WHERE punto_venta = ? AND tipo_factura = ?
         `;
         
-        await queryPromiseWithConnection(connection, updateQuery, [puntoVentaFormateado, tipoCompleto]);
+        await queryWithConnection(connection, updateQuery, [puntoVentaFormateado, tipoCompleto]);
         console.log(`✅ Número incrementado en BD`);
         
         // ✅ 4. OBTENER EL NUEVO NÚMERO
@@ -72,7 +68,7 @@ const obtenerSiguienteNumeroNota = async (connection, tipoNota, tipoFiscal, punt
             LIMIT 1
         `;
         
-        const results = await queryPromiseWithConnection(connection, selectQuery, [puntoVentaFormateado, tipoCompleto]);
+        const results = await queryWithConnection(connection, selectQuery, [puntoVentaFormateado, tipoCompleto]);
         
         if (!results || !results[0] || typeof results[0].ultimo_numero === 'undefined') {
             throw new Error(`No se pudo obtener el número de nota para ${tipoCompleto} en PV ${puntoVentaFormateado}`);
@@ -183,23 +179,16 @@ const crearNota = async (req, res) => {
         });
     }
 
-    db.beginTransaction(async (err, connection) => {
-        if (err) {
-            console.error('Error iniciando transacción:', err);
-            return res.status(500).json({ success: false, message: 'Error iniciando transacción' });
-        }
+    let connection;
+    try {
+            connection = await db.getConnection();
+            await connection.beginTransaction();
 
-        try {
             // ✅ 1. Si hay venta de referencia, obtener datos del cliente de esa venta
             let clienteFinal = {};
             if (ventaReferenciaId) {
                 const ventaQuery = `SELECT * FROM ventas WHERE id = ?`;
-                const ventaResult = await new Promise((resolve, reject) => {
-                    connection.query(ventaQuery, [ventaReferenciaId], (err, results) => {
-                        if (err) reject(err);
-                        else resolve(results);
-                    });
-                });
+                const ventaResult = await queryWithConnection(connection, ventaQuery, [ventaReferenciaId]);
 
                 if (ventaResult.length === 0) {
                     throw new Error('Venta de referencia no encontrada');
@@ -286,12 +275,7 @@ const crearNota = async (req, res) => {
                 empleado_nombre
             ];
 
-            const notaResult = await new Promise((resolve, reject) => {
-                connection.query(notaQuery, notaValues, (err, result) => {
-                    if (err) reject(err);
-                    else resolve(result);
-                });
-            });
+            const notaResult = await queryWithConnection(connection, notaQuery, notaValues);
 
             const notaId = notaResult.insertId;
             console.log(`✅ Nota creada con ID: ${notaId} - Número: ${numeroCompleto}`);
@@ -318,29 +302,19 @@ const crearNota = async (req, res) => {
                     `${productoNombre} | cant=${cantidad} | precio=${precio} | subtotal=${subtotal} | iva=${iva}`
                 );
 
-                await new Promise((resolve, reject) => {
-                    connection.query(
-                        productoQuery,
-                        [notaId, productoId, productoNombre, productoUM, cantidad, precio, iva, subtotal],
-                        (err, result) => {
-                            if (err) reject(err);
-                            else resolve(result);
-                        }
-                    );
-                });
+                await queryWithConnection(
+                    connection,
+                    productoQuery,
+                    [notaId, productoId, productoNombre, productoUM, cantidad, precio, iva, subtotal]
+                );
 
                 // Devolución de mercadería al stock solo en Nota de Crédito y líneas con producto de catálogo
                 if (tipoNota === 'NOTA_CREDITO' && productoId != null) {
-                    await new Promise((resolve, reject) => {
-                        connection.query(
-                            `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
-                            [cantidad, productoId],
-                            (err, result) => {
-                                if (err) reject(err);
-                                else resolve(result);
-                            }
-                        );
-                    });
+                    await queryWithConnection(
+                        connection,
+                        `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
+                        [cantidad, productoId]
+                    );
                 }
             }
 
@@ -358,65 +332,53 @@ const crearNota = async (req, res) => {
                     WHERE id = ?
                 `;
 
-                await new Promise((resolve, reject) => {
-                    connection.query(updateCuentaQuery, [monto, cuentaId], (err, result) => {
-                        if (err) reject(err);
-                        else resolve(result);
-                    });
-                });
+                await queryWithConnection(connection, updateCuentaQuery, [monto, cuentaId]);
 
                 console.log(`✅ Cuenta ${cuentaId} actualizada: ${monto > 0 ? '+' : ''}${monto.toFixed(2)}`);
             }
 
             // ✅ 7. COMMIT
-            connection.commit((err) => {
-                if (err) {
-                    console.error('Error en commit:', err);
-                    return connection.rollback(() => {
-                        res.status(500).json({
-                            success: false,
-                            message: 'Error al guardar la nota'
-                        });
-                    });
-                }
+            await connection.commit();
 
-                // ✅ AUDITAR
-                auditarOperacion(req, {
-                    accion: 'INSERT',
-                    tabla: 'ventas',
-                    registroId: notaId,
-                    datosNuevos: {
-                        tipo_doc: tipoNota,
-                        numero_factura: numeroCompleto,
-                        cliente_nombre: clienteFinal.nombre,
-                        total: totalR
-                    },
-                    detallesAdicionales: `${tipoNota} creada - Cliente: ${clienteFinal.nombre} - Total: $${totalR}`
-                });
-
-                res.json({
-                    success: true,
-                    message: `${tipoNota} creada exitosamente`,
-                    data: {
-                        notaId,
-                        numeroCompleto,
-                        tipoNota
-                    }
-                });
+            // ✅ AUDITAR
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'ventas',
+                registroId: notaId,
+                datosNuevos: {
+                    tipo_doc: tipoNota,
+                    numero_factura: numeroCompleto,
+                    cliente_nombre: clienteFinal.nombre,
+                    total: totalR
+                },
+                detallesAdicionales: `${tipoNota} creada - Cliente: ${clienteFinal.nombre} - Total: $${totalR}`
             });
 
+            return res.json({
+                success: true,
+                message: `${tipoNota} creada exitosamente`,
+                data: {
+                    notaId,
+                    numeroCompleto,
+                    tipoNota
+                }
+            });
         } catch (error) {
             console.error('Error creando nota:', error);
-            connection.rollback(() => {
-                res.status(500).json({
-                    success: false,
-                    message: error.message || 'Error al crear la nota'
-                });
+            if (connection) {
+                try {
+                    await connection.rollback();
+                } catch (rollbackError) {
+                    console.error('Error realizando rollback de nota:', rollbackError);
+                }
+            }
+            return res.status(500).json({
+                success: false,
+                message: error.message || 'Error al crear la nota'
             });
         } finally {
-            connection.release();
+            connection?.release();
         }
-    });
 };
 
 /**
