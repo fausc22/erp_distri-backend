@@ -35,41 +35,10 @@
             background-color: #fafafa;
             page-break-inside: avoid;
         }
-
-        .empresa-info .brand-bar {
-            display: table;
-            width: 100%;
-        }
-
-        .empresa-info .brand-bar-left {
-            display: table-cell;
-            vertical-align: middle;
-            text-align: left;
-        }
-
-        .empresa-info .brand-bar-right {
-            display: table-cell;
-            vertical-align: middle;
-            text-align: right;
-            width: 320px;
-        }
-
-        .logo-empresa {
-            display: inline-block;
-            width: auto;
-            object-fit: contain;
-        }
-
-        .logo-empresa--doc {
-            width: 100%;
-            max-width: 100%;
-            height: auto;
-            object-fit: contain;
-        }
         
         .empresa-info h1 {
             font-size: 20px;
-            margin-bottom: 0;
+            margin-bottom: 10px;
             color: #333;
         }
         
@@ -199,12 +168,8 @@
 <body>
     <div class="factura-container">
         <div class="empresa-info">
-            <div class="brand-bar">
-                <div class="brand-bar-left"><h1>X</h1></div>
-                <div class="brand-bar-right">
-                    <img class="logo-empresa logo-empresa--doc" src="{{logo_empresa}}" alt="Distribuidora Verti-Mar SRL">
-                </div>
-            </div>
+            <h1>X</h1>
+            
         </div>
 
         <div class="cliente-section">
