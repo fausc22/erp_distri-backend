@@ -167,6 +167,21 @@ const executeWithConnection = (connection, query, params = []) => {
 };
 
 /**
+ * Evita que una promesa cuelgue la request indefinidamente (pool de conexiones
+ * agotado, SOAP a AFIP sin respuesta, etc.). No cambia el resultado si la
+ * promesa resuelve/rechaza a tiempo; solo pone un techo de espera.
+ */
+const withTimeout = (promise, ms, timeoutMessage) => {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+/**
  * ✅ SOLICITAR CAE PARA UNA VENTA
  * POST /arca/solicitar-cae
  */
@@ -317,8 +332,18 @@ const solicitarCAE = async (req, res) => {
     // Serializar solicitudes por tipo fiscal + punto de venta.
     // Así el orden de envío queda alineado con el orden autorizado por ARCA.
     lockName = `arca_cae_${tipoFiscalLocal || venta.tipo_f || 'UNK'}_${puntoVentaLocal}`;
-    lockConnection = await getDbConnection();
-    const lockRows = await executeWithConnection(lockConnection, 'SELECT GET_LOCK(?, ?) AS lock_acquired', [lockName, 30]);
+    console.log(`🔗 Obteniendo conexión de BD para lock ${lockName}...`);
+    lockConnection = await withTimeout(
+      getDbConnection(),
+      10000,
+      `Timeout (10s) obteniendo conexión de BD para lock de numeración (${lockName}). Pool de conexiones posiblemente agotado.`
+    );
+    console.log(`🔗 Conexión obtenida, solicitando GET_LOCK(${lockName})...`);
+    const lockRows = await withTimeout(
+      executeWithConnection(lockConnection, 'SELECT GET_LOCK(?, ?) AS lock_acquired', [lockName, 30]),
+      35000,
+      `Timeout (35s) esperando GET_LOCK(${lockName}). Otra solicitud lo tiene retenido.`
+    );
     if (!lockRows?.[0] || lockRows[0].lock_acquired !== 1) {
       throw new Error(`No se pudo obtener lock de numeración (${lockName}). Reintente en unos segundos.`);
     }
@@ -639,7 +664,13 @@ const solicitarCAE = async (req, res) => {
       jsonData: null
     };
     
-    await billingController.crearFactura(mockReq, mockRes);
+    console.log('⏳ Esperando respuesta de ARCA/AFIP (timeout 60s)...');
+    await withTimeout(
+      billingController.crearFactura(mockReq, mockRes),
+      60000,
+      'Timeout (60s) esperando respuesta de ARCA/AFIP. Los servidores de AFIP no respondieron a tiempo; reintente en unos minutos.'
+    );
+    console.log('✅ Respuesta de ARCA/AFIP recibida');
     
     const responseARCA = mockRes.jsonData;
     
