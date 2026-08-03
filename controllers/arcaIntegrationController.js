@@ -207,7 +207,38 @@ const getDbConnectionWithTimeout = (ms, timeoutMessage) => {
 /** Techos de espera CAE: el lock se retiene durante crearFactura; la espera debe cubrirlo. */
 const AFIP_CREATE_TIMEOUT_MS = 60000;
 const CAE_LOCK_WAIT_SEC = 90;
-const CAE_LOCK_WAIT_OUTER_MS = 95000;
+
+/**
+ * Adquiere GET_LOCK usando solo el timeout de MySQL (sin Promise.race).
+ * Promise.race sobre GET_LOCK abandonaba la query en vuelo, devolvía la conexión
+ * al pool y el lock podía quedar tomado para siempre (zombie) — una sola request
+ * posterior fallaba aunque no hubiera concurrencia real.
+ */
+const acquireCaeLock = async (connection, name, waitSec) => {
+  const metaRows = await executeWithConnection(
+    connection,
+    'SELECT IS_USED_LOCK(?) AS holder_id, CONNECTION_ID() AS my_id',
+    [name]
+  );
+  const holderId = metaRows?.[0]?.holder_id ?? null;
+  const myId = metaRows?.[0]?.my_id ?? null;
+
+  if (holderId != null) {
+    console.warn(
+      `⚠️ Lock ${name} ya retenido por conexión MySQL id=${holderId} ` +
+        `(esta request usa id=${myId}). Esperando hasta ${waitSec}s...`
+    );
+  } else {
+    console.log(`🔗 Lock ${name} libre; adquiriendo (conn id=${myId}, wait=${waitSec}s)...`);
+  }
+
+  const lockRows = await executeWithConnection(
+    connection,
+    'SELECT GET_LOCK(?, ?) AS lock_acquired',
+    [name, waitSec]
+  );
+  return lockRows?.[0]?.lock_acquired === 1;
+};
 
 /**
  * ✅ SOLICITAR CAE PARA UNA VENTA
@@ -365,14 +396,12 @@ const solicitarCAE = async (req, res) => {
       10000,
       `Timeout (10s) obteniendo conexión de BD para lock de numeración (${lockName}). Pool de conexiones posiblemente agotado.`
     );
-    console.log(`🔗 Conexión obtenida, solicitando GET_LOCK(${lockName}, ${CAE_LOCK_WAIT_SEC}s)...`);
-    const lockRows = await withTimeout(
-      executeWithConnection(lockConnection, 'SELECT GET_LOCK(?, ?) AS lock_acquired', [lockName, CAE_LOCK_WAIT_SEC]),
-      CAE_LOCK_WAIT_OUTER_MS,
-      `Timeout (${CAE_LOCK_WAIT_OUTER_MS / 1000}s) esperando GET_LOCK(${lockName}). Otra solicitud lo tiene retenido.`
-    );
-    if (!lockRows?.[0] || lockRows[0].lock_acquired !== 1) {
-      throw new Error(`No se pudo obtener lock de numeración (${lockName}). Reintente en unos segundos.`);
+    const gotLock = await acquireCaeLock(lockConnection, lockName, CAE_LOCK_WAIT_SEC);
+    if (!gotLock) {
+      throw new Error(
+        `No se pudo obtener lock de numeración (${lockName}) tras ${CAE_LOCK_WAIT_SEC}s. ` +
+          `Otra conexión MySQL lo retiene (proceso zombie o API vieja). Reiniciá PM2 o hacé KILL de esa conexión.`
+      );
     }
     lockAcquired = true;
     console.log(`🔒 Lock de numeración adquirido: ${lockName}`);
@@ -977,15 +1006,19 @@ const solicitarCAE = async (req, res) => {
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   } finally {
-    if (lockAcquired && lockName) {
+    // Siempre intentar RELEASE_LOCK si hay conexión + nombre: cubre el caso en que
+    // GET_LOCK terminó después de un abort JS y lockAcquired quedó en false.
+    if (lockConnection && lockName) {
       try {
-        const releaseRows = lockConnection
-          ? await executeWithConnection(lockConnection, 'SELECT RELEASE_LOCK(?) AS released', [lockName])
-          : [];
+        const releaseRows = await executeWithConnection(
+          lockConnection,
+          'SELECT RELEASE_LOCK(?) AS released',
+          [lockName]
+        );
         const released = releaseRows?.[0]?.released;
         if (released === 1) {
           console.log(`🔓 Lock de numeración liberado: ${lockName}`);
-        } else {
+        } else if (lockAcquired) {
           console.warn(`⚠️  RELEASE_LOCK devolvió ${released} para ${lockName}`);
         }
       } catch (releaseError) {
