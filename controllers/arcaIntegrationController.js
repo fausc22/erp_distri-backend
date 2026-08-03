@@ -182,6 +182,34 @@ const withTimeout = (promise, ms, timeoutMessage) => {
 };
 
 /**
+ * Adquiere una conexión del pool con techo de espera.
+ * Si el timeout gana la carrera, la conexión que llegue tarde se auto-libera
+ * (Promise.race no cancela getDbConnection; sin esto se filtraría un slot del pool).
+ */
+const getDbConnectionWithTimeout = (ms, timeoutMessage) => {
+  let timedOut = false;
+  const guarded = getDbConnection().then((conn) => {
+    if (timedOut) {
+      try {
+        conn.release();
+      } catch (_) {
+        /* ignore */
+      }
+      return null;
+    }
+    return conn;
+  });
+  return withTimeout(guarded, ms, timeoutMessage).finally(() => {
+    timedOut = true;
+  });
+};
+
+/** Techos de espera CAE: el lock se retiene durante crearFactura; la espera debe cubrirlo. */
+const AFIP_CREATE_TIMEOUT_MS = 60000;
+const CAE_LOCK_WAIT_SEC = 90;
+const CAE_LOCK_WAIT_OUTER_MS = 95000;
+
+/**
  * ✅ SOLICITAR CAE PARA UNA VENTA
  * POST /arca/solicitar-cae
  */
@@ -333,16 +361,15 @@ const solicitarCAE = async (req, res) => {
     // Así el orden de envío queda alineado con el orden autorizado por ARCA.
     lockName = `arca_cae_${tipoFiscalLocal || venta.tipo_f || 'UNK'}_${puntoVentaLocal}`;
     console.log(`🔗 Obteniendo conexión de BD para lock ${lockName}...`);
-    lockConnection = await withTimeout(
-      getDbConnection(),
+    lockConnection = await getDbConnectionWithTimeout(
       10000,
       `Timeout (10s) obteniendo conexión de BD para lock de numeración (${lockName}). Pool de conexiones posiblemente agotado.`
     );
-    console.log(`🔗 Conexión obtenida, solicitando GET_LOCK(${lockName})...`);
+    console.log(`🔗 Conexión obtenida, solicitando GET_LOCK(${lockName}, ${CAE_LOCK_WAIT_SEC}s)...`);
     const lockRows = await withTimeout(
-      executeWithConnection(lockConnection, 'SELECT GET_LOCK(?, ?) AS lock_acquired', [lockName, 30]),
-      35000,
-      `Timeout (35s) esperando GET_LOCK(${lockName}). Otra solicitud lo tiene retenido.`
+      executeWithConnection(lockConnection, 'SELECT GET_LOCK(?, ?) AS lock_acquired', [lockName, CAE_LOCK_WAIT_SEC]),
+      CAE_LOCK_WAIT_OUTER_MS,
+      `Timeout (${CAE_LOCK_WAIT_OUTER_MS / 1000}s) esperando GET_LOCK(${lockName}). Otra solicitud lo tiene retenido.`
     );
     if (!lockRows?.[0] || lockRows[0].lock_acquired !== 1) {
       throw new Error(`No se pudo obtener lock de numeración (${lockName}). Reintente en unos segundos.`);
@@ -664,11 +691,11 @@ const solicitarCAE = async (req, res) => {
       jsonData: null
     };
     
-    console.log('⏳ Esperando respuesta de ARCA/AFIP (timeout 60s)...');
+    console.log(`⏳ Esperando respuesta de ARCA/AFIP (timeout ${AFIP_CREATE_TIMEOUT_MS / 1000}s)...`);
     await withTimeout(
       billingController.crearFactura(mockReq, mockRes),
-      60000,
-      'Timeout (60s) esperando respuesta de ARCA/AFIP. Los servidores de AFIP no respondieron a tiempo; reintente en unos minutos.'
+      AFIP_CREATE_TIMEOUT_MS,
+      `Timeout (${AFIP_CREATE_TIMEOUT_MS / 1000}s) esperando respuesta de ARCA/AFIP. Los servidores de AFIP no respondieron a tiempo; reintente en unos minutos.`
     );
     console.log('✅ Respuesta de ARCA/AFIP recibida');
     

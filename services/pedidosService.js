@@ -500,6 +500,30 @@ const nuevoPedido = async (req, res) => {
         });
     } catch (err) {
         const msg = err.message || String(err);
+        const sqlMsg = err.sqlMessage || msg;
+        const esDupHash =
+            err.code === 'ER_DUP_ENTRY' &&
+            (sqlMsg.includes('hash_pedido') || sqlMsg.includes('uk_pedidos_hash_pedido'));
+
+        // Red de seguridad: UNIQUE(hash_pedido) cerró la ventana de carrera del chequeo previo.
+        // Devolver el mismo shape que el path de duplicado "rápido" para no romper sync offline.
+        if (esDupHash && hashPedidoFinal) {
+            console.log(`⚠️ Pedido duplicado por UNIQUE(hash_pedido): ${hashPedidoFinal}`);
+            const pedidoExistente = await verificarPedidoDuplicado(hashPedidoFinal);
+            await auditarOperacion(req, {
+                accion: 'DUPLICATE_DETECTED',
+                tabla: 'pedidos',
+                registroId: pedidoExistente?.id || null,
+                detallesAdicionales: `Duplicado por UNIQUE hash_pedido=${hashPedidoFinal} — Pedido existente: ${pedidoExistente?.id || 'N/A'}`
+            });
+            return res.json({
+                success: true,
+                message: 'Este pedido ya fue registrado anteriormente',
+                pedidoId: pedidoExistente?.id || null,
+                existing: true,
+                data: pedidoExistente || null
+            });
+        }
 
         if (msg.includes('Stock insuficiente')) {
             await auditarOperacion(req, {
