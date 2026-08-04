@@ -83,15 +83,15 @@ const determinarTipoComprobante = (condicionIVA, tipoFiscalOriginal, tipoDoc) =>
     return MAPEO_TIPOS_COMPROBANTE[tipoFiscalOriginal];
   }
   
-  // ✅ CORREGIDO: 
-  // - Tipo A: Solo Responsable Inscripto
-  // - Tipo B: Exento, Consumidor Final, Monotributo
+  // Según FEParamGetCondicionIvaReceptor (ARCA/AFIP):
+  // - Tipo A: Responsable Inscripto y Monotributo
+  // - Tipo B: Exento y Consumidor Final
   switch (condicionIVA) {
     case 'Responsable Inscripto':
+    case 'Monotributo':
       return 1; // Factura A
     case 'Consumidor Final':
     case 'Exento':
-    case 'Monotributo':
       return 6; // Factura B
     default:
       return 6;

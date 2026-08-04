@@ -6,10 +6,10 @@
 // TIPOS DE COMPROBANTES AFIP
 // ============================================
 export const TIPOS_COMPROBANTE = {
-  FACTURA_A: 1,           // Para Responsables Inscriptos (emisor RI)
+  FACTURA_A: 1,           // Para Responsables Inscriptos y Monotributo (emisor RI)
   NOTA_DEBITO_A: 2,
   NOTA_CREDITO_A: 3,
-  FACTURA_B: 6,           // Para Consumidores Finales, Exentos y Monotributo
+  FACTURA_B: 6,           // Para Consumidores Finales y Exentos
   NOTA_DEBITO_B: 7,
   NOTA_CREDITO_B: 8,
   FACTURA_C: 11,          // Para operaciones exentas
@@ -90,18 +90,18 @@ export const MONEDAS = {
 
 /**
  * Determinar tipo de comprobante según condición IVA del receptor
- * ✅ CORREGIDO: 
- * - Tipo A: Solo Responsable Inscripto
- * - Tipo B: Exento, Consumidor Final, Monotributo
+ * Según FEParamGetCondicionIvaReceptor (ARCA/AFIP):
+ * - Tipo A: Responsable Inscripto y Monotributo (Cmp_Clase A/M/C)
+ * - Tipo B: Exento y Consumidor Final (Cmp_Clase B/C)
  */
 export const determinarTipoComprobante = (condicionIVAReceptor) => {
   switch (condicionIVAReceptor) {
     case CONDICIONES_IVA.RESPONSABLE_INSCRIPTO:
+    case CONDICIONES_IVA.MONOTRIBUTO:
       return TIPOS_COMPROBANTE.FACTURA_A;
     
     case CONDICIONES_IVA.CONSUMIDOR_FINAL:
     case CONDICIONES_IVA.EXENTO:
-    case CONDICIONES_IVA.MONOTRIBUTO:
       return TIPOS_COMPROBANTE.FACTURA_B;
     
     default:
@@ -129,19 +129,22 @@ export function getNombreComprobante(codigo) {
 
 /**
  * Validar combinación de tipo de comprobante y condición IVA
+ * Según FEParamGetCondicionIvaReceptor (ARCA/AFIP)
  */
 export function validarCombinaciónComprobanteIVA(tipoComprobante, condicionIVA) {
-  // Tipo A: solo Responsable Inscripto (emisor RI)
+  // Tipo A: Responsable Inscripto y Monotributo
   if ([1, 2, 3].includes(tipoComprobante)) {
-    return condicionIVA === CONDICIONES_IVA.RESPONSABLE_INSCRIPTO;
+    return [
+      CONDICIONES_IVA.RESPONSABLE_INSCRIPTO,
+      CONDICIONES_IVA.MONOTRIBUTO,
+    ].includes(condicionIVA);
   }
   
-  // Tipo B: Consumidor Final, Exento y Monotributo
+  // Tipo B: Consumidor Final y Exento
   if ([6, 7, 8].includes(tipoComprobante)) {
     return [
       CONDICIONES_IVA.CONSUMIDOR_FINAL,
       CONDICIONES_IVA.EXENTO,
-      CONDICIONES_IVA.MONOTRIBUTO,
     ].includes(condicionIVA);
   }
   
