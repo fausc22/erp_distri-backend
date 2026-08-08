@@ -181,8 +181,10 @@ app.use('/static', express.static('public', staticOptions));
 // ENDPOINTS DEL SISTEMA
 // ==============================================
 
-// ✅ FIX: Endpoint liviano para verificación de conectividad (no verifica DB)
-// Usado por ConnectionManager para detectar si hay red + backend disponible
+// ✅ Endpoint liviano para verificación de conectividad PWA (NO verifica DB)
+// Usado por ConnectionContext / utils/connectivity (RECONECTAR APP).
+// Importante CORS: el cliente NO debe enviar headers custom (Cache-Control/Pragma/Expires)
+// para evitar preflight fallido. allowedHeaders actuales son suficientes para GET simple.
 app.get('/ping', (req, res) => {
     // Solo verificar que el servidor responde, sin verificar DB ni cache
     res.status(200).json({
