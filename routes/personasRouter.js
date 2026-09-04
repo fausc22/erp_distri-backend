@@ -1,7 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const personasController = require('../controllers/personasController');
-const { requireEmployee } = require('../middlewares/authMiddleware');
+const { requireEmployee, authorizeRole } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const { cacheMiddleware, invalidate } = require('../utils/cache');
 const router = express.Router();
@@ -27,6 +27,7 @@ const consultaAfipLimiter = rateLimit({
 
 router.post('/crear-cliente', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'clientes', incluirBody: true }),
     personasController.nuevoCliente
 );
@@ -50,6 +51,7 @@ router.get('/buscar-cliente',
 
 router.put('/actualizar-cliente/:id', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'clientes', incluirBody: true }),
     personasController.actualizarCliente
 );
@@ -64,18 +66,30 @@ router.post('/consulta-afip',
 
 router.post('/crear-proveedor', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'proveedores', incluirBody: true }),
     personasController.nuevoProveedor
 );
 
 router.get('/buscar-proveedor', 
     requireEmployee,
+    searchLimiter,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'proveedores', incluirQuery: true }),
+    (req, res, next) => {
+        const searchTerm = req.query.q || req.query.search || '';
+        const pagina = req.query.pagina || '1';
+        const porPagina = req.query.porPagina || '0';
+        const sortBy = req.query.sortBy || 'nombre';
+        const sortOrder = req.query.sortOrder || 'asc';
+        const cacheKey = `proveedores:buscar:${searchTerm}:${pagina}:${porPagina}:${sortBy}:${sortOrder}`;
+        return cacheMiddleware(cacheKey, 120)(req, res, next);
+    },
     personasController.buscarProveedor
 );
 
 router.put('/actualizar-proveedor/:id', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'proveedores', incluirBody: true }),
     personasController.actualizarProveedor
 );
@@ -90,6 +104,7 @@ router.get('/cliente/:id',
 // Eliminar cliente
 router.delete('/eliminar-cliente/:id',
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'DELETE', tabla: 'clientes' }),
     personasController.eliminarCliente
 );
@@ -111,6 +126,7 @@ router.get('/proveedor/:id',
 // Eliminar proveedor
 router.delete('/eliminar-proveedor/:id',
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'DELETE', tabla: 'proveedores' }),
     personasController.eliminarProveedor
 );

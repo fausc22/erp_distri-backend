@@ -1,0 +1,8 @@
+const STOCK_THRESHOLDS = {
+  SIN_STOCK: 0,
+  CRITICO: 5,
+  BAJO: 20,
+  BAJO_LISTADO: 10
+};
+
+module.exports = { STOCK_THRESHOLDS };

@@ -11,6 +11,7 @@ const multer = require('multer');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 const { roundFacturacion } = require('../utils/rounding');
+const { registrarMovimientoStock, resolverTipoOperacion } = require('../utils/stockMovement');
 
 // ✅ FUNCIÓN PARA GENERAR HASH ÚNICO DEL PEDIDO (IDEMPOTENCIA)
 const generarHashPedido = (pedidoData) => {
@@ -226,11 +227,23 @@ const buscarProducto = (req, res) => {
  * Actualiza stock de forma atómica (evita lost-update entre lecturas concurrentes).
  * @param {object|null} connection Conexión de transacción; si es null usa el pool global.
  */
-const actualizarStockProducto = async (productoId, cantidadCambio, motivo = 'pedido', connection = null) => {
+const actualizarStockProducto = async (productoId, cantidadCambio, motivo = 'pedido', connection = null, kardex = null) => {
     const delta = parseFloat(cantidadCambio);
 
     if (Number.isNaN(delta)) {
         throw new Error(`Cantidad de stock inválida para producto ${productoId}`);
+    }
+
+    let stockAntes = null;
+    if (kardex && connection) {
+        const rows = await cQuery(
+            `SELECT stock_actual FROM productos WHERE id = ?`,
+            [productoId],
+            connection
+        );
+        if (rows?.length) {
+            stockAntes = parseFloat(rows[0].stock_actual);
+        }
     }
 
     if (delta < 0) {
@@ -254,6 +267,20 @@ const actualizarStockProducto = async (productoId, cantidadCambio, motivo = 'ped
         console.log(
             `✅ Stock actualizado (atómico) - Producto: ${productoId}, Cambio: ${delta}, Motivo: ${motivo}`
         );
+        if (kardex && connection && stockAntes !== null) {
+            await registrarMovimientoStock(connection, {
+                productoId,
+                delta,
+                stockAntes,
+                stockDespues: stockAntes + delta,
+                tipoOperacion: resolverTipoOperacion(motivo, kardex.tipoOperacion),
+                referenciaTipo: kardex.referenciaTipo || 'pedidos',
+                referenciaId: kardex.referenciaId ?? null,
+                usuarioId: kardex.usuarioId ?? null,
+                usuarioNombre: kardex.usuarioNombre ?? null,
+                observaciones: kardex.observaciones ?? motivo
+            });
+        }
         return result;
     }
 
@@ -272,6 +299,20 @@ const actualizarStockProducto = async (productoId, cantidadCambio, motivo = 'ped
     console.log(
         `✅ Stock incrementado - Producto: ${productoId}, Cambio: +${delta}, Motivo: ${motivo}`
     );
+    if (kardex && connection && stockAntes !== null) {
+        await registrarMovimientoStock(connection, {
+            productoId,
+            delta,
+            stockAntes,
+            stockDespues: stockAntes + delta,
+            tipoOperacion: resolverTipoOperacion(motivo, kardex.tipoOperacion),
+            referenciaTipo: kardex.referenciaTipo || 'pedidos',
+            referenciaId: kardex.referenciaId ?? null,
+            usuarioId: kardex.usuarioId ?? null,
+            usuarioNombre: kardex.usuarioNombre ?? null,
+            observaciones: kardex.observaciones ?? motivo
+        });
+    }
     return result;
 };
 
@@ -377,10 +418,64 @@ const registrarPedido = (pedidoData, callback, hashPedido = null) => {
 };
 
 // Inserta líneas y descuenta stock en la misma conexión (transacción).
-const insertarProductosPedido = async (pedidoId, productos, connection) => {
+const insertarProductosPedido = async (pedidoId, productos, connection, kardexMeta = {}) => {
+    const ids = productos.map((p) => p.id);
+    const stockRows = ids.length > 0
+        ? await queryPromiseWithConnection(
+            connection,
+            `SELECT id, nombre, stock_actual FROM productos WHERE id IN (${ids.map(() => '?').join(',')}) FOR UPDATE`,
+            ids
+        )
+        : [];
+    const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
+
+    const faltantes = [];
+    for (const p of productos) {
+        const row = stockMap.get(Number(p.id));
+        if (!row) {
+            throw new Error(`Producto "${p.nombre}" (id: ${p.id}) no encontrado`);
+        }
+        const stockDisponible = parseFloat(row.stock_actual);
+        const cantidadRequerida = parseFloat(p.cantidad);
+        if (stockDisponible < cantidadRequerida) {
+            faltantes.push({
+                id: p.id,
+                nombre: row.nombre,
+                disponible: stockDisponible,
+                requerido: cantidadRequerida
+            });
+        }
+    }
+
+    if (faltantes.length > 0) {
+        const detalle = faltantes
+            .map((f) => `"${f.nombre}": pedido ${f.requerido}, disponible ${f.disponible}`)
+            .join(' | ');
+        const err = new Error(`Stock insuficiente para ${faltantes.length} producto(s): ${detalle}`);
+        err.code = 'INSUFFICIENT_STOCK';
+        err.statusCode = 422;
+        err.faltantes = faltantes;
+        throw err;
+    }
+
     await pedidosRepository.insertProductosPedido(pedidoId, productos, connection);
+
+    const kardexBase = {
+        referenciaTipo: 'pedidos',
+        referenciaId: pedidoId,
+        usuarioId: kardexMeta.usuarioId ?? null,
+        usuarioNombre: kardexMeta.usuarioNombre ?? null,
+        tipoOperacion: 'PEDIDO_NUEVO'
+    };
+
     for (const producto of productos) {
-        await actualizarStockProducto(producto.id, -producto.cantidad, 'nuevo_pedido', connection);
+        await actualizarStockProducto(
+            producto.id,
+            -producto.cantidad,
+            'nuevo_pedido',
+            connection,
+            kardexBase
+        );
     }
 };
 
@@ -478,7 +573,10 @@ const nuevoPedido = async (req, res) => {
     try {
         const pedidoId = await withTransaction(async (connection) => {
             const newPedidoId = await insertPedidoCabecera(connection, pedidoPayload, hashPedidoFinal);
-            await insertarProductosPedido(newPedidoId, productos, connection);
+            await insertarProductosPedido(newPedidoId, productos, connection, {
+                usuarioId: empleado_id,
+                usuarioNombre: empleado_nombre
+            });
             return newPedidoId;
         });
 
@@ -756,59 +854,88 @@ const actualizarEstadoPedido = async (req, res) => {
                 if (necesitaAjusteStock) {
                     const productosDelPedido = await queryPromiseWithConnection(
                         connection,
-                        `SELECT producto_id, cantidad FROM pedidos_cont WHERE pedido_id = ?`,
+                        `SELECT pc.producto_id, pc.cantidad, p.stock_actual, p.nombre
+                         FROM pedidos_cont pc
+                         JOIN productos p ON p.id = pc.producto_id
+                         WHERE pc.pedido_id = ?
+                         FOR UPDATE`,
                         [pedidoId]
                     );
 
                     if (!productosDelPedido || productosDelPedido.length === 0) {
                         throw new Error('El pedido no tiene líneas de productos para ajustar stock');
                     }
-                }
 
-                if (estadoActual !== 'Anulado' && estado === 'Anulado') {
-                    // Ajuste en bloque: devolver unidades al inventario.
-                    await queryPromiseWithConnection(
-                        connection,
-                        `
-                            UPDATE productos p
-                            JOIN pedidos_cont pc ON pc.producto_id = p.id
-                            SET p.stock_actual = p.stock_actual + pc.cantidad
-                            WHERE pc.pedido_id = ?
-                        `,
-                        [pedidoId]
-                    );
-                } else if (estadoActual === 'Anulado' && estado !== 'Anulado') {
-                    // Validar stock antes de reactivar para evitar negativos.
-                    const faltantes = await queryPromiseWithConnection(
-                        connection,
-                        `
-                            SELECT pc.producto_id, pc.cantidad, p.stock_actual
-                            FROM pedidos_cont pc
-                            JOIN productos p ON p.id = pc.producto_id
-                            WHERE pc.pedido_id = ?
-                              AND p.stock_actual < pc.cantidad
-                            LIMIT 1
-                        `,
-                        [pedidoId]
-                    );
-
-                    if (faltantes && faltantes.length > 0) {
-                        const f = faltantes[0];
-                        throw new Error(
-                            `Stock insuficiente para reactivar. Producto ${f.producto_id}: disponible ${f.stock_actual}, requerido ${f.cantidad}`
+                    if (estadoActual !== 'Anulado' && estado === 'Anulado') {
+                        await queryPromiseWithConnection(
+                            connection,
+                            `
+                                UPDATE productos p
+                                JOIN pedidos_cont pc ON pc.producto_id = p.id
+                                SET p.stock_actual = p.stock_actual + pc.cantidad
+                                WHERE pc.pedido_id = ?
+                            `,
+                            [pedidoId]
                         );
-                    }
 
-                    await queryPromiseWithConnection(
-                        connection,
-                        `
-                            UPDATE productos p
-                            JOIN pedidos_cont pc ON pc.producto_id = p.id
-                            SET p.stock_actual = p.stock_actual - pc.cantidad
-                            WHERE pc.pedido_id = ?
-                        `,
-                        [pedidoId]
-                    );
+                        for (const linea of productosDelPedido) {
+                            const stockAntes = parseFloat(linea.stock_actual);
+                            const delta = parseFloat(linea.cantidad);
+                            await registrarMovimientoStock(connection, {
+                                productoId: linea.producto_id,
+                                delta,
+                                stockAntes,
+                                stockDespues: stockAntes + delta,
+                                tipoOperacion: 'PEDIDO_ANULADO',
+                                referenciaTipo: 'pedidos',
+                                referenciaId: Number(pedidoId),
+                                usuarioId: req.user?.id ?? null,
+                                usuarioNombre: req.user?.nombre ?? null,
+                                observaciones: `Anulación pedido #${pedidoId}`
+                            });
+                        }
+                    } else if (estadoActual === 'Anulado' && estado !== 'Anulado') {
+                        const faltantesRows = productosDelPedido.filter(
+                            (linea) => parseFloat(linea.stock_actual) < parseFloat(linea.cantidad)
+                        );
+
+                        if (faltantesRows.length > 0) {
+                            const detalle = faltantesRows.map(
+                                (f) => `"${f.nombre || f.producto_id}": disponible ${f.stock_actual}, requerido ${f.cantidad}`
+                            ).join(' | ');
+                            throw new Error(
+                                `Stock insuficiente para reactivar el pedido. ${faltantesRows.length} producto(s): ${detalle}`
+                            );
+                        }
+
+                        await queryPromiseWithConnection(
+                            connection,
+                            `
+                                UPDATE productos p
+                                JOIN pedidos_cont pc ON pc.producto_id = p.id
+                                SET p.stock_actual = p.stock_actual - pc.cantidad
+                                WHERE pc.pedido_id = ?
+                            `,
+                            [pedidoId]
+                        );
+
+                        for (const linea of productosDelPedido) {
+                            const stockAntes = parseFloat(linea.stock_actual);
+                            const delta = -parseFloat(linea.cantidad);
+                            await registrarMovimientoStock(connection, {
+                                productoId: linea.producto_id,
+                                delta,
+                                stockAntes,
+                                stockDespues: stockAntes + delta,
+                                tipoOperacion: 'PEDIDO_REACTIVADO',
+                                referenciaTipo: 'pedidos',
+                                referenciaId: Number(pedidoId),
+                                usuarioId: req.user?.id ?? null,
+                                usuarioNombre: req.user?.nombre ?? null,
+                                observaciones: `Reactivación pedido #${pedidoId}`
+                            });
+                        }
+                    }
                 }
 
                 await pedidosRepository.updateEstadoPedido(pedidoId, estado, connection);
@@ -1145,7 +1272,14 @@ const agregarProductoPedidoExistente = async (req, res) => {
                         producto_id,
                         -cantidad,
                         'agregar_producto_pedido',
-                        connection
+                        connection,
+                        {
+                            tipoOperacion: 'PEDIDO_ITEM_AGREGADO',
+                            referenciaTipo: 'pedidos',
+                            referenciaId: Number(pedidoId),
+                            usuarioId: req.user?.id ?? null,
+                            usuarioNombre: req.user?.nombre ?? null
+                        }
                     );
 
                     const totalesActualizados = await recalcularYActualizarTotalesPedido(
@@ -1330,7 +1464,14 @@ const actualizarProductoPedido = async (req, res) => {
                             productoId,
                             -diferenciaCantidad,
                             'actualizar_cantidad_pedido',
-                            connection
+                            connection,
+                            {
+                                tipoOperacion: 'PEDIDO_ITEM_MODIFICADO',
+                                referenciaTipo: 'pedidos',
+                                referenciaId: Number(pedidoId),
+                                usuarioId: req.user?.id ?? null,
+                                usuarioNombre: req.user?.nombre ?? null
+                            }
                         );
                     }
 
@@ -1446,7 +1587,14 @@ const eliminarProductoPedido = async (req, res) => {
                         datosProducto.producto_id,
                         datosProducto.cantidad,
                         'eliminar_producto_pedido',
-                        connection
+                        connection,
+                        {
+                            tipoOperacion: 'PEDIDO_ITEM_ELIMINADO',
+                            referenciaTipo: 'pedidos',
+                            referenciaId: Number(pedidoId),
+                            usuarioId: req.user?.id ?? null,
+                            usuarioNombre: req.user?.nombre ?? null
+                        }
                     );
 
                     const totales = await recalcularYActualizarTotalesPedido(pedidoId, null, connection);

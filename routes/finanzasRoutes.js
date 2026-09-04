@@ -219,6 +219,12 @@ router.get('/resumen-financiero',
     finanzasController.obtenerResumenFinanciero
 );
 
+router.get('/resumen-por-cuenta',
+    requireManager,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'cuenta_fondos', incluirQuery: true }),
+    finanzasController.obtenerResumenPorCuenta
+);
+
 router.get('/ganancias-por-producto', 
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'ventas', incluirQuery: true }),

@@ -13,6 +13,7 @@ const remitosRepository = require('../repositories/remitosRepository');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 const { roundFacturacion } = require('../utils/rounding');
+const { registrarMovimientoStock } = require('../utils/stockMovement');
 // Nota: Las funciones de ARCA solo se usan al solicitar CAE, no al crear ventas
 
 const verificarArchivoExiste = (comprobantePath) => {
@@ -1418,6 +1419,14 @@ const verificarVentaDuplicada = async (hashVenta) => {
     });
 };
 
+const crearErrorNegocioVentaDirecta = (message, code, extra = {}) => {
+    const err = new Error(message);
+    err.code = code;
+    err.statusCode = 422;
+    Object.assign(err, extra);
+    return err;
+};
+
 const ventaDirecta = async (req, res) => {
     const { 
         // Datos del cliente
@@ -1539,7 +1548,10 @@ const ventaDirecta = async (req, res) => {
                 ivaTotalFinal < 0 ||
                 totalConIvaFinal <= 0
             ) {
-                throw new Error('Importes de venta directa inválidos. No se pudo generar pedido/venta válidos.');
+                throw crearErrorNegocioVentaDirecta(
+                    'Importes de venta directa inválidos. No se pudo generar pedido/venta válidos.',
+                    'INVALID_AMOUNTS'
+                );
             }
 
             const pedidoQuery = `
@@ -1585,32 +1597,79 @@ const ventaDirecta = async (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
 
-            for (const producto of productos) {
+            // Deduplicar productos por id (sumar cantidades e importes si llegan repetidos)
+            const productosMergeados = Object.values(
+                productos.reduce((acc, p) => {
+                    const key = String(p.id);
+                    if (acc[key]) {
+                        acc[key].cantidad = parseFloat(acc[key].cantidad) + parseFloat(p.cantidad);
+                        acc[key].iva = parseFloat(acc[key].iva || 0) + parseFloat(p.iva || 0);
+                        acc[key].subtotal = parseFloat(acc[key].subtotal || 0) + parseFloat(p.subtotal || 0);
+                    } else {
+                        acc[key] = { ...p };
+                    }
+                    return acc;
+                }, {})
+            );
+
+            // Fase A: lock + validación global de stock antes de insertar líneas
+            const idsProductos = productosMergeados.map((p) => p.id);
+            const stockRows = idsProductos.length > 0
+                ? await queryPromiseWithConnection(
+                    connection,
+                    `SELECT id, nombre, stock_actual FROM productos WHERE id IN (${idsProductos.map(() => '?').join(',')}) FOR UPDATE`,
+                    idsProductos
+                )
+                : [];
+            const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
+
+            const faltantes = [];
+            for (const p of productosMergeados) {
+                const row = stockMap.get(Number(p.id));
+                if (!row) {
+                    throw crearErrorNegocioVentaDirecta(
+                        `Producto "${p.nombre}" (id: ${p.id}) no encontrado en la base de datos.`,
+                        'PRODUCT_NOT_FOUND'
+                    );
+                }
+                const stockDisponible = parseFloat(row.stock_actual);
+                const cantidadRequerida = parseFloat(p.cantidad);
+                if (stockDisponible < cantidadRequerida) {
+                    faltantes.push({
+                        id: Number(p.id),
+                        nombre: row.nombre,
+                        disponible: stockDisponible,
+                        requerido: cantidadRequerida
+                    });
+                }
+            }
+
+            if (faltantes.length > 0) {
+                const detalle = faltantes.map(
+                    (f) => `"${f.nombre}": pedido ${f.requerido}, disponible ${f.disponible}`
+                ).join(' | ');
+                throw crearErrorNegocioVentaDirecta(
+                    `Stock insuficiente para ${faltantes.length} producto(s): ${detalle}`,
+                    'INSUFFICIENT_STOCK',
+                    { faltantes }
+                );
+            }
+
+            for (const producto of productosMergeados) {
                 const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje } = producto;
-                
-                // Insertar en pedidos_cont con descuento
-                await queryPromiseWithConnection(connection, insertProductoPedidoQuery, 
+
+                await queryPromiseWithConnection(connection, insertProductoPedidoQuery,
                     [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje || 0]
                 );
 
-                // Actualizar stock
-                const queryVerificarStock = `SELECT id, stock_actual FROM productos WHERE id = ?`;
-                const stockResults = await queryPromiseWithConnection(connection, queryVerificarStock, [id]);
-                
-                if (stockResults.length === 0) {
-                    throw new Error(`Producto ${id} no encontrado`);
-                }
-                
-                const stockActual = parseFloat(stockResults[0].stock_actual);
-                const nuevoStock = stockActual - parseFloat(cantidad);
-                
-                if (nuevoStock < 0) {
-                    throw new Error(`Stock insuficiente para producto ${nombre}. Stock disponible: ${stockActual}`);
-                }
-                
-                const queryActualizarStock = `UPDATE productos SET stock_actual = ? WHERE id = ?`;
-                await queryPromiseWithConnection(connection, queryActualizarStock, [nuevoStock, id]);
-                
+                await queryPromiseWithConnection(
+                    connection,
+                    `UPDATE productos SET stock_actual = stock_actual - ? WHERE id = ?`,
+                    [parseFloat(cantidad), id]
+                );
+
+                const row = stockMap.get(Number(id));
+                const nuevoStock = parseFloat(row.stock_actual) - parseFloat(cantidad);
                 console.log(`✅ Stock actualizado - Producto: ${nombre}, Cantidad: ${cantidad}, Nuevo stock: ${nuevoStock}`);
             }
 
@@ -1652,6 +1711,25 @@ const ventaDirecta = async (req, res) => {
             });
             
             console.log(`✅ [Venta Directa] Venta creada con ID: ${ventaId}`);
+
+            for (const producto of productosMergeados) {
+                const row = stockMap.get(Number(producto.id));
+                if (!row) continue;
+                const stockAntes = parseFloat(row.stock_actual);
+                const cantidad = parseFloat(producto.cantidad);
+                await registrarMovimientoStock(connection, {
+                    productoId: producto.id,
+                    delta: -cantidad,
+                    stockAntes,
+                    stockDespues: stockAntes - cantidad,
+                    tipoOperacion: 'VENTA_DIRECTA',
+                    referenciaTipo: 'ventas',
+                    referenciaId: ventaId,
+                    usuarioId: empleado_id ?? null,
+                    usuarioNombre: empleado_nombre ?? null,
+                    observaciones: `Venta directa #${ventaId} / Pedido #${pedidoId}`
+                });
+            }
             
             // ✅ Verificar inmediatamente después de insertar
             const verifyQuery = `SELECT exento FROM ventas WHERE id = ?`;
@@ -1670,7 +1748,7 @@ const ventaDirecta = async (req, res) => {
             // ============================================
             console.log('📦 [Venta Directa] Paso 4: Copiando productos a la venta...');
             
-            await ventasRepository.insertarVentaItems(connection, ventaId, productos.map((producto) => ({
+            await ventasRepository.insertarVentaItems(connection, ventaId, productosMergeados.map((producto) => ({
                 producto_id: producto.id,
                 producto_nombre: producto.nombre,
                 producto_um: producto.unidad_medida,
@@ -1713,7 +1791,7 @@ const ventaDirecta = async (req, res) => {
             console.log('📦 [Venta Directa] Paso 6: Insertando productos en remito...');
             
             // ✅ ADAPTAR ESTRUCTURA DE PRODUCTOS PARA EL REMITO
-                const productosParaRemito = productos.map(producto => ({
+                const productosParaRemito = productosMergeados.map(producto => ({
                     producto_id: producto.id,
                     producto_nombre: producto.nombre,
                     producto_um: producto.unidad_medida,
@@ -1776,7 +1854,7 @@ const ventaDirecta = async (req, res) => {
                         cuenta_id: cuentaId,
                         descuento: descuentoAplicado
                     },
-                    detallesAdicionales: `Venta directa completada - Pedido #${pedidoId} → Venta #${ventaId} → Remito #${remitoId} - Cliente: ${cliente_nombre} - Total: $${totalR} - ${productos.length} productos`
+                    detallesAdicionales: `Venta directa completada - Pedido #${pedidoId} → Venta #${ventaId} → Remito #${remitoId} - Cliente: ${cliente_nombre} - Total: $${totalR} - ${productosMergeados.length} productos`
                 });
             } catch (auditError) {
                 console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
@@ -1796,7 +1874,7 @@ const ventaDirecta = async (req, res) => {
                     ventaId,
                     remitoId,
                     total: totalR,
-                    productosCount: productos.length
+                    productosCount: productosMergeados.length
                 }
             };
         });
@@ -1813,9 +1891,12 @@ const ventaDirecta = async (req, res) => {
         } catch (auditError) {
             console.warn('⚠️ Error en auditoría de error (no crítico):', auditError.message);
         }
-        return res.status(500).json({
+        const statusCode = error.statusCode || 500;
+        return res.status(statusCode).json({
             success: false,
+            code: error.code || 'INTERNAL_ERROR',
             message: error.message || 'Error en el proceso de venta directa',
+            ...(error.faltantes && { faltantes: error.faltantes }),
             details: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     }

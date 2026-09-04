@@ -435,9 +435,14 @@ process.on('uncaughtException', async (error) => {
     await gracefulShutdown('uncaughtException');
 });
 
-process.on('unhandledRejection', async (reason, promise) => {
-    console.error('💥 Promise rechazada no manejada en VPS:', reason);
-    await gracefulShutdown('unhandledRejection');
+// Promise rechazada sin catch: loguear pero NO matar el proceso.
+// Un rejection no manejado (ej. SOAP interno de AFIP) no debe tumbar el server
+// mientras otras requests siguen activas — especialmente tras CAE aprobado.
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('⚠️ [UnhandledRejection] Promise rechazada sin catch:', reason);
+    if (reason instanceof Error && reason.stack) {
+        console.error(reason.stack);
+    }
 });
 
 
@@ -465,3 +470,8 @@ const server = app.listen(port, '0.0.0.0', async () => {
     console.log(`   - API Docs: http://localhost:${port}/`);
     console.log('='.repeat(60) + '\n');
 });
+
+// Requests largas (CAE/AFIP puede tardar ~60s): evitar cierre prematuro del socket HTTP
+server.setTimeout(90000);
+server.keepAliveTimeout = 95000;
+server.headersTimeout = 96000;

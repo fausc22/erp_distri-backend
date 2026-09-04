@@ -11,14 +11,15 @@ class GastosRepository extends BaseRepository {
 
   async crear(gastoData, connection = null) {
     return this.insert(
-      `INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id)
-       VALUES (NOW(), ?, ?, ?, ?, ?)`,
+      `INSERT INTO gastos (fecha, descripcion, monto, forma_pago, observaciones, empleado_id, cuenta_id)
+       VALUES (NOW(), ?, ?, ?, ?, ?, ?)`,
       [
         gastoData.descripcion,
         gastoData.monto,
         gastoData.forma_pago,
         gastoData.observaciones,
-        gastoData.empleado_id
+        gastoData.empleado_id,
+        gastoData.cuenta_id || null
       ],
       connection
     );

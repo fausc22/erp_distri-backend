@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const { withTransaction } = require('../db/transaction');
+const { query: cQuery } = require('../db/connectionQuery');
+const { parsePagination } = require('../utils/pagination');
 const AppError = require('../errors/AppError');
 const fondosRepository = require('../repositories/fondosRepository');
 const reportesRepository = require('../repositories/reportesRepository');
@@ -15,6 +17,7 @@ const {
   GANANCIA_LINEA,
   COSTO_LINEA,
   INGRESO_LINEA,
+  INGRESO_LINEA_SIN_FLETE,
   CANTIDAD_LINEA,
   CTE_COSTO_POR_VENTA,
   FECHA_REF
@@ -196,60 +199,72 @@ const registrarMovimiento = async (req, res) => {
   }
 };
 
-const obtenerMovimientos = (req, res) => {
-  let { cuenta_id, tipo, desde, hasta, busqueda, limit = 100 } = req.query;
-  
-  let query = `
-    SELECT * FROM movimiento_fondos
-    WHERE 1=1
-  `;
-  
-  let params = [];
-  
-  // Aplicar filtros
-  if (cuenta_id && cuenta_id !== 'todas') {
-    query += ` AND cuenta_id = ?`;
-    params.push(cuenta_id);
-  }
-  
-  if (tipo && tipo !== 'todos') {
-    query += ` AND tipo = ?`;
-    params.push(tipo);
-  }
-  
-  if (desde) {
-    query += ` AND DATE(fecha) >= ?`;
-    params.push(desde);
-  }
-  
-  if (hasta) {
-    query += ` AND DATE(fecha) <= ?`;
-    params.push(hasta);
-  }
-  
-  if (busqueda) {
-    query += ` AND (origen LIKE ? OR referencia_id LIKE ?)`;
-    params.push(`%${busqueda}%`, `%${busqueda}%`);
-  }
-  
-  // Ordenar y limitar resultados
-  query += ` ORDER BY fecha DESC, id DESC LIMIT ?`;
-  params.push(parseInt(limit));
-  
-  db.query(query, params, (err, results) => {
-    if (err) {
-      console.error('Error al obtener movimientos:', err);
-      return res.status(500).json({ 
-        success: false, 
-        message: "Error al obtener los movimientos" 
-      });
-    }
-    
-    res.json({ 
-      success: true, 
-      data: results 
+const obtenerMovimientos = async (req, res) => {
+  try {
+    let { cuenta_id, tipo, desde, hasta, busqueda } = req.query;
+    const { pagina, porPagina, offset } = parsePagination(req.query, {
+      defaultPageSize: 100,
+      maxPageSize: 500
     });
-  });
+
+    let where = 'WHERE 1=1';
+    const params = [];
+
+    if (cuenta_id && cuenta_id !== 'todas') {
+      where += ' AND cuenta_id = ?';
+      params.push(cuenta_id);
+    }
+
+    if (tipo && tipo !== 'todos') {
+      where += ' AND tipo = ?';
+      params.push(tipo);
+    }
+
+    if (desde) {
+      where += ' AND DATE(fecha) >= ?';
+      params.push(desde);
+    }
+
+    if (hasta) {
+      where += ' AND DATE(fecha) <= ?';
+      params.push(hasta);
+    }
+
+    if (busqueda) {
+      where += ' AND (origen LIKE ? OR referencia_id LIKE ?)';
+      params.push(`%${busqueda}%`, `%${busqueda}%`);
+    }
+
+    const countRows = await cQuery(
+      `SELECT COUNT(*) AS total FROM movimiento_fondos ${where}`,
+      params
+    );
+    const total = Number(countRows?.[0]?.total || 0);
+
+    const results = await cQuery(
+      `SELECT * FROM movimiento_fondos ${where}
+       ORDER BY fecha DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      [...params, porPagina, offset]
+    );
+
+    res.json({
+      success: true,
+      data: results,
+      paginacion: {
+        pagina,
+        porPagina,
+        total,
+        totalPaginas: Math.ceil(total / porPagina) || 1
+      }
+    });
+  } catch (err) {
+    console.error('Error al obtener movimientos:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Error al obtener los movimientos'
+    });
+  }
 };
 
 // Transferencia entre cuentas con transaccion atomica (rollback en cualquier fallo)
@@ -580,106 +595,108 @@ const obtenerDetalleIngreso = (req, res) => {
   });
 };
 
-const obtenerEgresos = (req, res) => {
-  // Filtros opcionales
-  let { desde, hasta, tipo, cuenta, busqueda, limit = 100 } = req.query;
-  
-  // Construimos la consulta base que une compras, gastos y movimientos de egreso
-  let query = `
-    SELECT 
-      'Compra' AS tipo, 
-      c.id AS referencia, 
-      c.proveedor_nombre AS descripcion,
-      c.total AS monto, 
-      c.fecha, 
-      'Compra' AS origen,
-      'Cuenta Corriente' AS cuenta,
-      NULL AS id
-    FROM compras c
-    UNION ALL 
-    SELECT 
-      'Gasto' AS tipo, 
-      g.id AS referencia, 
-      g.descripcion,
-      g.monto, 
-      g.fecha, 
-      'Gasto' AS origen,
-      'Efectivo' AS cuenta,
-      NULL AS id
-    FROM gastos g
-    UNION ALL 
-    SELECT 
-      mf.tipo, 
-      mf.referencia_id AS referencia, 
-      mf.origen AS descripcion,
-      mf.monto, 
-      mf.fecha, 
-      mf.origen,
-      cf.nombre AS cuenta,
-      mf.id
-    FROM movimiento_fondos mf 
-    JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id 
-    WHERE mf.tipo = 'EGRESO'
-  `;
-  
-  // Aplicamos filtros
-  let whereClause = [];
-  let params = [];
-  
-  if (desde) {
-    whereClause.push("fecha >= ?");
-    params.push(desde);
-  }
-  
-  if (hasta) {
-    whereClause.push("fecha <= ?");
-    params.push(hasta);
-  }
-  
-  if (tipo && tipo !== 'todos') {
-    whereClause.push("tipo = ?");
-    params.push(tipo);
-  }
-  
-  if (cuenta && cuenta !== 'todas') {
-    whereClause.push("cuenta = ?");
-    params.push(cuenta);
-  }
-  
-  if (busqueda) {
-    whereClause.push("(descripcion LIKE ? OR referencia LIKE ?)");
-    params.push(`%${busqueda}%`, `%${busqueda}%`);
-  }
-  
-  // Agregamos WHERE si hay filtros
-  if (whereClause.length > 0) {
-    query = `SELECT * FROM (${query}) AS egresos WHERE ${whereClause.join(" AND ")}`;
-  } else {
-    query = `SELECT * FROM (${query}) AS egresos`;
-  }
-  
-  // Agregamos ORDER BY y LIMIT
-  query += ` ORDER BY fecha DESC, referencia DESC LIMIT ?`;
-  params.push(parseInt(limit));
-  
-  db.query(query, params, (err, results) => {
-    if (err) {
-      console.error('Error al obtener egresos:', err);
-      return res.status(500).json({ 
-        success: false, 
-        message: "Error al obtener los egresos" 
-      });
+const obtenerEgresos = async (req, res) => {
+  try {
+    let { desde, hasta, tipo, cuenta, busqueda, limit = 100 } = req.query;
+
+    // Compras y gastos como fuente documental; movimiento_fondos solo para egresos
+    // que NO se originaron ya en compras/gastos (evita doble conteo).
+    let query = `
+      SELECT
+        'Compra' AS tipo,
+        c.id AS referencia,
+        c.proveedor_nombre AS descripcion,
+        c.total AS monto,
+        c.fecha,
+        'Compra' AS origen,
+        COALESCE(cf_c.nombre, 'Sin cuenta') AS cuenta,
+        NULL AS id
+      FROM compras c
+      LEFT JOIN cuenta_fondos cf_c ON cf_c.id = c.cuenta_id
+      WHERE c.estado != 'Anulada'
+      UNION ALL
+      SELECT
+        'Gasto' AS tipo,
+        g.id AS referencia,
+        g.descripcion,
+        g.monto,
+        g.fecha,
+        'Gasto' AS origen,
+        COALESCE(cf_g.nombre, 'Sin cuenta') AS cuenta,
+        NULL AS id
+      FROM gastos g
+      LEFT JOIN cuenta_fondos cf_g ON cf_g.id = g.cuenta_id
+      UNION ALL
+      SELECT
+        mf.tipo,
+        mf.referencia_id AS referencia,
+        mf.origen AS descripcion,
+        mf.monto,
+        mf.fecha,
+        mf.origen,
+        cf.nombre AS cuenta,
+        mf.id
+      FROM movimiento_fondos mf
+      JOIN cuenta_fondos cf ON mf.cuenta_id = cf.id
+      WHERE mf.tipo = 'EGRESO'
+        AND NOT (
+          mf.origen IN ('compras', 'gastos')
+          AND mf.referencia_id IS NOT NULL
+        )
+    `;
+
+    const whereClause = [];
+    const params = [];
+
+    if (desde) {
+      whereClause.push('fecha >= ?');
+      params.push(desde);
     }
-    
-    // Calculamos el total de los egresos mostrados
+
+    if (hasta) {
+      whereClause.push('fecha <= ?');
+      params.push(hasta);
+    }
+
+    if (tipo && tipo !== 'todos') {
+      whereClause.push('tipo = ?');
+      params.push(tipo);
+    }
+
+    if (cuenta && cuenta !== 'todas') {
+      whereClause.push('cuenta = ?');
+      params.push(cuenta);
+    }
+
+    if (busqueda) {
+      whereClause.push('(descripcion LIKE ? OR referencia LIKE ?)');
+      params.push(`%${busqueda}%`, `%${busqueda}%`);
+    }
+
+    if (whereClause.length > 0) {
+      query = `SELECT * FROM (${query}) AS egresos WHERE ${whereClause.join(' AND ')}`;
+    } else {
+      query = `SELECT * FROM (${query}) AS egresos`;
+    }
+
+    query += ' ORDER BY fecha DESC, referencia DESC LIMIT ?';
+    params.push(parseInt(limit, 10) || 100);
+
+    const results = await cQuery(query, params);
     const totalEgresos = results.reduce((sum, egreso) => sum + parseFloat(egreso.monto), 0);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       data: results,
       total: totalEgresos
     });
-  });
+  } catch (err) {
+    console.error('Error al obtener egresos:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Error al obtener los egresos'
+    });
+  }
 };
 
 const obtenerDetalleCompra = (req, res) => {
@@ -1199,9 +1216,11 @@ const obtenerVentasPorVendedor = async (req, res) => {
           v.id,
           v.empleado_id,
           COALESCE(NULLIF(v.empleado_nombre, ''), 'Sin vendedor') AS empleado_nombre,
-          ${TOTAL_NETO('v')} AS total_neto
+          ROUND(SUM(${INGRESO_LINEA_SIN_FLETE('vc', 'v')}), 2) AS total_neto
         FROM ventas v
+        JOIN ventas_cont vc ON vc.venta_id = v.id
         WHERE ${whereSql}
+        GROUP BY v.id, v.empleado_id, v.empleado_nombre
       ),
       ${CTE_COSTO_POR_VENTA(whereSql)}
       SELECT
@@ -1569,6 +1588,42 @@ const obtenerResumenFinanciero = async (req, res) => {
 };
 
 
+const obtenerResumenPorCuenta = async (req, res) => {
+  try {
+    const filtros = normalizarFiltrosReportes(req.query);
+    const validacion = validarRangoFechas(filtros.desde, filtros.hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
+
+    const data = await reportesRepository.obtenerResumenPorCuenta(filtros);
+    const totales = data.reduce(
+      (acc, row) => ({
+        ingresos: acc.ingresos + Number(row.ingresos || 0),
+        compras: acc.compras + Number(row.compras || 0),
+        gastos: acc.gastos + Number(row.gastos || 0),
+        egresos: acc.egresos + Number(row.egresos || 0),
+        resultado: acc.resultado + Number(row.resultado || 0)
+      }),
+      { ingresos: 0, compras: 0, gastos: 0, egresos: 0, resultado: 0 }
+    );
+
+    res.json({
+      success: true,
+      data,
+      totales,
+      filtrosAplicados: filtros
+    });
+  } catch (error) {
+    console.error('💥 Error obteniendo resumen por cuenta:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener resumen por cuenta: ' + error.message
+    });
+  }
+};
+
+
 const obtenerGananciasPorEmpleado = async (req, res) => {
   try {
     const filtros = normalizarFiltrosReportes(req.query);
@@ -1586,9 +1641,11 @@ const obtenerGananciasPorEmpleado = async (req, res) => {
           COALESCE(NULLIF(v.empleado_nombre, ''), 'Sin vendedor') AS empleado_nombre,
           v.cliente_id,
           DATE(${FECHA_REF('v')}) AS fecha_ref,
-          ${TOTAL_NETO('v')} AS ingreso_neto
+          ROUND(SUM(${INGRESO_LINEA_SIN_FLETE('vc', 'v')}), 2) AS ingreso_neto
         FROM ventas v
+        JOIN ventas_cont vc ON vc.venta_id = v.id
         WHERE ${whereSql}
+        GROUP BY v.id, v.empleado_id, v.empleado_nombre, v.cliente_id, DATE(${FECHA_REF('v')})
       ),
       ${CTE_COSTO_POR_VENTA(whereSql)}
       SELECT
@@ -2041,18 +2098,30 @@ const obtenerDatosReporteGerencial = async (desde, hasta) => {
     LIMIT 50
   `;
 
-  // 4) Todos los vendedores con cantidad y total vendido
+  // 4) Todos los vendedores con cantidad y total vendido (excluye líneas FLETE)
   const queryVendedores = `
+    WITH ventas_sin_flete AS (
+      SELECT
+        v.id,
+        v.empleado_nombre,
+        v.tipo_doc,
+        v.fecha_fiscal,
+        v.fecha,
+        ROUND(SUM(${INGRESO_LINEA_SIN_FLETE('vc', 'v')}), 2) AS total_sin_flete
+      FROM ventas v
+      JOIN ventas_cont vc ON vc.venta_id = v.id
+      WHERE ${ventasFiltroBase}
+      GROUP BY v.id, v.empleado_nombre, v.tipo_doc, v.fecha_fiscal, v.fecha
+    )
     SELECT
-      COALESCE(NULLIF(TRIM(v.empleado_nombre), ''), 'Sin vendedor') AS vendedor,
-      COUNT(DISTINCT CASE WHEN v.tipo_doc <> 'NOTA_CREDITO' THEN v.id END) AS cantidad_ventas,
-      ROUND(SUM(CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -v.total ELSE v.total END), 2) AS total_vendido,
-      ROUND(AVG(CASE WHEN v.tipo_doc <> 'NOTA_CREDITO' THEN v.total END), 2) AS ticket_promedio,
-      MIN(DATE(COALESCE(v.fecha_fiscal, v.fecha))) AS primera_venta,
-      MAX(DATE(COALESCE(v.fecha_fiscal, v.fecha))) AS ultima_venta
-    FROM ventas v
-    WHERE ${ventasFiltroBase}
-    GROUP BY COALESCE(NULLIF(TRIM(v.empleado_nombre), ''), 'Sin vendedor')
+      COALESCE(NULLIF(TRIM(empleado_nombre), ''), 'Sin vendedor') AS vendedor,
+      SUM(CASE WHEN tipo_doc <> 'NOTA_CREDITO' AND total_sin_flete > 0 THEN 1 ELSE 0 END) AS cantidad_ventas,
+      ROUND(SUM(total_sin_flete), 2) AS total_vendido,
+      ROUND(AVG(CASE WHEN tipo_doc <> 'NOTA_CREDITO' AND total_sin_flete > 0 THEN total_sin_flete END), 2) AS ticket_promedio,
+      MIN(DATE(COALESCE(fecha_fiscal, fecha))) AS primera_venta,
+      MAX(DATE(COALESCE(fecha_fiscal, fecha))) AS ultima_venta
+    FROM ventas_sin_flete
+    GROUP BY COALESCE(NULLIF(TRIM(empleado_nombre), ''), 'Sin vendedor')
     ORDER BY total_vendido DESC
   `;
 
@@ -2271,6 +2340,7 @@ module.exports = {
   obtenerGananciasPorEmpleado,
   obtenerGananciasPorCiudad,
   obtenerResumenFinanciero,
+  obtenerResumenPorCuenta,
   obtenerProductosMasRentables,
   verificarDisponibilidadDatos,
   obtenerTopProductosTabla,

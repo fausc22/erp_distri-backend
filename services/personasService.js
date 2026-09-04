@@ -5,7 +5,7 @@ const { invalidate } = require('../utils/cache');
 const { validarDatosCliente, normalizarCuit } = require('../utils/validadoresCliente');
 
 const nuevoCliente = async (req, res) => {
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip } = req.body;
+    const { nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip } = req.body;
 
     // Fase 2: validaciones antes de insertar
     const { valido, errores } = validarDatosCliente(req.body);
@@ -28,13 +28,14 @@ const nuevoCliente = async (req, res) => {
     // Fase 3: guardar CUIT normalizado (solo dígitos) para consistencia
     const cuitGuardar = normalizarCuit(cuit);
     const dniGuardar = dni != null && String(dni).trim() !== '' ? String(dni).replace(/\D/g, '') : (dni || '');
+    const nombreAlternativoGuardar = nombre_alternativo != null ? String(nombre_alternativo).trim() : '';
 
     const query = `
-        INSERT INTO clientes (nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO clientes (nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [nombre, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, provincia, telefono, email, ciudadIdNormalizado, validadoAfipAt], async (err, results) => {
+    db.query(query, [nombre, nombreAlternativoGuardar, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, provincia, telefono, email, ciudadIdNormalizado, validadoAfipAt], async (err, results) => {
         if (err) {
             console.error('Error al insertar el cliente:', err);
 
@@ -58,6 +59,7 @@ const nuevoCliente = async (req, res) => {
                 const dataFallback = {
                     id: clienteId,
                     nombre: nombre || '',
+                    nombre_alternativo: nombreAlternativoGuardar,
                     condicion_iva: condicion_iva || '',
                     cuit: cuitGuardar || '',
                     dni: dniGuardar || '',
@@ -68,6 +70,7 @@ const nuevoCliente = async (req, res) => {
                     email: email || '',
                     ciudad_id: ciudadIdNormalizado
                 };
+                invalidate('clientes:*');
                 return res.json({
                     success: true,
                     message: "Cliente agregado correctamente",
@@ -81,6 +84,7 @@ const nuevoCliente = async (req, res) => {
                 clienteCreado = {
                     id: clienteId,
                     nombre: nombre || '',
+                    nombre_alternativo: nombreAlternativoGuardar,
                     condicion_iva: condicion_iva || '',
                     cuit: cuitGuardar || '',
                     dni: dniGuardar || '',
@@ -103,6 +107,8 @@ const nuevoCliente = async (req, res) => {
                 datosNuevos: clienteCreado,
                 detallesAdicionales: `Cliente creado: ${nombre}`
             });
+
+            invalidate('clientes:*');
 
             res.json({
                 success: true,
@@ -182,7 +188,7 @@ const buscarCliente = (req, res) => {
 
 const actualizarCliente = async (req, res) => {
     const clienteId = req.params.id;
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email, validado_afip } = req.body;
+    const { nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email, validado_afip } = req.body;
                                                            
 
     // Obtener datos anteriores para auditoría
@@ -235,15 +241,15 @@ const actualizarCliente = async (req, res) => {
 
             // Fase 4: si el front envía validado_afip = true, actualizar validado_afip_at
             const actualizarValidadoAfip = (validado_afip === true || validado_afip === 'true') ? 1 : 0;
+            const nombreAlternativoGuardar = nombre_alternativo != null ? String(nombre_alternativo).trim() : '';
 
             const updateQuery = `
                 UPDATE clientes 
-                SET nombre = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ?, validado_afip_at = IF(? = 1, NOW(), validado_afip_at)
+                SET nombre = ?, nombre_alternativo = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ?, validado_afip_at = IF(? = 1, NOW(), validado_afip_at)
                 WHERE id = ?
             `;
 
-            db.query(updateQuery, [nombre, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, ciudadIdUpdate, provincia, telefono, email, actualizarValidadoAfip, clienteId], async (error, updateResults) => {
-                //                                                                      ^^^^^^^^^ AGREGAR AQUÍ
+            db.query(updateQuery, [nombre, nombreAlternativoGuardar, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, ciudadIdUpdate, provincia, telefono, email, actualizarValidadoAfip, clienteId], async (error, updateResults) => {
                 if (error) {
                     console.error('Error al actualizar el cliente:', error);
                     
@@ -338,7 +344,7 @@ const obtenerClientePorId = (req, res) => {
     });
 };
 
-// Eliminar cliente (soft delete si usas ese patrón, o hard delete)
+// Eliminar cliente (con pre-check de dependencias)
 const eliminarCliente = async (req, res) => {
     const clienteId = req.params.id;
 
@@ -357,52 +363,72 @@ const eliminarCliente = async (req, res) => {
 
         const datosAnteriores = results[0];
 
-        // Eliminar el cliente
-        const deleteQuery = `DELETE FROM clientes WHERE id = ?`;
-        
-        db.query(deleteQuery, [clienteId], async (deleteErr, deleteResults) => {
-            if (deleteErr) {
-                console.error('Error al eliminar el cliente:', deleteErr);
-                
-                // Auditar error en eliminación
+        // Pre-check: no eliminar si tiene pedidos asociados
+        db.query('SELECT COUNT(*) as total FROM pedidos WHERE cliente_id = ?', [clienteId], async (countErr, countRows) => {
+            if (countErr) {
+                console.error('Error al verificar pedidos del cliente:', countErr);
+                return res.status(500).json({ success: false, message: "Error al verificar dependencias del cliente" });
+            }
+
+            const totalPedidos = Number(countRows?.[0]?.total || 0);
+            if (totalPedidos > 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: `Este cliente tiene ${totalPedidos} pedido${totalPedidos === 1 ? '' : 's'} asociado${totalPedidos === 1 ? '' : 's'} y no puede eliminarse`
+                });
+            }
+
+            // Eliminar el cliente
+            const deleteQuery = `DELETE FROM clientes WHERE id = ?`;
+            
+            db.query(deleteQuery, [clienteId], async (deleteErr, deleteResults) => {
+                if (deleteErr) {
+                    console.error('Error al eliminar el cliente:', deleteErr);
+                    
+                    // Auditar error en eliminación
+                    await auditarOperacion(req, {
+                        accion: 'DELETE',
+                        tabla: 'clientes',
+                        registroId: clienteId,
+                        detallesAdicionales: `Error al eliminar cliente: ${deleteErr.message}`,
+                        datosAnteriores
+                    });
+                    
+                    return res.status(500).json({ success: false, message: "Error al eliminar el cliente" });
+                }
+
+                // Auditar eliminación exitosa
                 await auditarOperacion(req, {
                     accion: 'DELETE',
                     tabla: 'clientes',
                     registroId: clienteId,
-                    detallesAdicionales: `Error al eliminar cliente: ${deleteErr.message}`,
-                    datosAnteriores
+                    datosAnteriores,
+                    detallesAdicionales: `Cliente eliminado: ${datosAnteriores.nombre}`
                 });
-                
-                return res.status(500).json({ success: false, message: "Error al eliminar el cliente" });
-            }
 
-            // Auditar eliminación exitosa
-            await auditarOperacion(req, {
-                accion: 'DELETE',
-                tabla: 'clientes',
-                registroId: clienteId,
-                datosAnteriores,
-                detallesAdicionales: `Cliente eliminado: ${datosAnteriores.nombre}`
+                invalidate('clientes:*');
+
+                res.json({ success: true, message: "Cliente eliminado correctamente" });
             });
-
-            res.json({ success: true, message: "Cliente eliminado correctamente" });
         });
     });
 };
 
 const nuevoProveedor = async (req, res) => {
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
+    const { nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
 
     if (!nombre || !condicion_iva || !cuit || !dni || !direccion || !ciudad || !provincia || !telefono || email === undefined) {
         return res.status(400).json({ success: false, message: "Todos los campos son obligatorios" });
     }
 
+    const nombreAlternativoGuardar = nombre_alternativo != null ? String(nombre_alternativo).trim() : '';
+
     const query = `
-        INSERT INTO proveedores (nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO proveedores (nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(query, [nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email], async (err, results) => {
+    db.query(query, [nombre, nombreAlternativoGuardar, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email], async (err, results) => {
         if (err) {
             console.error('Error al insertar el proveedor:', err);
             
@@ -424,39 +450,92 @@ const nuevoProveedor = async (req, res) => {
             registroId: results.insertId,
             datosNuevos: { 
                 id: results.insertId,
-                ...req.body
+                ...req.body,
+                nombre_alternativo: nombreAlternativoGuardar
             },
             detallesAdicionales: `Proveedor creado: ${nombre}`
         });
+
+        invalidate('proveedores:*');
         
         res.json({ success: true, message: "Proveedor agregado correctamente", data: results });
     });
 };
 
 const buscarProveedor = (req, res) => {
-    const searchTerm = req.query.search ? `%${req.query.search}%` : '%';
+    const rawSearch = (req.query.search || '').toString().trim();
+    const searchTerm = rawSearch ? `%${rawSearch}%` : '%';
 
-    const query = `
-        SELECT * FROM proveedores
-        WHERE nombre LIKE ?;
-    `;
+    // Paginación opcional (compatibilidad: si no se envía pagina/porPagina, devuelve todos)
+    const paginaRaw = toPositiveInt(req.query.pagina, 0);
+    const porPaginaRaw = toPositiveInt(req.query.porPagina, 0);
+    const usarPaginacion = paginaRaw > 0 && porPaginaRaw > 0;
+    const paginacion = usarPaginacion
+        ? parsePagination(req.query, { minPageSize: 10, maxPageSize: 200 })
+        : null;
+    const pagina = paginacion?.pagina || 1;
+    const porPagina = paginacion?.porPagina || null;
+    const offset = paginacion?.offset || 0;
 
-    db.query(query, [searchTerm], (err, results) => {
+    const sortByParam = (req.query.sortBy || 'nombre').toString().trim().toLowerCase();
+    const sortOrderParam = (req.query.sortOrder || 'asc').toString().trim().toLowerCase();
+    const SORTABLE_COLUMNS = {
+        nombre: 'nombre',
+        condicion_iva: 'condicion_iva',
+        cuit: 'cuit',
+        direccion: 'direccion',
+        ciudad: 'ciudad'
+    };
+    const sortBy = SORTABLE_COLUMNS[sortByParam] || 'nombre';
+    const sortOrder = sortOrderParam === 'desc' ? 'DESC' : 'ASC';
+
+    const whereClause = 'WHERE (nombre LIKE ? OR nombre_alternativo LIKE ? OR cuit LIKE ? OR ciudad LIKE ? OR provincia LIKE ?)';
+    const orderClause = `ORDER BY ${sortBy} ${sortOrder}`;
+
+    const queryData = usarPaginacion
+        ? `SELECT * FROM proveedores ${whereClause} ${orderClause} LIMIT ? OFFSET ?`
+        : `SELECT * FROM proveedores ${whereClause} ${orderClause}`;
+    const dataParamsBase = [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm];
+    const dataParams = usarPaginacion ? [...dataParamsBase, porPagina, offset] : dataParamsBase;
+
+    db.query(queryData, dataParams, (err, results) => {
         if (err) {
             console.error('Error al obtener los proveedores:', err);
             return res.status(500).json({ success: false, message: "Error al obtener los proveedores" });
         }
-        res.json({ success: true, data: results });
+
+        if (!usarPaginacion) {
+            return res.json({ success: true, data: results });
+        }
+
+        const queryCount = `SELECT COUNT(*) as total FROM proveedores ${whereClause}`;
+        db.query(queryCount, dataParamsBase, (countErr, countRows) => {
+            if (countErr) {
+                console.error('Error al contar proveedores:', countErr);
+                return res.status(500).json({ success: false, message: "Error al obtener los proveedores" });
+            }
+
+            const total = Number(countRows?.[0]?.total || 0);
+            return res.json({
+                success: true,
+                data: results,
+                total,
+                pagina,
+                porPagina
+            });
+        });
     });
 };
 
 const actualizarProveedor = async (req, res) => {
     const proveedorId = req.params.id;
-    const { nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
+    const { nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email } = req.body;
 
     if (!nombre || !condicion_iva || !cuit || !dni || !direccion || !ciudad || !provincia || !telefono || email === undefined) {
         return res.status(400).json({ success: false, message: "Todos los campos son obligatorios" });
     }
+
+    const nombreAlternativoGuardar = nombre_alternativo != null ? String(nombre_alternativo).trim() : '';
 
     // Obtener datos anteriores para auditoría
     const obtenerDatosAnterioresPromise = () => {
@@ -490,11 +569,11 @@ const actualizarProveedor = async (req, res) => {
             // Si el proveedor existe, proceder con la actualización
             const updateQuery = `
                 UPDATE proveedores 
-                SET nombre = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, provincia = ?, telefono = ?, email = ? 
+                SET nombre = ?, nombre_alternativo = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, provincia = ?, telefono = ?, email = ? 
                 WHERE id = ?
             `;
 
-            db.query(updateQuery, [nombre, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, proveedorId], async (error, updateResults) => {
+            db.query(updateQuery, [nombre, nombreAlternativoGuardar, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, proveedorId], async (error, updateResults) => {
                 if (error) {
                     console.error('Error al actualizar el proveedor:', error);
                     
@@ -523,10 +602,13 @@ const actualizarProveedor = async (req, res) => {
                     datosAnteriores,
                     datosNuevos: { 
                         id: proveedorId,
-                        ...req.body
+                        ...req.body,
+                        nombre_alternativo: nombreAlternativoGuardar
                     },
                     detallesAdicionales: `Proveedor actualizado: ${nombre}`
                 });
+
+                invalidate('proveedores:*');
 
                 res.json({ success: true, message: "Proveedor actualizado correctamente" });
             });
@@ -611,6 +693,8 @@ const eliminarProveedor = async (req, res) => {
                 datosAnteriores,
                 detallesAdicionales: `Proveedor eliminado: ${datosAnteriores.nombre}`
             });
+
+            invalidate('proveedores:*');
 
             res.json({ success: true, message: "Proveedor eliminado correctamente" });
         });

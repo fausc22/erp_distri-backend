@@ -2,6 +2,8 @@ const db = require('../db/legacyAdapter');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 const axios = require('axios');
 const { roundFacturacion } = require('../utils/rounding');
+const { registrarMovimientoStock } = require('../utils/stockMovement');
+const fondosRepository = require('../repositories/fondosRepository');
 
 const queryWithConnection = async (connection, sql, params = []) => {
     const [rows] = await connection.query(sql, params);
@@ -310,31 +312,55 @@ const crearNota = async (req, res) => {
 
                 // Devolución de mercadería al stock solo en Nota de Crédito y líneas con producto de catálogo
                 if (tipoNota === 'NOTA_CREDITO' && productoId != null) {
+                    const stockRows = await queryWithConnection(
+                        connection,
+                        `SELECT stock_actual FROM productos WHERE id = ?`,
+                        [productoId]
+                    );
+                    const stockAntes = stockRows?.length ? parseFloat(stockRows[0].stock_actual) : 0;
+
                     await queryWithConnection(
                         connection,
                         `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
                         [cantidad, productoId]
                     );
+
+                    await registrarMovimientoStock(connection, {
+                        productoId,
+                        delta: cantidad,
+                        stockAntes,
+                        stockDespues: stockAntes + cantidad,
+                        tipoOperacion: 'NOTA_CREDITO',
+                        referenciaTipo: 'ventas',
+                        referenciaId: notaId,
+                        usuarioId: req.user?.id ?? null,
+                        usuarioNombre: req.user?.nombre ?? null,
+                        observaciones: `Nota de crédito #${notaId}`
+                    });
                 }
             }
 
             console.log(`✅ ${productos.length} productos insertados`);
 
-            // ✅ 6. Si hay venta de referencia, actualizar cuenta de fondos
-            // Nota de Débito: suma (aumenta saldo)
-            // Nota de Crédito: resta (disminuye saldo)
+            // ✅ 6. Si hay cuenta, registrar movimiento de fondos (trazable)
+            // Nota de Débito: INGRESO (aumenta saldo)
+            // Nota de Crédito: EGRESO (disminuye saldo)
             if (cuentaId) {
-                const monto = tipoNota === 'NOTA_DEBITO' ? totalR : -totalR;
-                
-                const updateCuentaQuery = `
-                    UPDATE cuenta_fondos 
-                    SET saldo = saldo + ?
-                    WHERE id = ?
-                `;
+                const tipoMov = tipoNota === 'NOTA_DEBITO' ? 'INGRESO' : 'EGRESO';
+                const montoAbs = Math.abs(parseFloat(totalR));
 
-                await queryWithConnection(connection, updateCuentaQuery, [monto, cuentaId]);
+                await fondosRepository.obtenerCuentaPorIdForUpdate(connection, cuentaId);
+                await fondosRepository.registrarMovimiento(connection, {
+                    cuenta_id: cuentaId,
+                    tipo: tipoMov,
+                    origen: 'notas',
+                    monto: montoAbs,
+                    referencia_id: notaId
+                });
+                const delta = tipoMov === 'INGRESO' ? montoAbs : -montoAbs;
+                await fondosRepository.actualizarSaldo(connection, cuentaId, delta);
 
-                console.log(`✅ Cuenta ${cuentaId} actualizada: ${monto > 0 ? '+' : ''}${monto.toFixed(2)}`);
+                console.log(`✅ Cuenta ${cuentaId} actualizada con movimiento ${tipoMov}: ${delta > 0 ? '+' : ''}${montoAbs.toFixed(2)}`);
             }
 
             // ✅ 7. COMMIT

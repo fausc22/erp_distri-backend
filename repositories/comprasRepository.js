@@ -7,7 +7,8 @@ class ComprasRepository extends BaseRepository {
 
   obtenerProductosCompra(compraId, connection = null) {
     return this.query(
-      `SELECT compra_id, producto_id, producto_nombre, producto_um, cantidad, costo, precio, IVA, subtotal
+      `SELECT compra_id, producto_id, producto_nombre, producto_um, cantidad,
+              costo AS precio_costo, precio AS precio_venta, IVA, subtotal
        FROM compras_cont WHERE compra_id = ?`,
       [compraId],
       connection
@@ -35,18 +36,32 @@ class ComprasRepository extends BaseRepository {
     );
   }
 
-  async insertarProductos(compraId, productos, connection) {
-    const productosData = productos.map((producto) => [
-      compraId,
-      producto.id,
-      producto.nombre,
-      producto.unidad_medida || null,
-      parseFloat(producto.cantidad),
-      parseFloat(producto.precio_costo),
-      parseFloat(producto.precio_venta),
-      0,
-      parseFloat(producto.subtotal)
-    ]);
+  async insertarProductos(compraId, productos, connection, ivaTotal = 0) {
+    const subtotalGeneral = productos.reduce(
+      (acc, producto) => acc + (parseFloat(producto.subtotal) || 0),
+      0
+    );
+    const ivaTotalNum = parseFloat(ivaTotal) || 0;
+
+    const productosData = productos.map((producto) => {
+      const subtotal = parseFloat(producto.subtotal) || 0;
+      const ivaLinea =
+        subtotalGeneral > 0
+          ? parseFloat(((subtotal / subtotalGeneral) * ivaTotalNum).toFixed(2))
+          : 0;
+
+      return [
+        compraId,
+        producto.id,
+        producto.nombre,
+        producto.unidad_medida || null,
+        parseFloat(producto.cantidad),
+        parseFloat(producto.precio_costo),
+        parseFloat(producto.precio_venta),
+        ivaLinea,
+        subtotal
+      ];
+    });
 
     return this.run(
       `INSERT INTO compras_cont (

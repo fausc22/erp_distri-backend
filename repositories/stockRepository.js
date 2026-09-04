@@ -8,14 +8,6 @@ class StockRepository extends BaseRepository {
       connection
     );
   }
-
-  async decrementarStock(productoId, cantidad, connection = null) {
-    return this.update(
-      'UPDATE productos SET stock_actual = stock_actual - ? WHERE id = ?',
-      [cantidad, productoId],
-      connection
-    );
-  }
 }
 
 module.exports = new StockRepository();

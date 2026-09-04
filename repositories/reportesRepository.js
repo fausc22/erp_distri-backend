@@ -70,6 +70,104 @@ class ReportesRepository extends BaseRepository {
     };
   }
 
+  async obtenerResumenPorCuenta(filtros) {
+    const fechaParams = [filtros.desde, filtros.hasta];
+    const { whereSql, params } = this.construirWhereVentas(filtros, 'v');
+
+    const queryVentas = `
+      SELECT
+        COALESCE(v.cuenta_id, 0) AS cuenta_id,
+        COALESCE(cf.nombre, 'Sin cuenta') AS cuenta,
+        ROUND(SUM(${TOTAL_NETO('v')}), 2) AS ingresos,
+        COUNT(*) AS cantidad_ventas
+      FROM ventas v
+      LEFT JOIN cuenta_fondos cf ON cf.id = v.cuenta_id
+      WHERE ${whereSql}
+      GROUP BY COALESCE(v.cuenta_id, 0), cf.nombre
+    `;
+
+    const queryCompras = `
+      SELECT
+        COALESCE(c.cuenta_id, 0) AS cuenta_id,
+        COALESCE(cf.nombre, 'Sin cuenta') AS cuenta,
+        ROUND(COALESCE(SUM(c.total), 0), 2) AS compras,
+        COUNT(*) AS cantidad_compras
+      FROM compras c
+      LEFT JOIN cuenta_fondos cf ON cf.id = c.cuenta_id
+      WHERE DATE(c.fecha) >= ? AND DATE(c.fecha) <= ?
+        AND c.estado != 'Anulada'
+      GROUP BY COALESCE(c.cuenta_id, 0), cf.nombre
+    `;
+
+    const queryGastos = `
+      SELECT
+        COALESCE(g.cuenta_id, 0) AS cuenta_id,
+        COALESCE(cf.nombre, 'Sin cuenta') AS cuenta,
+        ROUND(COALESCE(SUM(g.monto), 0), 2) AS gastos,
+        COUNT(*) AS cantidad_gastos
+      FROM gastos g
+      LEFT JOIN cuenta_fondos cf ON cf.id = g.cuenta_id
+      WHERE DATE(g.fecha) >= ? AND DATE(g.fecha) <= ?
+      GROUP BY COALESCE(g.cuenta_id, 0), cf.nombre
+    `;
+
+    const [ventasRows, comprasRows, gastosRows] = await Promise.all([
+      this.query(queryVentas, params),
+      this.query(queryCompras, fechaParams),
+      this.query(queryGastos, fechaParams)
+    ]);
+
+    const porCuenta = new Map();
+
+    const ensure = (cuentaId, cuentaNombre) => {
+      const key = String(cuentaId);
+      if (!porCuenta.has(key)) {
+        porCuenta.set(key, {
+          cuenta_id: Number(cuentaId) || null,
+          cuenta: cuentaNombre || 'Sin cuenta',
+          ingresos: 0,
+          compras: 0,
+          gastos: 0,
+          egresos: 0,
+          resultado: 0,
+          cantidad_ventas: 0,
+          cantidad_compras: 0,
+          cantidad_gastos: 0
+        });
+      }
+      return porCuenta.get(key);
+    };
+
+    for (const row of ventasRows || []) {
+      const item = ensure(row.cuenta_id, row.cuenta);
+      item.ingresos += Number(row.ingresos || 0);
+      item.cantidad_ventas += Number(row.cantidad_ventas || 0);
+    }
+    for (const row of comprasRows || []) {
+      const item = ensure(row.cuenta_id, row.cuenta);
+      item.compras += Number(row.compras || 0);
+      item.cantidad_compras += Number(row.cantidad_compras || 0);
+    }
+    for (const row of gastosRows || []) {
+      const item = ensure(row.cuenta_id, row.cuenta);
+      item.gastos += Number(row.gastos || 0);
+      item.cantidad_gastos += Number(row.cantidad_gastos || 0);
+    }
+
+    return Array.from(porCuenta.values())
+      .map((item) => {
+        item.egresos = item.compras + item.gastos;
+        item.resultado = item.ingresos - item.egresos;
+        item.ingresos = Math.round(item.ingresos * 100) / 100;
+        item.compras = Math.round(item.compras * 100) / 100;
+        item.gastos = Math.round(item.gastos * 100) / 100;
+        item.egresos = Math.round(item.egresos * 100) / 100;
+        item.resultado = Math.round(item.resultado * 100) / 100;
+        return item;
+      })
+      .sort((a, b) => String(a.cuenta).localeCompare(String(b.cuenta), 'es'));
+  }
+
   async obtenerDashboardSimplificado(filtros) {
     const { whereSql, params } = this.construirWhereVentas(filtros, 'v');
     const fechaDesde = new Date(filtros.desde);

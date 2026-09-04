@@ -32,6 +32,14 @@ const COSTO_LINEA = (vcAlias = 'vc', pAlias = 'p', vAlias = 'v') =>
 const INGRESO_LINEA = (vcAlias = 'vc', vAlias = 'v') =>
   `${vcAlias}.precio * ${vcAlias}.cantidad * ${SIGNO_DOC(vAlias)}`;
 
+/** Líneas de flete (producto plantilla o descripción con FLETE) */
+const ES_LINEA_FLETE = (vcAlias = 'vc') =>
+  `UPPER(${vcAlias}.producto_nombre) LIKE '%FLETE%'`;
+
+/** Ingreso de línea excluyendo fletes — para totales por vendedor */
+const INGRESO_LINEA_SIN_FLETE = (vcAlias = 'vc', vAlias = 'v') =>
+  `CASE WHEN ${ES_LINEA_FLETE(vcAlias)} THEN 0 ELSE ${INGRESO_LINEA(vcAlias, vAlias)} END`;
+
 const CANTIDAD_LINEA = (vcAlias = 'vc', vAlias = 'v') =>
   `${vcAlias}.cantidad * ${SIGNO_DOC(vAlias)}`;
 
@@ -121,6 +129,8 @@ module.exports = {
   GANANCIA_LINEA,
   COSTO_LINEA,
   INGRESO_LINEA,
+  INGRESO_LINEA_SIN_FLETE,
+  ES_LINEA_FLETE,
   CANTIDAD_LINEA,
   CTE_COSTO_POR_VENTA,
   WHERE_VENTAS_BASE,

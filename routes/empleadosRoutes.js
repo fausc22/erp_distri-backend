@@ -1,9 +1,7 @@
-// routes/empleadosRoutes.js - REEMPLAZAR CON ESTO
-
 const express = require('express');
 const router = express.Router();
 const empleadosController = require('../controllers/empleadosController');
-const { requireEmployee, requireManager } = require('../middlewares/authMiddleware');
+const { requireManager } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 
 // Crear empleado
@@ -27,7 +25,7 @@ router.get('/buscar-empleado',
     empleadosController.buscarEmpleado
 );
 
-// ✅ NUEVA RUTA: Listar TODOS (activos e inactivos)
+// Listar TODOS (activos e inactivos)
 router.get('/listar-todos', 
     requireManager, 
     middlewareAuditoria({ accion: 'VIEW', tabla: 'empleados' }),
@@ -48,10 +46,10 @@ router.get('/:id',
     empleadosController.obtenerEmpleado
 );
 
-// Eliminar (desactivar)
+// Soft-delete (desactivar) — acción real es UPDATE de activo=0
 router.delete('/:id', 
     requireManager, 
-    middlewareAuditoria({ accion: 'DELETE', tabla: 'empleados' }),
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'empleados' }),
     empleadosController.desactivarEmpleado
 );
 

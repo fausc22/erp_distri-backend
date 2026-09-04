@@ -1,9 +1,9 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const productosController = require('../controllers/productosController');
-const { requireEmployee } = require('../middlewares/authMiddleware');
+const { requireEmployee, authorizeRole } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
-const { cacheMiddleware, invalidate } = require('../utils/cache');
+const { cacheMiddleware } = require('../utils/cache');
 const router = express.Router();
 
 const searchLimiter = rateLimit({
@@ -17,6 +17,7 @@ const searchLimiter = rateLimit({
 
 router.post('/crear-producto', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'productos', incluirBody: true }),
     productosController.nuevoProducto
 );
@@ -25,8 +26,11 @@ router.get('/buscar-producto',
     requireEmployee,
     searchLimiter,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
-    // Caché con key dinámica: paginación y filtros (Fase 1 Productos)
+    // Caché con key dinámica: paginación y filtros. fresh=1 saltea lectura de caché (auto-refresh).
     (req, res, next) => {
+        if (req.query.fresh === '1') {
+            return next();
+        }
         const searchTerm = req.query.search || '';
         const pagina = req.query.pagina || '1';
         const porPagina = req.query.porPagina || '50';
@@ -41,6 +45,7 @@ router.get('/buscar-producto',
 
 router.put('/actualizar-producto/:id', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'productos', incluirBody: true }),
     productosController.actualizarProducto
 );
@@ -63,6 +68,12 @@ router.get('/obtener-productos-remito/:id',
     productosController.filtrarProductosRemito
 );
 
+router.put('/remitos/:id/estado',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'remitos', incluirBody: true }),
+    productosController.actualizarEstadoRemito
+);
+
 router.post('/generarpdf-remito', 
     requireEmployee,
     middlewareAuditoria({ accion: 'EXPORT', tabla: 'remitos' }),
@@ -72,7 +83,6 @@ router.post('/generarpdf-remito',
 router.get('/categorias', 
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'categorias' }),
-    // ✅ FASE 2: Caché para categorías (cambian poco, TTL más largo)
     cacheMiddleware('categorias:all', 300),
     productosController.obtenerCategorias
 );
@@ -89,6 +99,12 @@ router.get('/stock/:id',
     productosController.obtenerStock
 );
 
+router.get('/stock-reservado/:id',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'productos' }),
+    productosController.obtenerStockReservado
+);
+
 /** Producto plantilla para fletes en Venta Directa: nombre exacto "FLETE DE HACIENDA". */
 router.get('/producto-flete-hacienda',
     requireEmployee,
@@ -99,7 +115,6 @@ router.get('/producto-flete-hacienda',
 router.get('/obtener-todos-productos',
     requireEmployee,
     middlewareAuditoria({ accion: 'VIEW', tabla: 'productos', incluirQuery: true }),
-    // ✅ FASE 2: Caché con key dinámica
     (req, res, next) => {
         const searchTerm = req.query.search || '';
         const cacheKey = `productos:todos:${searchTerm}`;
@@ -116,6 +131,7 @@ router.put('/actualizar-producto-basico/:id',
 
 router.delete('/eliminar-producto/:id',
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'DELETE', tabla: 'productos' }),
     productosController.eliminarProducto
 );

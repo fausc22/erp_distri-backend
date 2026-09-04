@@ -1,6 +1,6 @@
 const express = require('express');
 const comprasController = require('../controllers/comprasController');
-const { requireEmployee } = require('../middlewares/authMiddleware');
+const { requireEmployee, authorizeRole } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const router = express.Router();
 
@@ -19,8 +19,23 @@ router.get('/obtener-gasto/:gastoId',
 
 router.post('/nuevo-gasto', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'gastos', incluirBody: true }),
     comprasController.nuevoGasto
+);
+
+router.put('/actualizar-gasto/:gastoId',
+    requireEmployee,
+    authorizeRole(['GERENTE']),
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'gastos', incluirBody: true }),
+    comprasController.actualizarGasto
+);
+
+router.delete('/eliminar-gasto/:gastoId',
+    requireEmployee,
+    authorizeRole(['GERENTE']),
+    middlewareAuditoria({ accion: 'DELETE', tabla: 'gastos' }),
+    comprasController.eliminarGasto
 );
 
 // Rutas para compras
@@ -38,8 +53,16 @@ router.get('/obtener-productos-compra/:compraId',
 
 router.post('/registrarCompra', 
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'compras', incluirBody: true }),
     comprasController.registrarCompraConStock
+);
+
+router.put('/:compraId/anular',
+    requireEmployee,
+    authorizeRole(['GERENTE']),
+    middlewareAuditoria({ accion: 'UPDATE', tabla: 'compras' }),
+    comprasController.anularCompra
 );
 
 module.exports = router;

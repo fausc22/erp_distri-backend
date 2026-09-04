@@ -199,6 +199,19 @@ exports.actualizarEmpleado = async (req, res) => {
       return res.status(404).json({ message: 'Empleado no encontrado' });
     }
 
+    // Impedir degradar al único gerente activo del sistema
+    if (datosAnteriores.rol === 'GERENTE' && rol === 'VENDEDOR') {
+      const [gerentesActivos] = await db.execute(
+        "SELECT COUNT(*) as total FROM empleados WHERE rol = 'GERENTE' AND activo = 1 AND id != ?",
+        [id]
+      );
+      if (Number(gerentesActivos?.[0]?.total || 0) === 0) {
+        return res.status(400).json({
+          message: 'No es posible degradar al único gerente activo del sistema'
+        });
+      }
+    }
+
     // Validar usuario duplicado
     const [usuarioExistente] = await db.execute(
       'SELECT id FROM empleados WHERE usuario = ? AND id != ?',

@@ -161,6 +161,32 @@ const registrarCompraConStock = async (req, res) => {
   }
 };
 
+const anularCompra = async (req, res) => {
+  try {
+    const data = await comprasService.anularCompra(req.params.compraId, {
+      id: req.user?.id,
+      nombre: req.user?.nombre
+    });
+
+    await auditarOperacion(req, {
+      accion: 'UPDATE',
+      tabla: 'compras',
+      registroId: data.compra_id,
+      datosNuevos: data,
+      detallesAdicionales: `Compra #${data.compra_id} anulada - stock y fondos revertidos`
+    });
+
+    res.json({
+      success: true,
+      message: 'Compra anulada exitosamente',
+      data
+    });
+  } catch (err) {
+    console.error('Error al anular compra:', err);
+    return mapErrorToResponse(err, res);
+  }
+};
+
 module.exports = {
   obtenerGastos,
   obtenerGasto,
@@ -169,5 +195,6 @@ module.exports = {
   nuevoGasto,
   actualizarGasto,
   eliminarGasto,
-  registrarCompraConStock
+  registrarCompraConStock,
+  anularCompra
 };
