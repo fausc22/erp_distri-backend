@@ -19,7 +19,7 @@ router.get('/obtener-gasto/:gastoId',
 
 router.post('/nuevo-gasto', 
     requireEmployee,
-    authorizeRole(['GERENTE']),
+    authorizeRole(['GERENTE', 'VENDEDOR']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'gastos', incluirBody: true }),
     comprasController.nuevoGasto
 );
