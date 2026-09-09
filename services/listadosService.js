@@ -1,6 +1,7 @@
 const db = require('../db/legacyAdapter');
 const pdfGenerator = require('../utils/pdfGenerator');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
+const { resolvePorcentajeIva } = require('../utils/rounding');
 
 /** Excluye productos cuyo nombre contiene "flete" (servicios internos, no mercadería de listados). */
 const SQL_EXCLUIR_FLETE_PRODUCTO = `AND UPPER(p.nombre) NOT LIKE '%FLETE%'`;
@@ -421,7 +422,7 @@ const generarPdfListaPrecios = async (req, res) => {
 
             // Calcular precio con IVA
             const precioBase = parseFloat(producto.precio) || 0;
-            const iva = parseFloat(producto.iva) || 21.00;
+            const iva = resolvePorcentajeIva(producto.iva);
             const precioConIva = precioBase * (1 + iva / 100);
 
             acc[categoriaNombre].push({

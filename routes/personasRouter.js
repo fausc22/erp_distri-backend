@@ -27,7 +27,7 @@ const consultaAfipLimiter = rateLimit({
 
 router.post('/crear-cliente', 
     requireEmployee,
-    authorizeRole(['GERENTE']),
+    authorizeRole(['GERENTE', 'VENDEDOR']),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'clientes', incluirBody: true }),
     personasController.nuevoCliente
 );
@@ -51,7 +51,7 @@ router.get('/buscar-cliente',
 
 router.put('/actualizar-cliente/:id', 
     requireEmployee,
-    authorizeRole(['GERENTE']),
+    authorizeRole(['GERENTE', 'VENDEDOR']),
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'clientes', incluirBody: true }),
     personasController.actualizarCliente
 );

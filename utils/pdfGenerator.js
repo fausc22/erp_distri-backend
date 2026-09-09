@@ -4,6 +4,7 @@ const path = require('path');
 const axios = require('axios');
 const QRCode = require('qrcode');
 const db = require('../db/legacyAdapter');
+const { resolvePorcentajeIvaLinea } = require('./rounding');
 
 // URL del microservicio ARCA (desde .env)
 const ARCA_MICROSERVICE_URL = process.env.ARCA_MICROSERVICE_URL;
@@ -21,6 +22,16 @@ class PdfGenerator {
     parsePositiveInt(value, fallback) {
         const parsed = parseInt(value, 10);
         return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+    }
+
+    /** % IVA de la línea para columna de Factura A / NC / ND (0 / 10.50 / 21.00). */
+    formatearPorcentajeIvaLinea(producto) {
+        const pct = resolvePorcentajeIvaLinea({
+            porcentaje_iva: producto?.porcentaje_iva,
+            iva: producto?.iva ?? producto?.IVA ?? producto?.iva_calculado,
+            subtotal: producto?.subtotal
+        });
+        return Number(pct).toFixed(2);
     }
 
     formatearFecha(fechaBD) {
@@ -1203,7 +1214,7 @@ class PdfGenerator {
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: center;">21.00</td>
+          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
           <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioOriginal)}</td>
           <td style="text-align: center;">${descuento.toFixed(0)}%</td>
           <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
@@ -1226,7 +1237,7 @@ class PdfGenerator {
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: center;">21.00</td>
+          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
           <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
           <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
         </tr>
@@ -1439,7 +1450,7 @@ class PdfGenerator {
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: center;">21.00</td>
+          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
           <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
           <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
         </tr>
@@ -1602,7 +1613,7 @@ class PdfGenerator {
         <tr>
           <td style="text-align: center;">${cantidadFormateada}</td>
           <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: center;">21.00</td>
+          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
           <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
           <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
         </tr>
@@ -2793,7 +2804,7 @@ class PdfGenerator {
                 <tr>
                     <td style="text-align: center;">${cantidadFormateada}</td>
                     <td>${producto.producto_nombre} - ${producto.producto_um || 'unidad'}</td>
-                    <td style="text-align: center;">21.00</td>
+                    <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
                     <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitarioSinIva)}</td>
                     <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
                 </tr>

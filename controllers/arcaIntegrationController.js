@@ -1,7 +1,7 @@
 const db = require('../db/legacyAdapter');
 const { sincronizarNumeroAprobado } = require('../utils/numeracionARCA');
 const { validarCuit } = require('../utils/validadoresCliente');
-const { roundFacturacion } = require('../utils/rounding');
+const { roundFacturacion, resolvePorcentajeIvaLinea, mapAlicuotaArca } = require('../utils/rounding');
 
 /**
  * CONTROLADOR DE INTEGRACIÓN ARCA
@@ -495,6 +495,7 @@ const solicitarCAE = async (req, res) => {
         cantidad, 
         precio, 
         IVA as iva,
+        porcentaje_iva,
         subtotal
       FROM ventas_cont
       WHERE venta_id = ?
@@ -544,7 +545,9 @@ const solicitarCAE = async (req, res) => {
     const items = productosRows.map(prod => {
       const cantidad = parseFloat(prod.cantidad) || 0;
       const precioUnitario = parseFloat(prod.precio) || 0;
-      const alicuotaIVA = clienteEsExento ? 3 : 5;
+      // Cliente exento: toda la factura a alícuota 0%. Si no, alícuota por línea.
+      const porcentajeLinea = resolvePorcentajeIvaLinea(prod);
+      const alicuotaIVA = clienteEsExento ? 3 : mapAlicuotaArca(porcentajeLinea);
       
       return {
         descripcion: prod.producto_nombre,
@@ -555,7 +558,15 @@ const solicitarCAE = async (req, res) => {
     });
     
     console.log(`✅ Items preparados: ${items.length} productos`);
-    console.log(`  - Alícuota IVA aplicada: ${clienteEsExento ? '0% (EXENTO)' : '21%'}`);
+    if (clienteEsExento) {
+      console.log('  - Alícuota IVA aplicada: 0% (cliente EXENTO)');
+    } else {
+      const resumenAlic = items.reduce((acc, it) => {
+        acc[it.alicuotaIVA] = (acc[it.alicuotaIVA] || 0) + 1;
+        return acc;
+      }, {});
+      console.log(`  - Alícuotas por ítem (Id AFIP): ${JSON.stringify(resumenAlic)}`);
+    }
     
     // ✅ Si es una NOTA, obtener la factura original asociada
     let comprobantesAsociados = [];

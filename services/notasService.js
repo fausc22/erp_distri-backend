@@ -1,7 +1,7 @@
 const db = require('../db/legacyAdapter');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 const axios = require('axios');
-const { roundFacturacion } = require('../utils/rounding');
+const { roundFacturacion, resolvePorcentajeIvaLinea } = require('../utils/rounding');
 const { registrarMovimientoStock } = require('../utils/stockMovement');
 const fondosRepository = require('../repositories/fondosRepository');
 
@@ -286,8 +286,8 @@ const crearNota = async (req, res) => {
             for (const producto of productos) {
                 const productoQuery = `
                     INSERT INTO ventas_cont 
-                    (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, porcentaje_iva, subtotal)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `;
 
                 const productoId = producto.esManual ? null : producto.id; // null para productos manuales
@@ -297,17 +297,22 @@ const crearNota = async (req, res) => {
                 const precio = parseFloat(producto.precio) || 0;
                 const iva = parseFloat(producto.iva || producto.iva_calculado) || 0;
                 const subtotal = parseFloat(producto.subtotal) || 0;
+                const porcentajeIva = resolvePorcentajeIvaLinea({
+                    porcentaje_iva: producto.porcentaje_iva,
+                    iva,
+                    subtotal
+                });
 
                 const tipoLinea = producto.esManual ? 'manual' : 'referencia';
                 console.log(
                     `🧾 Línea ${tipoLinea} en nota ${numeroCompleto}: ` +
-                    `${productoNombre} | cant=${cantidad} | precio=${precio} | subtotal=${subtotal} | iva=${iva}`
+                    `${productoNombre} | cant=${cantidad} | precio=${precio} | subtotal=${subtotal} | iva=${iva} | %=${porcentajeIva}`
                 );
 
                 await queryWithConnection(
                     connection,
                     productoQuery,
-                    [notaId, productoId, productoNombre, productoUM, cantidad, precio, iva, subtotal]
+                    [notaId, productoId, productoNombre, productoUM, cantidad, precio, iva, porcentajeIva, subtotal]
                 );
 
                 // Devolución de mercadería al stock solo en Nota de Crédito y líneas con producto de catálogo

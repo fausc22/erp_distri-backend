@@ -10,7 +10,7 @@ const multer = require('multer');
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
-const { roundFacturacion } = require('../utils/rounding');
+const { roundFacturacion, resolvePorcentajeIva, resolvePorcentajeIvaLinea } = require('../utils/rounding');
 const { registrarMovimientoStock, resolverTipoOperacion } = require('../utils/stockMovement');
 
 // ✅ FUNCIÓN PARA GENERAR HASH ÚNICO DEL PEDIDO (IDEMPOTENCIA)
@@ -419,7 +419,11 @@ const registrarPedido = (pedidoData, callback, hashPedido = null) => {
 
 // Inserta líneas y descuenta stock en la misma conexión (transacción).
 const insertarProductosPedido = async (pedidoId, productos, connection, kardexMeta = {}) => {
-    const ids = productos.map((p) => p.id);
+    const productosConAlicuota = (productos || []).map((p) => ({
+        ...p,
+        porcentaje_iva: resolvePorcentajeIvaLinea(p)
+    }));
+    const ids = productosConAlicuota.map((p) => p.id);
     const stockRows = ids.length > 0
         ? await queryPromiseWithConnection(
             connection,
@@ -430,7 +434,7 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
     const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
 
     const faltantes = [];
-    for (const p of productos) {
+    for (const p of productosConAlicuota) {
         const row = stockMap.get(Number(p.id));
         if (!row) {
             throw new Error(`Producto "${p.nombre}" (id: ${p.id}) no encontrado`);
@@ -458,7 +462,7 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
         throw err;
     }
 
-    await pedidosRepository.insertProductosPedido(pedidoId, productos, connection);
+    await pedidosRepository.insertProductosPedido(pedidoId, productosConAlicuota, connection);
 
     const kardexBase = {
         referenciaTipo: 'pedidos',
@@ -468,7 +472,7 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
         tipoOperacion: 'PEDIDO_NUEVO'
     };
 
-    for (const producto of productos) {
+    for (const producto of productosConAlicuota) {
         await actualizarStockProducto(
             producto.id,
             -producto.cantidad,
@@ -777,7 +781,7 @@ const obtenerDetallePedido = (req, res) => {
         SELECT 
             pc.id, pc.pedido_id, pc.producto_id, pc.producto_nombre, pc.producto_um, 
             pc.cantidad, pc.precio, pc.IVA as iva, pc.subtotal, pc.descuento_porcentaje,
-            COALESCE(p.iva, 21) as porcentaje_iva
+            COALESCE(pc.porcentaje_iva, p.iva, 21) as porcentaje_iva
         FROM pedidos_cont pc
         LEFT JOIN productos p ON pc.producto_id = p.id
         WHERE pc.pedido_id = ?
@@ -1109,7 +1113,7 @@ const obtenerProductosPedido = (req, res) => {
 
     const query = `
         SELECT id, pedido_id, producto_id, producto_nombre, producto_um, 
-               cantidad, precio, iva, subtotal, descuento_porcentaje
+               cantidad, precio, iva, porcentaje_iva, subtotal, descuento_porcentaje
         FROM pedidos_cont
         WHERE pedido_id = ?
     `;
@@ -1214,7 +1218,7 @@ const actualizarObservacionesPedido = async (req, res) => {
 // Agregar producto a un pedido existente
 const agregarProductoPedidoExistente = async (req, res) => {
     const pedidoId = req.params.pedidoId;
-    const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal } = req.body;
+    const { producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, porcentaje_iva } = req.body;
     const offlineMeta = getOfflineMeta(req);
 
     if (!producto_id || !cantidad || cantidad <= 0) {
@@ -1261,6 +1265,11 @@ const agregarProductoPedidoExistente = async (req, res) => {
                             cantidad,
                             precio,
                             iva: ivaFinal,
+                            porcentaje_iva: resolvePorcentajeIvaLinea({
+                                porcentaje_iva,
+                                iva: ivaFinal,
+                                subtotal
+                            }),
                             subtotal,
                             descuento_porcentaje: 0
                         }
@@ -1340,7 +1349,7 @@ const agregarProductoPedidoExistente = async (req, res) => {
 
 // Actualizar producto de un pedido
 const actualizarProductoPedido = async (req, res) => {
-    const { cantidad, precio, iva, subtotal, descuento_porcentaje, producto_nombre } = req.body;
+    const { cantidad, precio, iva, subtotal, descuento_porcentaje, producto_nombre, porcentaje_iva } = req.body;
     const productId = req.params.productId;
     const offlineMeta = getOfflineMeta(req);
 
@@ -1449,6 +1458,11 @@ const actualizarProductoPedido = async (req, res) => {
                             cantidad,
                             precio,
                             iva: ivaFinal,
+                            porcentaje_iva: resolvePorcentajeIvaLinea({
+                                porcentaje_iva,
+                                iva: ivaFinal,
+                                subtotal
+                            }),
                             subtotal,
                             descuento_porcentaje: descuentoFinal,
                             producto_nombre: nombreFinal
@@ -1951,7 +1965,7 @@ const recalcularYActualizarTotalesPedido = async (
                 pc.producto_nombre,
                 pc.subtotal,
                 pc.IVA,
-                COALESCE(p.IVA, 21) as porcentaje_iva
+                COALESCE(pc.porcentaje_iva, p.IVA, 21) as porcentaje_iva
             FROM pedidos_cont pc
             LEFT JOIN productos p ON pc.producto_id = p.id
             WHERE pc.pedido_id = ?
@@ -1975,7 +1989,7 @@ const recalcularYActualizarTotalesPedido = async (
 
         for (const producto of productos) {
             const subtotal = parseFloat(producto.subtotal) || 0;
-            const porcentajeIva = parseFloat(producto.porcentaje_iva) || 21;
+            const porcentajeIva = resolvePorcentajeIva(producto.porcentaje_iva);
             const nuevoIva = parseFloat((subtotal * (porcentajeIva / 100)).toFixed(2));
             await execSql('UPDATE pedidos_cont SET IVA = ? WHERE id = ?', [nuevoIva, producto.id]);
         }

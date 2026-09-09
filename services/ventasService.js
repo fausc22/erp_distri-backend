@@ -12,7 +12,7 @@ const remitosRepository = require('../repositories/remitosRepository');
 
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
-const { roundFacturacion } = require('../utils/rounding');
+const { roundFacturacion, resolvePorcentajeIvaLinea } = require('../utils/rounding');
 const { registrarMovimientoStock } = require('../utils/stockMovement');
 // Nota: Las funciones de ARCA solo se usan al solicitar CAE, no al crear ventas
 
@@ -169,7 +169,7 @@ const filtrarProductosVenta = (req, res) => {
     const ventaId = req.params.id;
 
     const query = `
-        SELECT id, venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, descuento_porcentaje FROM ventas_cont
+        SELECT id, venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, porcentaje_iva, subtotal, descuento_porcentaje FROM ventas_cont
         WHERE venta_id = ?
     `;
     
@@ -882,6 +882,11 @@ const facturarPedido = async (req, res) => {
                 cantidad: parseFloat(producto.cantidad),
                 precio: producto.precio,
                 iva: producto.IVA,
+                porcentaje_iva: resolvePorcentajeIvaLinea({
+                    porcentaje_iva: producto.porcentaje_iva,
+                    iva: producto.IVA,
+                    subtotal: producto.subtotal
+                }),
                 subtotal: producto.subtotal,
                 descuento_porcentaje: producto.descuento_porcentaje || 0
             })));
@@ -1593,27 +1598,34 @@ const ventaDirecta = async (req, res) => {
             console.log('📦 [Venta Directa] Paso 2: Insertando productos y actualizando stock...');
             
             const insertProductoPedidoQuery = `
-                INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, porcentaje_iva, subtotal, descuento_porcentaje) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
 
-            // Deduplicar productos por id (sumar cantidades e importes si llegan repetidos)
+            // Merge solo líneas idénticas (id + nombre + precio + alícuota).
+            // Fletes/manuales con mismo producto_id pero distinto nombre/IVA quedan separados.
             const productosMergeados = Object.values(
                 productos.reduce((acc, p) => {
-                    const key = String(p.id);
+                    const porcentajeIva = resolvePorcentajeIvaLinea(p);
+                    const key = [
+                        String(p.id),
+                        String(p.nombre || '').trim().toUpperCase(),
+                        Number(p.precio || 0).toFixed(6),
+                        Number(porcentajeIva).toFixed(2)
+                    ].join('|');
                     if (acc[key]) {
                         acc[key].cantidad = parseFloat(acc[key].cantidad) + parseFloat(p.cantidad);
                         acc[key].iva = parseFloat(acc[key].iva || 0) + parseFloat(p.iva || 0);
                         acc[key].subtotal = parseFloat(acc[key].subtotal || 0) + parseFloat(p.subtotal || 0);
                     } else {
-                        acc[key] = { ...p };
+                        acc[key] = { ...p, porcentaje_iva: porcentajeIva };
                     }
                     return acc;
                 }, {})
             );
 
-            // Fase A: lock + validación global de stock antes de insertar líneas
-            const idsProductos = productosMergeados.map((p) => p.id);
+            // Fase A: lock + validación global de stock (sumar cantidades por producto_id)
+            const idsProductos = [...new Set(productosMergeados.map((p) => p.id))];
             const stockRows = idsProductos.length > 0
                 ? await queryPromiseWithConnection(
                     connection,
@@ -1623,20 +1635,27 @@ const ventaDirecta = async (req, res) => {
                 : [];
             const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
 
+            const requeridoPorProducto = productosMergeados.reduce((acc, p) => {
+                const id = Number(p.id);
+                acc[id] = (acc[id] || 0) + parseFloat(p.cantidad);
+                return acc;
+            }, {});
+
             const faltantes = [];
-            for (const p of productosMergeados) {
-                const row = stockMap.get(Number(p.id));
+            for (const [idStr, cantidadRequerida] of Object.entries(requeridoPorProducto)) {
+                const id = Number(idStr);
+                const row = stockMap.get(id);
                 if (!row) {
+                    const ejemplo = productosMergeados.find((p) => Number(p.id) === id);
                     throw crearErrorNegocioVentaDirecta(
-                        `Producto "${p.nombre}" (id: ${p.id}) no encontrado en la base de datos.`,
+                        `Producto "${ejemplo?.nombre || id}" (id: ${id}) no encontrado en la base de datos.`,
                         'PRODUCT_NOT_FOUND'
                     );
                 }
                 const stockDisponible = parseFloat(row.stock_actual);
-                const cantidadRequerida = parseFloat(p.cantidad);
                 if (stockDisponible < cantidadRequerida) {
                     faltantes.push({
-                        id: Number(p.id),
+                        id,
                         nombre: row.nombre,
                         disponible: stockDisponible,
                         requerido: cantidadRequerida
@@ -1656,10 +1675,35 @@ const ventaDirecta = async (req, res) => {
             }
 
             for (const producto of productosMergeados) {
-                const { id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje } = producto;
+                const {
+                    id,
+                    nombre,
+                    unidad_medida,
+                    cantidad,
+                    precio,
+                    iva,
+                    subtotal,
+                    descuento_porcentaje,
+                    porcentaje_iva
+                } = producto;
+                const porcentajeIvaLinea = resolvePorcentajeIvaLinea({
+                    ...producto,
+                    porcentaje_iva
+                });
 
                 await queryPromiseWithConnection(connection, insertProductoPedidoQuery,
-                    [pedidoId, id, nombre, unidad_medida, cantidad, precio, iva, subtotal, descuento_porcentaje || 0]
+                    [
+                        pedidoId,
+                        id,
+                        nombre,
+                        unidad_medida,
+                        cantidad,
+                        precio,
+                        iva,
+                        porcentajeIvaLinea,
+                        subtotal,
+                        descuento_porcentaje || 0
+                    ]
                 );
 
                 await queryPromiseWithConnection(
@@ -1669,8 +1713,8 @@ const ventaDirecta = async (req, res) => {
                 );
 
                 const row = stockMap.get(Number(id));
-                const nuevoStock = parseFloat(row.stock_actual) - parseFloat(cantidad);
-                console.log(`✅ Stock actualizado - Producto: ${nombre}, Cantidad: ${cantidad}, Nuevo stock: ${nuevoStock}`);
+                row.stock_actual = parseFloat(row.stock_actual) - parseFloat(cantidad);
+                console.log(`✅ Stock actualizado - Producto: ${nombre}, Cantidad: ${cantidad}, Nuevo stock: ${row.stock_actual}`);
             }
 
             // ============================================
@@ -1755,6 +1799,7 @@ const ventaDirecta = async (req, res) => {
                 cantidad: parseFloat(producto.cantidad),
                 precio: producto.precio,
                 iva: producto.iva,
+                porcentaje_iva: resolvePorcentajeIvaLinea(producto),
                 subtotal: producto.subtotal,
                 descuento_porcentaje: producto.descuento_porcentaje || 0
             })));
@@ -1934,7 +1979,7 @@ const duplicarVentaBorrador = async (req, res) => {
 
             const itemsOrigen = await queryPromiseWithConnection(
                 connection,
-                `SELECT producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, descuento_porcentaje
+                `SELECT producto_id, producto_nombre, producto_um, cantidad, precio, iva, porcentaje_iva, subtotal, descuento_porcentaje
                  FROM ventas_cont
                  WHERE venta_id = ?
                  ORDER BY id ASC`,
@@ -1986,6 +2031,7 @@ const duplicarVentaBorrador = async (req, res) => {
                 cantidad: parseFloat(item.cantidad) || 0,
                 precio: parseFloat(item.precio) || 0,
                 iva: parseFloat(item.iva) || 0,
+                porcentaje_iva: resolvePorcentajeIvaLinea(item),
                 subtotal: parseFloat(item.subtotal) || 0,
                 descuento_porcentaje: parseFloat(item.descuento_porcentaje) || 0
             })));

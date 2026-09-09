@@ -5,7 +5,7 @@
  */
 
 const assert = require('assert');
-const { roundFacturacion, redondearImportes } = require('./rounding');
+const { roundFacturacion, redondearImportes, resolvePorcentajeIva, obtenerPorcentajeIva, inferPorcentajeIvaDesdeLinea, resolvePorcentajeIvaLinea, mapAlicuotaArca } = require('./rounding');
 
 function test(name, fn) {
   try {
@@ -73,6 +73,62 @@ test('solo incluye keys solicitadas', () => {
   const out = redondearImportes({ a: 1.6, b: 2.3 }, ['a']);
   assert.strictEqual(out.a, 2);
   assert.strictEqual('b' in out, false);
+});
+
+console.log('resolvePorcentajeIva:');
+test('preserva IVA 0%', () => {
+  assert.strictEqual(resolvePorcentajeIva(0), 0);
+  assert.strictEqual(resolvePorcentajeIva('0'), 0);
+  assert.strictEqual(resolvePorcentajeIva('0.00'), 0);
+  assert.strictEqual(resolvePorcentajeIva(0.0), 0);
+});
+
+test('preserva 10.5 y 21', () => {
+  assert.strictEqual(resolvePorcentajeIva(10.5), 10.5);
+  assert.strictEqual(resolvePorcentajeIva('10.50'), 10.5);
+  assert.strictEqual(resolvePorcentajeIva(21), 21);
+  assert.strictEqual(resolvePorcentajeIva('21.00'), 21);
+});
+
+test('fallback solo si falta o es inválido', () => {
+  assert.strictEqual(resolvePorcentajeIva(null), 21);
+  assert.strictEqual(resolvePorcentajeIva(undefined), 21);
+  assert.strictEqual(resolvePorcentajeIva(''), 21);
+  assert.strictEqual(resolvePorcentajeIva(NaN), 21);
+  assert.strictEqual(resolvePorcentajeIva(-1), 21);
+  assert.strictEqual(resolvePorcentajeIva(null, 10.5), 10.5);
+});
+
+console.log('obtenerPorcentajeIva:');
+test('usa porcentaje_iva aunque iva (importe) exista', () => {
+  assert.strictEqual(obtenerPorcentajeIva({ porcentaje_iva: 0, iva: 2.52 }), 0);
+  assert.strictEqual(obtenerPorcentajeIva({ porcentaje_iva: 21, iva: 2.10 }), 21);
+});
+
+test('usa iva de catálogo si no hay porcentaje_iva', () => {
+  assert.strictEqual(obtenerPorcentajeIva({ iva: 0 }), 0);
+  assert.strictEqual(obtenerPorcentajeIva({ iva: 10.5 }), 10.5);
+  assert.strictEqual(obtenerPorcentajeIva({}), 21);
+});
+
+console.log('inferPorcentajeIvaDesdeLinea / resolvePorcentajeIvaLinea:');
+test('infiere 0% y 21% desde montos', () => {
+  assert.strictEqual(inferPorcentajeIvaDesdeLinea(0, 120000), 0);
+  assert.strictEqual(inferPorcentajeIvaDesdeLinea(292572, 1393200), 21);
+  assert.strictEqual(inferPorcentajeIvaDesdeLinea(20826.45, 99173.55), 21);
+});
+
+test('resolvePorcentajeIvaLinea prioriza columna', () => {
+  assert.strictEqual(resolvePorcentajeIvaLinea({ porcentaje_iva: 0, iva: 100, subtotal: 100 }), 0);
+  assert.strictEqual(resolvePorcentajeIvaLinea({ iva: 0, subtotal: 48000 }), 0);
+});
+
+console.log('mapAlicuotaArca:');
+test('mapea a Ids AFIP', () => {
+  assert.strictEqual(mapAlicuotaArca(0), 3);
+  assert.strictEqual(mapAlicuotaArca(10.5), 4);
+  assert.strictEqual(mapAlicuotaArca(21), 5);
+  assert.strictEqual(mapAlicuotaArca(27), 6);
 });
 
 console.log('\n✅ Todos los tests pasaron.');

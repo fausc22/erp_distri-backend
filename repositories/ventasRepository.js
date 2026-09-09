@@ -82,8 +82,8 @@ class VentasRepository extends BaseRepository {
   async insertarVentaItems(conn, ventaId, items) {
     const sql = `
       INSERT INTO ventas_cont
-      (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, subtotal, descuento_porcentaje)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, iva, porcentaje_iva, subtotal, descuento_porcentaje)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     for (const item of items || []) {
       await this.run(sql, [
@@ -94,6 +94,9 @@ class VentasRepository extends BaseRepository {
         item.cantidad,
         item.precio,
         item.iva,
+        item.porcentaje_iva !== undefined && item.porcentaje_iva !== null
+          ? item.porcentaje_iva
+          : null,
         item.subtotal,
         item.descuento_porcentaje || 0
       ], conn);

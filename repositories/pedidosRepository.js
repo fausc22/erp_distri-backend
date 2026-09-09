@@ -51,8 +51,8 @@ class PedidosRepository extends BaseRepository {
 
   async insertProductosPedido(pedidoId, productos, conn = null) {
     const sql = `
-      INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, subtotal, descuento_porcentaje)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO pedidos_cont (pedido_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, porcentaje_iva, subtotal, descuento_porcentaje)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const results = [];
     for (const producto of productos) {
@@ -64,6 +64,9 @@ class PedidosRepository extends BaseRepository {
         producto.cantidad,
         producto.precio,
         producto.iva,
+        producto.porcentaje_iva !== undefined && producto.porcentaje_iva !== null
+          ? producto.porcentaje_iva
+          : null,
         producto.subtotal,
         producto.descuento_porcentaje || 0
       ];
@@ -137,7 +140,7 @@ class PedidosRepository extends BaseRepository {
   updateProductoPedido(pedidoId, productoData, conn = null) {
     const sql = `
       UPDATE pedidos_cont
-      SET cantidad = ?, precio = ?, IVA = ?, subtotal = ?, descuento_porcentaje = ?, producto_nombre = ?
+      SET cantidad = ?, precio = ?, IVA = ?, porcentaje_iva = ?, subtotal = ?, descuento_porcentaje = ?, producto_nombre = ?
       WHERE id = ? AND pedido_id = ?
     `;
     return this.query(
@@ -146,6 +149,9 @@ class PedidosRepository extends BaseRepository {
         productoData.cantidad,
         productoData.precio,
         productoData.iva,
+        productoData.porcentaje_iva !== undefined && productoData.porcentaje_iva !== null
+          ? productoData.porcentaje_iva
+          : null,
         productoData.subtotal,
         productoData.descuento_porcentaje || 0,
         productoData.producto_nombre,
