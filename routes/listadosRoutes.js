@@ -1,19 +1,19 @@
 const express = require('express');
 const listadosController = require('../controllers/listadosController');
-const { requireEmployee } = require('../middlewares/authMiddleware');
+const { requireEmployee, requireManager } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const router = express.Router();
 
 // Ruta para generar PDF del Libro IVA
 router.post('/generarpdf-libro-iva',
-    requireEmployee,
+    requireManager,
     middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
     listadosController.generarPdfLibroIva
 );
 
 // Ruta para generar PDF del Reporte de Fletes mensual
 router.post('/generarpdf-reporte-fletes',
-    requireEmployee,
+    requireManager,
     middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
     listadosController.generarPdfReporteFletes
 );
@@ -41,7 +41,7 @@ router.post('/generarpdf-control-stock-seleccion',
 
 // Ruta para generar PDF de Listado de Vendedores
 router.post('/generarpdf-listado-vendedores',
-    requireEmployee,
+    requireManager,
     middlewareAuditoria({ accion: 'EXPORT', tabla: 'ventas' }),
     listadosController.generarPdfListadoVendedores
 );
