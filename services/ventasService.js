@@ -1629,7 +1629,7 @@ const ventaDirecta = async (req, res) => {
             const stockRows = idsProductos.length > 0
                 ? await queryPromiseWithConnection(
                     connection,
-                    `SELECT id, nombre, stock_actual FROM productos WHERE id IN (${idsProductos.map(() => '?').join(',')}) FOR UPDATE`,
+                    `SELECT id, nombre, stock_actual, activo FROM productos WHERE id IN (${idsProductos.map(() => '?').join(',')}) FOR UPDATE`,
                     idsProductos
                 )
                 : [];
@@ -1650,6 +1650,12 @@ const ventaDirecta = async (req, res) => {
                     throw crearErrorNegocioVentaDirecta(
                         `Producto "${ejemplo?.nombre || id}" (id: ${id}) no encontrado en la base de datos.`,
                         'PRODUCT_NOT_FOUND'
+                    );
+                }
+                if (Number(row.activo) === 0) {
+                    throw crearErrorNegocioVentaDirecta(
+                        `El producto "${row.nombre}" está dado de baja y no se puede usar en una venta.`,
+                        'PRODUCT_INACTIVE'
                     );
                 }
                 const stockDisponible = parseFloat(row.stock_actual);

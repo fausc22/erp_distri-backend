@@ -141,7 +141,10 @@ const buscarProducto = (req, res) => {
             WHERE ped.estado = 'Exportado'
             GROUP BY pc.producto_id
         ) r ON r.producto_id = p.id`;
-    const conditions = ['(p.nombre LIKE ? OR c.nombre LIKE ? OR CAST(p.id AS CHAR) LIKE ?)'];
+    const conditions = [
+        'p.activo = 1',
+        '(p.nombre LIKE ? OR c.nombre LIKE ? OR CAST(p.id AS CHAR) LIKE ?)'
+    ];
     const params = [searchTerm, searchTerm, searchTerm];
 
     if (categoriaId) {
@@ -751,7 +754,7 @@ const obtenerTodosProductos = (req, res) => {
         SELECT p.*, c.nombre as categoria_nombre
         FROM productos p
         LEFT JOIN categorias c ON p.categoria_id = c.id
-        WHERE p.nombre LIKE ?
+        WHERE p.activo = 1 AND p.nombre LIKE ?
         ORDER BY p.stock_actual ASC, p.nombre ASC
     `;
 
@@ -872,56 +875,111 @@ const actualizarProductoBasico = async (req, res) => {
     }
 };
 
+const contarHistorialProducto = async (productoId) => {
+    const [movimiento, pedidos, ventas, compras, remitos] = await Promise.all([
+        queryPromise('SELECT COUNT(*) AS total FROM movimiento_stock WHERE producto_id = ?', [productoId]),
+        queryPromise('SELECT COUNT(*) AS total FROM pedidos_cont WHERE producto_id = ?', [productoId]),
+        queryPromise('SELECT COUNT(*) AS total FROM ventas_cont WHERE producto_id = ?', [productoId]),
+        queryPromise('SELECT COUNT(*) AS total FROM compras_cont WHERE producto_id = ?', [productoId]),
+        queryPromise('SELECT COUNT(*) AS total FROM detalle_remitos WHERE producto_id = ?', [productoId])
+    ]);
+
+    return (
+        Number(movimiento[0]?.total || 0) +
+        Number(pedidos[0]?.total || 0) +
+        Number(ventas[0]?.total || 0) +
+        Number(compras[0]?.total || 0) +
+        Number(remitos[0]?.total || 0)
+    );
+};
+
+const MSG_BAJA_LOGICA =
+    'Producto dado de baja. Conserva el historial y ya no aparece en el catálogo.';
+
+const darDeBajaProducto = async (req, productoId, datosAnteriores) => {
+    await queryPromise('UPDATE productos SET activo = 0 WHERE id = ? AND activo = 1', [productoId]);
+
+    await auditarOperacion(req, {
+        accion: 'UPDATE',
+        tabla: 'productos',
+        registroId: productoId,
+        datosAnteriores,
+        datosNuevos: { ...datosAnteriores, activo: 0 },
+        detallesAdicionales: `Producto dado de baja (lógica): ${datosAnteriores.nombre}`
+    });
+
+    invalidate('productos:*');
+
+    return {
+        success: true,
+        message: MSG_BAJA_LOGICA,
+        data: { modo: 'soft' }
+    };
+};
+
 const eliminarProducto = async (req, res) => {
     const productoId = req.params.id;
 
-    const checkQuery = 'SELECT * FROM productos WHERE id = ?';
-    db.query(checkQuery, [productoId], async (err, results) => {
-        if (err) {
-            console.error('Error al verificar el producto:', err);
-            return res.status(500).json({ success: false, message: "Error al verificar el producto" });
-        }
+    try {
+        const results = await queryPromise('SELECT * FROM productos WHERE id = ?', [productoId]);
 
-        if (results.length === 0) {
-            return res.status(404).json({ success: false, message: "Producto no encontrado" });
+        if (!results.length) {
+            return res.status(404).json({ success: false, message: 'Producto no encontrado' });
         }
 
         const datosAnteriores = results[0];
 
-        const deleteQuery = 'DELETE FROM productos WHERE id = ?';
-        db.query(deleteQuery, [productoId], async (deleteErr) => {
-            if (deleteErr) {
-                console.error('Error al eliminar el producto:', deleteErr);
+        if (Number(datosAnteriores.activo) === 0) {
+            return res.status(400).json({ success: false, message: 'El producto ya está dado de baja' });
+        }
 
-                await auditarOperacion(req, {
-                    accion: 'DELETE',
-                    tabla: 'productos',
-                    registroId: productoId,
-                    detallesAdicionales: `Error al eliminar producto: ${deleteErr.message}`,
-                    datosAnteriores
-                });
+        const totalHistorial = await contarHistorialProducto(productoId);
 
-                return res.status(500).json({
-                    success: false,
-                    message: deleteErr.code === 'ER_ROW_IS_REFERENCED_2'
-                        ? "No se puede eliminar el producto porque tiene registros asociados"
-                        : "Error al eliminar el producto"
-                });
+        if (totalHistorial > 0) {
+            const payload = await darDeBajaProducto(req, productoId, datosAnteriores);
+            return res.json(payload);
+        }
+
+        try {
+            await queryPromise('DELETE FROM productos WHERE id = ?', [productoId]);
+        } catch (deleteErr) {
+            if (deleteErr.code === 'ER_ROW_IS_REFERENCED_2') {
+                const payload = await darDeBajaProducto(req, productoId, datosAnteriores);
+                return res.json(payload);
             }
+
+            console.error('Error al eliminar el producto:', deleteErr);
 
             await auditarOperacion(req, {
                 accion: 'DELETE',
                 tabla: 'productos',
                 registroId: productoId,
-                datosAnteriores,
-                detallesAdicionales: `Producto eliminado: ${datosAnteriores.nombre}`
+                detallesAdicionales: `Error al eliminar producto: ${deleteErr.message}`,
+                datosAnteriores
             });
 
-            invalidate('productos:*');
+            return res.status(500).json({ success: false, message: 'Error al eliminar el producto' });
+        }
 
-            res.json({ success: true, message: "Producto eliminado correctamente" });
+        await auditarOperacion(req, {
+            accion: 'DELETE',
+            tabla: 'productos',
+            registroId: productoId,
+            datosAnteriores,
+            detallesAdicionales: `Producto eliminado: ${datosAnteriores.nombre}`
         });
-    });
+
+        invalidate('productos:*');
+
+        return res.json({
+            success: true,
+            message: 'Producto eliminado correctamente',
+            data: { modo: 'hard' }
+        });
+    } catch (error) {
+        console.error('Error al eliminar/dar de baja producto:', error);
+        return res.status(500).json({ success: false, message: 'Error al eliminar el producto' });
+    }
 };
 
 /**
@@ -1047,7 +1105,7 @@ const obtenerStockReservado = async (req, res) => {
 const getProductoFleteHacienda = (req, res) => {
     const query = `
         SELECT * FROM productos
-        WHERE TRIM(nombre) = ?
+        WHERE TRIM(nombre) = ? AND activo = 1
         LIMIT 1
     `;
     db.query(query, [NOMBRE_PRODUCTO_FLETE_HACIENDA], (err, results) => {

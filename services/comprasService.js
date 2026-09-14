@@ -44,6 +44,28 @@ async function registrarCompraConStock(body) {
   } = body;
 
   return withTransaction(async (conn) => {
+    for (const producto of productos) {
+      const prodRows = await cQuery(
+        `SELECT id, nombre, activo FROM productos WHERE id = ?`,
+        [producto.id],
+        conn
+      );
+      if (!prodRows?.length) {
+        throw new AppError(
+          `Producto id ${producto.id} no encontrado`,
+          'PRODUCT_NOT_FOUND',
+          404
+        );
+      }
+      if (Number(prodRows[0].activo) === 0) {
+        throw new AppError(
+          `El producto "${prodRows[0].nombre}" está dado de baja y no se puede usar en una compra`,
+          'PRODUCT_INACTIVE',
+          400
+        );
+      }
+    }
+
     const compraId = await comprasRepository.insertarCompra(
       {
         proveedor_id,

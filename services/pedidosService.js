@@ -187,7 +187,7 @@ const buscarProducto = (req, res) => {
     if (!rawSearch || rawSearch.trim() === '') {
         const queryTodos = `
             SELECT * FROM productos
-            WHERE stock_actual >= 0
+            WHERE activo = 1 AND stock_actual >= 0
             ORDER BY nombre ASC
         `;
         
@@ -206,7 +206,7 @@ const buscarProducto = (req, res) => {
     const searchTerm = `%${rawSearch}%`;
     const query = `
         SELECT * FROM productos
-        WHERE nombre LIKE ?
+        WHERE activo = 1 AND nombre LIKE ?
         ORDER BY nombre ASC
     `;
 
@@ -427,7 +427,7 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
     const stockRows = ids.length > 0
         ? await queryPromiseWithConnection(
             connection,
-            `SELECT id, nombre, stock_actual FROM productos WHERE id IN (${ids.map(() => '?').join(',')}) FOR UPDATE`,
+            `SELECT id, nombre, stock_actual, activo FROM productos WHERE id IN (${ids.map(() => '?').join(',')}) FOR UPDATE`,
             ids
         )
         : [];
@@ -438,6 +438,12 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
         const row = stockMap.get(Number(p.id));
         if (!row) {
             throw new Error(`Producto "${p.nombre}" (id: ${p.id}) no encontrado`);
+        }
+        if (Number(row.activo) === 0) {
+            const err = new Error(`El producto "${row.nombre}" está dado de baja y no se puede agregar a un pedido`);
+            err.code = 'PRODUCT_INACTIVE';
+            err.statusCode = 400;
+            throw err;
         }
         const stockDisponible = parseFloat(row.stock_actual);
         const cantidadRequerida = parseFloat(p.cantidad);
@@ -635,6 +641,16 @@ const nuevoPedido = async (req, res) => {
                 datosNuevos: req.body
             });
             return res.status(400).json({ success: false, message: msg });
+        }
+
+        if (err.code === 'PRODUCT_INACTIVE' || msg.includes('dado de baja')) {
+            await auditarOperacion(req, {
+                accion: 'INSERT',
+                tabla: 'pedidos',
+                detallesAdicionales: `Rollback nuevo pedido (producto inactivo): ${msg}`,
+                datosNuevos: req.body
+            });
+            return res.status(400).json({ success: false, message: msg, code: 'PRODUCT_INACTIVE' });
         }
 
         await auditarOperacion(req, {
@@ -1244,11 +1260,19 @@ const agregarProductoPedidoExistente = async (req, res) => {
         const insertResultTx = await withTransaction(async (connection) => {
                     const stockRows = await queryPromiseWithConnection(
                         connection,
-                        `SELECT stock_actual FROM productos WHERE id = ?`,
+                        `SELECT stock_actual, activo, nombre FROM productos WHERE id = ?`,
                         [producto_id]
                     );
                     if (!stockRows || stockRows.length === 0) {
                         throw new Error(`Producto ${producto_id} no encontrado`);
+                    }
+                    if (Number(stockRows[0].activo) === 0) {
+                        const err = new Error(
+                            `El producto "${stockRows[0].nombre || producto_nombre}" está dado de baja y no se puede agregar a un pedido`
+                        );
+                        err.code = 'PRODUCT_INACTIVE';
+                        err.statusCode = 400;
+                        throw err;
                     }
                     const stockDisp = parseFloat(stockRows[0].stock_actual);
                     if (stockDisp < parseFloat(cantidad)) {
@@ -1337,6 +1361,14 @@ const agregarProductoPedidoExistente = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: error.message
+            });
+        }
+
+        if (error.code === 'PRODUCT_INACTIVE' || (error.message && error.message.includes('dado de baja'))) {
+            return res.status(400).json({
+                success: false,
+                message: error.message,
+                code: 'PRODUCT_INACTIVE'
             });
         }
 
@@ -2048,7 +2080,7 @@ const obtenerCatalogoCompleto = async (req, res) => {
                    GREATEST(0, stock_actual - COALESCE(stock_minimo, 0)) AS stock_disponible_offline,
                    stock_actual
             FROM productos 
-            WHERE stock_actual >= 0
+            WHERE activo = 1 AND stock_actual >= 0
             ORDER BY nombre ASC
         `;
 
@@ -2124,7 +2156,7 @@ const verificarVersionCatalogo = async (req, res) => {
         const queryCounts = `
             SELECT 
                 (SELECT COUNT(*) FROM clientes) as total_clientes,
-                (SELECT COUNT(*) FROM productos WHERE stock_actual >= 0) as total_productos,
+                (SELECT COUNT(*) FROM productos WHERE activo = 1 AND stock_actual >= 0) as total_productos,
                 (SELECT MAX(id) FROM clientes) as max_cliente_id,
                 (SELECT MAX(id) FROM productos) as max_producto_id
         `;

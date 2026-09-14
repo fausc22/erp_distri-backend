@@ -389,7 +389,7 @@ const generarPdfListaPrecios = async (req, res) => {
                 c.id as categoria_id
             FROM productos p
             LEFT JOIN categorias c ON p.categoria_id = c.id
-            WHERE p.stock_actual > 0
+            WHERE p.activo = 1 AND p.stock_actual > 0
             ${SQL_EXCLUIR_FLETE_PRODUCTO}
         `;
 
@@ -503,7 +503,7 @@ const generarPdfControlStockFiltro = async (req, res) => {
                 c.nombre as categoria_nombre
             FROM productos p
             LEFT JOIN categorias c ON p.categoria_id = c.id
-            WHERE UPPER(p.nombre) NOT LIKE '%FLETE%'
+            WHERE p.activo = 1 AND UPPER(p.nombre) NOT LIKE '%FLETE%'
             ORDER BY p.stock_actual ${orderDirection}
             LIMIT ?
         `;
