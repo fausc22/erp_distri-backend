@@ -677,7 +677,29 @@ const facturarPedido = async (req, res) => {
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
 
             // Descontar stock físico al facturar (bloqueo si no alcanza)
-            const idsProductos = [...new Set(productos.map((p) => p.producto_id).filter(Boolean))];
+            const lineasConProductoId = productos.filter(
+                (p) => p.producto_id != null && p.producto_id !== '' && Number(p.producto_id) > 0
+            );
+            const lineasSinProductoId = productos.filter(
+                (p) => !(p.producto_id != null && p.producto_id !== '' && Number(p.producto_id) > 0)
+            );
+            if (lineasSinProductoId.length > 0) {
+                console.warn(
+                    `⚠️ Facturación: ${lineasSinProductoId.length} línea(s) sin producto_id (no descuentan stock):`,
+                    lineasSinProductoId.map((p) => p.producto_nombre).join(', ')
+                );
+            }
+            if (lineasConProductoId.length === 0) {
+                const stockError = new Error(
+                    'No se puede facturar: ninguna línea tiene producto de catálogo (producto_id). ' +
+                    'Sin eso no se puede descontar ni devolver stock.'
+                );
+                stockError.statusCode = 422;
+                stockError.code = 'MISSING_PRODUCTO_ID';
+                throw stockError;
+            }
+
+            const idsProductos = [...new Set(lineasConProductoId.map((p) => p.producto_id))];
             const stockRows = idsProductos.length > 0
                 ? await queryPromiseWithConnection(
                     connection,
@@ -687,12 +709,21 @@ const facturarPedido = async (req, res) => {
                 : [];
             const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
 
-            const requeridoPorProducto = productos.reduce((acc, p) => {
+            const requeridoPorProducto = lineasConProductoId.reduce((acc, p) => {
                 const id = Number(p.producto_id);
                 if (!id) return acc;
                 acc[id] = (acc[id] || 0) + parseFloat(p.cantidad);
                 return acc;
             }, {});
+
+            if (Object.keys(requeridoPorProducto).length === 0) {
+                const stockError = new Error(
+                    'No se puede facturar: no hay productos de catálogo con cantidad válida para descontar stock'
+                );
+                stockError.statusCode = 422;
+                stockError.code = 'MISSING_PRODUCTO_ID';
+                throw stockError;
+            }
 
             const faltantesStock = [];
             for (const [idStr, cantidadRequerida] of Object.entries(requeridoPorProducto)) {

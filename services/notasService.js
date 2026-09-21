@@ -290,7 +290,24 @@ const crearNota = async (req, res) => {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `;
 
-                const productoId = producto.esManual ? null : producto.id; // null para productos manuales
+                // esManual puede llegar como string desde el cliente; solo tratar true/'true' como manual
+                const esManual =
+                    producto.esManual === true ||
+                    producto.esManual === 'true' ||
+                    producto.esManual === 1 ||
+                    producto.esManual === '1';
+
+                const rawProductoId = esManual
+                    ? null
+                    : (producto.id ?? producto.producto_id ?? producto.productoId);
+                const productoIdNum = rawProductoId == null || rawProductoId === ''
+                    ? null
+                    : Number(rawProductoId);
+                const productoId =
+                    productoIdNum != null && Number.isFinite(productoIdNum) && productoIdNum > 0
+                        ? productoIdNum
+                        : null;
+
                 const productoNombre = producto.nombre || producto.producto_nombre;
                 const productoUM = producto.unidad_medida || producto.producto_um || 'Unidad';
                 const cantidad = parseFloat(producto.cantidad) || 1;
@@ -303,10 +320,10 @@ const crearNota = async (req, res) => {
                     subtotal
                 });
 
-                const tipoLinea = producto.esManual ? 'manual' : 'referencia';
+                const tipoLinea = esManual ? 'manual' : 'referencia';
                 console.log(
                     `🧾 Línea ${tipoLinea} en nota ${numeroCompleto}: ` +
-                    `${productoNombre} | cant=${cantidad} | precio=${precio} | subtotal=${subtotal} | iva=${iva} | %=${porcentajeIva}`
+                    `${productoNombre} | productoId=${productoId} | cant=${cantidad} | precio=${precio} | subtotal=${subtotal} | iva=${iva} | %=${porcentajeIva}`
                 );
 
                 await queryWithConnection(
@@ -316,32 +333,58 @@ const crearNota = async (req, res) => {
                 );
 
                 // Devolución de mercadería al stock solo en Nota de Crédito y líneas con producto de catálogo
-                if (tipoNota === 'NOTA_CREDITO' && productoId != null) {
-                    const stockRows = await queryWithConnection(
-                        connection,
-                        `SELECT stock_actual FROM productos WHERE id = ?`,
-                        [productoId]
-                    );
-                    const stockAntes = stockRows?.length ? parseFloat(stockRows[0].stock_actual) : 0;
+                if (tipoNota === 'NOTA_CREDITO') {
+                    if (productoId == null) {
+                        if (!esManual) {
+                            throw new Error(
+                                `No se puede devolver stock: la línea "${productoNombre}" no tiene producto_id de catálogo. ` +
+                                `Revise que la venta de referencia tenga producto_id en sus ítems.`
+                            );
+                        }
+                        console.log(`ℹ️ Línea manual "${productoNombre}" sin devolución de stock`);
+                    } else {
+                        const stockRows = await queryWithConnection(
+                            connection,
+                            `SELECT id, stock_actual FROM productos WHERE id = ? FOR UPDATE`,
+                            [productoId]
+                        );
+                        if (!stockRows?.length) {
+                            throw new Error(
+                                `No se puede devolver stock: producto id=${productoId} ("${productoNombre}") no existe`
+                            );
+                        }
+                        const stockAntes = parseFloat(stockRows[0].stock_actual) || 0;
+                        const stockDespues = stockAntes + cantidad;
 
-                    await queryWithConnection(
-                        connection,
-                        `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
-                        [cantidad, productoId]
-                    );
+                        const updateResult = await queryWithConnection(
+                            connection,
+                            `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
+                            [cantidad, productoId]
+                        );
+                        if (!updateResult || updateResult.affectedRows === 0) {
+                            throw new Error(
+                                `No se actualizó stock para producto id=${productoId} ("${productoNombre}")`
+                            );
+                        }
 
-                    await registrarMovimientoStock(connection, {
-                        productoId,
-                        delta: cantidad,
-                        stockAntes,
-                        stockDespues: stockAntes + cantidad,
-                        tipoOperacion: 'NOTA_CREDITO',
-                        referenciaTipo: 'ventas',
-                        referenciaId: notaId,
-                        usuarioId: req.user?.id ?? null,
-                        usuarioNombre: req.user?.nombre ?? null,
-                        observaciones: `Nota de crédito #${notaId}`
-                    });
+                        await registrarMovimientoStock(connection, {
+                            productoId,
+                            delta: cantidad,
+                            stockAntes,
+                            stockDespues,
+                            tipoOperacion: 'NOTA_CREDITO',
+                            referenciaTipo: 'ventas',
+                            referenciaId: notaId,
+                            usuarioId: req.user?.id ?? null,
+                            usuarioNombre: req.user?.nombre ?? null,
+                            observaciones: `Nota de crédito #${notaId}`
+                        });
+
+                        console.log(
+                            `📦 Stock devuelto NC: producto ${productoId} "${productoNombre}" ` +
+                            `${stockAntes} → ${stockDespues} (+${cantidad})`
+                        );
+                    }
                 }
             }
 
