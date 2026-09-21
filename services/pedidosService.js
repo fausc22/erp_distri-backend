@@ -1,7 +1,6 @@
 const db = require('../db/legacyAdapter');
 const { parsePagination, parseLimit } = require('../utils/pagination');
 const { withTransaction } = require('../db/transaction');
-const { query: cQuery } = require('../db/connectionQuery');
 const pedidosRepository = require('../repositories/pedidosRepository');
 const axios = require('axios');
 const dotenv = require('dotenv');
@@ -11,7 +10,6 @@ const multer = require('multer');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const pdfGenerator = require('../utils/pdfGenerator');
 const { roundFacturacion, resolvePorcentajeIva, resolvePorcentajeIvaLinea } = require('../utils/rounding');
-const { registrarMovimientoStock, resolverTipoOperacion } = require('../utils/stockMovement');
 
 // ✅ FUNCIÓN PARA GENERAR HASH ÚNICO DEL PEDIDO (IDEMPOTENCIA)
 const generarHashPedido = (pedidoData) => {
@@ -180,15 +178,29 @@ const buscarCliente = (req, res) => {
 
 
 
+const PRODUCTOS_CON_PENDIENTE_SQL = `
+    SELECT p.*,
+           COALESCE(r.pendiente_pedidos, 0) AS pendiente_pedidos,
+           (p.stock_actual - COALESCE(r.pendiente_pedidos, 0)) AS faltante
+    FROM productos p
+    LEFT JOIN (
+        SELECT pc.producto_id, SUM(pc.cantidad) AS pendiente_pedidos
+        FROM pedidos_cont pc
+        JOIN pedidos ped ON ped.id = pc.pedido_id
+        WHERE ped.estado = 'Exportado'
+        GROUP BY pc.producto_id
+    ) r ON r.producto_id = p.id
+`;
+
 const buscarProducto = (req, res) => {
     const rawSearch = req.query.q || req.query.search || '';
     
     // ✅ SI NO HAY BÚSQUEDA, DEVOLVER TODOS (para PWA)
     if (!rawSearch || rawSearch.trim() === '') {
         const queryTodos = `
-            SELECT * FROM productos
-            WHERE activo = 1 AND stock_actual >= 0
-            ORDER BY nombre ASC
+            ${PRODUCTOS_CON_PENDIENTE_SQL}
+            WHERE p.activo = 1 AND p.stock_actual >= 0
+            ORDER BY p.nombre ASC
         `;
         
         db.query(queryTodos, (err, results) => {
@@ -205,9 +217,9 @@ const buscarProducto = (req, res) => {
     // ✅ CON BÚSQUEDA, FILTRAR PERO SIN LÍMITE DE 10
     const searchTerm = `%${rawSearch}%`;
     const query = `
-        SELECT * FROM productos
-        WHERE activo = 1 AND nombre LIKE ?
-        ORDER BY nombre ASC
+        ${PRODUCTOS_CON_PENDIENTE_SQL}
+        WHERE p.activo = 1 AND p.nombre LIKE ?
+        ORDER BY p.nombre ASC
     `;
 
     db.query(query, [searchTerm], (err, results) => {
@@ -223,98 +235,11 @@ const buscarProducto = (req, res) => {
 
 
 
-/**
- * Actualiza stock de forma atómica (evita lost-update entre lecturas concurrentes).
- * @param {object|null} connection Conexión de transacción; si es null usa el pool global.
- */
-const actualizarStockProducto = async (productoId, cantidadCambio, motivo = 'pedido', connection = null, kardex = null) => {
-    const delta = parseFloat(cantidadCambio);
 
-    if (Number.isNaN(delta)) {
-        throw new Error(`Cantidad de stock inválida para producto ${productoId}`);
-    }
 
-    let stockAntes = null;
-    if (kardex && connection) {
-        const rows = await cQuery(
-            `SELECT stock_actual FROM productos WHERE id = ?`,
-            [productoId],
-            connection
-        );
-        if (rows?.length) {
-            stockAntes = parseFloat(rows[0].stock_actual);
-        }
-    }
 
-    if (delta < 0) {
-        const sql = `
-            UPDATE productos
-            SET stock_actual = stock_actual + ?
-            WHERE id = ? AND stock_actual + ? >= 0
-        `;
-        const result = await cQuery(sql, [delta, productoId, delta], connection);
-        if (!result?.affectedRows) {
-            const rows = await cQuery(
-                `SELECT id, stock_actual FROM productos WHERE id = ?`,
-                [productoId],
-                connection
-            );
-            if (!rows?.length) {
-                throw new Error(`Producto ${productoId} no encontrado`);
-            }
-            throw new Error(`Stock insuficiente. Stock disponible: ${rows[0].stock_actual}`);
-        }
-        console.log(
-            `✅ Stock actualizado (atómico) - Producto: ${productoId}, Cambio: ${delta}, Motivo: ${motivo}`
-        );
-        if (kardex && connection && stockAntes !== null) {
-            await registrarMovimientoStock(connection, {
-                productoId,
-                delta,
-                stockAntes,
-                stockDespues: stockAntes + delta,
-                tipoOperacion: resolverTipoOperacion(motivo, kardex.tipoOperacion),
-                referenciaTipo: kardex.referenciaTipo || 'pedidos',
-                referenciaId: kardex.referenciaId ?? null,
-                usuarioId: kardex.usuarioId ?? null,
-                usuarioNombre: kardex.usuarioNombre ?? null,
-                observaciones: kardex.observaciones ?? motivo
-            });
-        }
-        return result;
-    }
 
-    const result = await cQuery(
-        `UPDATE productos SET stock_actual = stock_actual + ? WHERE id = ?`,
-        [delta, productoId],
-        connection
-    );
-    if (!result?.affectedRows) {
-        const rows = await cQuery(`SELECT id FROM productos WHERE id = ?`, [productoId], connection);
-        if (!rows?.length) {
-            throw new Error(`Producto ${productoId} no encontrado`);
-        }
-        throw new Error(`No se pudo actualizar stock del producto ${productoId}`);
-    }
-    console.log(
-        `✅ Stock incrementado - Producto: ${productoId}, Cambio: +${delta}, Motivo: ${motivo}`
-    );
-    if (kardex && connection && stockAntes !== null) {
-        await registrarMovimientoStock(connection, {
-            productoId,
-            delta,
-            stockAntes,
-            stockDespues: stockAntes + delta,
-            tipoOperacion: resolverTipoOperacion(motivo, kardex.tipoOperacion),
-            referenciaTipo: kardex.referenciaTipo || 'pedidos',
-            referenciaId: kardex.referenciaId ?? null,
-            usuarioId: kardex.usuarioId ?? null,
-            usuarioNombre: kardex.usuarioNombre ?? null,
-            observaciones: kardex.observaciones ?? motivo
-        });
-    }
-    return result;
-};
+
 
 const INSERT_PEDIDO_QUERY = `
         INSERT INTO pedidos 
@@ -417,8 +342,11 @@ const registrarPedido = (pedidoData, callback, hashPedido = null) => {
         });
 };
 
-// Inserta líneas y descuenta stock en la misma conexión (transacción).
-const insertarProductosPedido = async (pedidoId, productos, connection, kardexMeta = {}) => {
+/**
+ * Inserta líneas del pedido. Ya no descuenta stock_actual (eso ocurre al facturar).
+ * Devuelve faltantes informativos (stock físico insuficiente) sin bloquear el alta.
+ */
+const insertarProductosPedido = async (pedidoId, productos, connection, _kardexMeta = {}) => {
     const productosConAlicuota = (productos || []).map((p) => ({
         ...p,
         porcentaje_iva: resolvePorcentajeIvaLinea(p)
@@ -427,7 +355,7 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
     const stockRows = ids.length > 0
         ? await queryPromiseWithConnection(
             connection,
-            `SELECT id, nombre, stock_actual, activo FROM productos WHERE id IN (${ids.map(() => '?').join(',')}) FOR UPDATE`,
+            `SELECT id, nombre, stock_actual, activo FROM productos WHERE id IN (${ids.map(() => '?').join(',')})`,
             ids
         )
         : [];
@@ -452,41 +380,14 @@ const insertarProductosPedido = async (pedidoId, productos, connection, kardexMe
                 id: p.id,
                 nombre: row.nombre,
                 disponible: stockDisponible,
-                requerido: cantidadRequerida
+                requerido: cantidadRequerida,
+                faltante: cantidadRequerida - stockDisponible
             });
         }
     }
 
-    if (faltantes.length > 0) {
-        const detalle = faltantes
-            .map((f) => `"${f.nombre}": pedido ${f.requerido}, disponible ${f.disponible}`)
-            .join(' | ');
-        const err = new Error(`Stock insuficiente para ${faltantes.length} producto(s): ${detalle}`);
-        err.code = 'INSUFFICIENT_STOCK';
-        err.statusCode = 422;
-        err.faltantes = faltantes;
-        throw err;
-    }
-
     await pedidosRepository.insertProductosPedido(pedidoId, productosConAlicuota, connection);
-
-    const kardexBase = {
-        referenciaTipo: 'pedidos',
-        referenciaId: pedidoId,
-        usuarioId: kardexMeta.usuarioId ?? null,
-        usuarioNombre: kardexMeta.usuarioNombre ?? null,
-        tipoOperacion: 'PEDIDO_NUEVO'
-    };
-
-    for (const producto of productosConAlicuota) {
-        await actualizarStockProducto(
-            producto.id,
-            -producto.cantidad,
-            'nuevo_pedido',
-            connection,
-            kardexBase
-        );
-    }
+    return faltantes;
 };
 
 // Endpoint para registrar nuevo pedido CON IDEMPOTENCIA
@@ -581,13 +482,13 @@ const nuevoPedido = async (req, res) => {
     };
 
     try {
-        const pedidoId = await withTransaction(async (connection) => {
+        const { pedidoId, faltantes } = await withTransaction(async (connection) => {
             const newPedidoId = await insertPedidoCabecera(connection, pedidoPayload, hashPedidoFinal);
-            await insertarProductosPedido(newPedidoId, productos, connection, {
+            const faltantesInfo = await insertarProductosPedido(newPedidoId, productos, connection, {
                 usuarioId: empleado_id,
                 usuarioNombre: empleado_nombre
             });
-            return newPedidoId;
+            return { pedidoId: newPedidoId, faltantes: faltantesInfo };
         });
 
         await auditarOperacion(req, {
@@ -598,13 +499,14 @@ const nuevoPedido = async (req, res) => {
                 id: pedidoId,
                 ...req.body
             },
-            detallesAdicionales: `Pedido creado para cliente: ${cliente_nombre} - Total: $${total} - ${productos.length} productos`
+            detallesAdicionales: `Pedido creado para cliente: ${cliente_nombre} - Total: $${total} - ${productos.length} productos${faltantes.length ? ` - ${faltantes.length} con aviso de faltante` : ''}`
         });
 
         return res.json({
             success: true,
             message: 'Pedido y productos insertados correctamente',
-            pedidoId
+            pedidoId,
+            ...(faltantes.length > 0 && { faltantes, avisoStock: true })
         });
     } catch (err) {
         const msg = err.message || String(err);
@@ -631,16 +533,6 @@ const nuevoPedido = async (req, res) => {
                 existing: true,
                 data: pedidoExistente || null
             });
-        }
-
-        if (msg.includes('Stock insuficiente')) {
-            await auditarOperacion(req, {
-                accion: 'INSERT',
-                tabla: 'pedidos',
-                detallesAdicionales: `Rollback nuevo pedido (stock): ${msg}`,
-                datosNuevos: req.body
-            });
-            return res.status(400).json({ success: false, message: msg });
         }
 
         if (err.code === 'PRODUCT_INACTIVE' || msg.includes('dado de baja')) {
@@ -833,7 +725,7 @@ const obtenerDetallePedido = (req, res) => {
     });
 };
 
-// Actualizar estado de un pedido (stock primero, luego estado; todo en una transacción)
+// Actualizar estado de un pedido (sin tocar stock: el stock solo se mueve al facturar / NC)
 const actualizarEstadoPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     const { estado } = req.body;
@@ -846,118 +738,45 @@ const actualizarEstadoPedido = async (req, res) => {
         });
     }
 
-    const obtenerDatosAnterioresPromise = () => {
-        return new Promise((resolve, reject) => {
+    try {
+        const datosAnteriores = await new Promise((resolve, reject) => {
             db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
                 if (err) return reject(err);
                 resolve(results.length > 0 ? results[0] : null);
             });
         });
-    };
-
-    try {
-        const datosAnteriores = await obtenerDatosAnterioresPromise();
         if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
 
         const estadoActual = datosAnteriores.estado;
 
-        const necesitaAjusteStock =
-            (estadoActual !== 'Anulado' && estado === 'Anulado') ||
-            (estadoActual === 'Anulado' && estado !== 'Anulado');
+        if (estadoActual === 'Facturado') {
+            return res.status(409).json({
+                success: false,
+                message:
+                    'No se puede cambiar el estado de un pedido facturado. Para revertir la operación emita una Nota de Crédito sobre la venta.',
+                code: 'PEDIDO_FACTURADO'
+            });
+        }
+
+        if (estado === 'Facturado') {
+            return res.status(409).json({
+                success: false,
+                message: 'El estado Facturado solo se asigna automáticamente al facturar el pedido.',
+                code: 'FACTURADO_VIA_FACTURACION'
+            });
+        }
 
         try {
             await withTransaction(async (connection) => {
                 const pedidoBloqueado = await getPedidoByIdForUpdate(pedidoId, connection);
                 if (!pedidoBloqueado) throw new Error('Pedido no encontrado');
-                if (necesitaAjusteStock) {
-                    const productosDelPedido = await queryPromiseWithConnection(
-                        connection,
-                        `SELECT pc.producto_id, pc.cantidad, p.stock_actual, p.nombre
-                         FROM pedidos_cont pc
-                         JOIN productos p ON p.id = pc.producto_id
-                         WHERE pc.pedido_id = ?
-                         FOR UPDATE`,
-                        [pedidoId]
-                    );
-
-                    if (!productosDelPedido || productosDelPedido.length === 0) {
-                        throw new Error('El pedido no tiene líneas de productos para ajustar stock');
-                    }
-
-                    if (estadoActual !== 'Anulado' && estado === 'Anulado') {
-                        await queryPromiseWithConnection(
-                            connection,
-                            `
-                                UPDATE productos p
-                                JOIN pedidos_cont pc ON pc.producto_id = p.id
-                                SET p.stock_actual = p.stock_actual + pc.cantidad
-                                WHERE pc.pedido_id = ?
-                            `,
-                            [pedidoId]
-                        );
-
-                        for (const linea of productosDelPedido) {
-                            const stockAntes = parseFloat(linea.stock_actual);
-                            const delta = parseFloat(linea.cantidad);
-                            await registrarMovimientoStock(connection, {
-                                productoId: linea.producto_id,
-                                delta,
-                                stockAntes,
-                                stockDespues: stockAntes + delta,
-                                tipoOperacion: 'PEDIDO_ANULADO',
-                                referenciaTipo: 'pedidos',
-                                referenciaId: Number(pedidoId),
-                                usuarioId: req.user?.id ?? null,
-                                usuarioNombre: req.user?.nombre ?? null,
-                                observaciones: `Anulación pedido #${pedidoId}`
-                            });
-                        }
-                    } else if (estadoActual === 'Anulado' && estado !== 'Anulado') {
-                        const faltantesRows = productosDelPedido.filter(
-                            (linea) => parseFloat(linea.stock_actual) < parseFloat(linea.cantidad)
-                        );
-
-                        if (faltantesRows.length > 0) {
-                            const detalle = faltantesRows.map(
-                                (f) => `"${f.nombre || f.producto_id}": disponible ${f.stock_actual}, requerido ${f.cantidad}`
-                            ).join(' | ');
-                            throw new Error(
-                                `Stock insuficiente para reactivar el pedido. ${faltantesRows.length} producto(s): ${detalle}`
-                            );
-                        }
-
-                        await queryPromiseWithConnection(
-                            connection,
-                            `
-                                UPDATE productos p
-                                JOIN pedidos_cont pc ON pc.producto_id = p.id
-                                SET p.stock_actual = p.stock_actual - pc.cantidad
-                                WHERE pc.pedido_id = ?
-                            `,
-                            [pedidoId]
-                        );
-
-                        for (const linea of productosDelPedido) {
-                            const stockAntes = parseFloat(linea.stock_actual);
-                            const delta = -parseFloat(linea.cantidad);
-                            await registrarMovimientoStock(connection, {
-                                productoId: linea.producto_id,
-                                delta,
-                                stockAntes,
-                                stockDespues: stockAntes + delta,
-                                tipoOperacion: 'PEDIDO_REACTIVADO',
-                                referenciaTipo: 'pedidos',
-                                referenciaId: Number(pedidoId),
-                                usuarioId: req.user?.id ?? null,
-                                usuarioNombre: req.user?.nombre ?? null,
-                                observaciones: `Reactivación pedido #${pedidoId}`
-                            });
-                        }
-                    }
+                if (pedidoBloqueado.estado === 'Facturado') {
+                    const err = new Error('No se puede cambiar el estado de un pedido facturado');
+                    err.statusCode = 409;
+                    throw err;
                 }
-
                 await pedidosRepository.updateEstadoPedido(pedidoId, estado, connection);
             });
 
@@ -972,7 +791,7 @@ const actualizarEstadoPedido = async (req, res) => {
 
             return res.json({
                 success: true,
-                message: 'Estado del pedido actualizado correctamente y stock ajustado'
+                message: 'Estado del pedido actualizado correctamente'
             });
         } catch (error) {
             console.error('Error en actualizarEstadoPedido:', error);
@@ -984,10 +803,10 @@ const actualizarEstadoPedido = async (req, res) => {
                 detallesAdicionales: `Error al actualizar estado del pedido: ${error.message}`
             });
 
-            if (error.message && error.message.includes('Stock insuficiente')) {
-                return res.status(400).json({
+            if (error.statusCode === 409) {
+                return res.status(409).json({
                     success: false,
-                    message: `No se puede reactivar el pedido: ${error.message}`
+                    message: error.message
                 });
             }
 
@@ -1016,17 +835,12 @@ const eliminarPedido = async (req, res) => {
     const pedidoId = req.params.pedidoId;
     
     try {
-        // Obtener datos del pedido antes de eliminarlo para auditoría
-        const obtenerPedidoPromise = () => {
-            return new Promise((resolve, reject) => {
-                db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
-                    if (err) return reject(err);
-                    resolve(results.length > 0 ? results[0] : null);
-                });
+        const datosAnteriores = await new Promise((resolve, reject) => {
+            db.query('SELECT * FROM pedidos WHERE id = ?', [pedidoId], (err, results) => {
+                if (err) return reject(err);
+                resolve(results.length > 0 ? results[0] : null);
             });
-        };
-
-        const datosAnteriores = await obtenerPedidoPromise();
+        });
         if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
         }
@@ -1039,82 +853,59 @@ const eliminarPedido = async (req, res) => {
             });
         }
 
-        const debeRestaurarStock = datosAnteriores.estado === 'Exportado';
-
-        // Obtener todos los productos del pedido antes de eliminarlo
-        const queryObtenerProductos = `
-            SELECT producto_id, cantidad 
-            FROM pedidos_cont 
-            WHERE pedido_id = ?
-        `;
-        
         const productosDelPedido = await new Promise((resolve, reject) => {
-            db.query(queryObtenerProductos, [pedidoId], (err, results) => {
-                if (err) {
-                    console.error('Error al obtener productos del pedido:', err);
-                    return reject(err);
+            db.query(
+                'SELECT producto_id, cantidad FROM pedidos_cont WHERE pedido_id = ?',
+                [pedidoId],
+                (err, results) => {
+                    if (err) return reject(err);
+                    resolve(results);
                 }
-                resolve(results);
-            });
+            );
         });
 
-        // Eliminar el pedido (los productos se eliminan por CASCADE)
-        const queryEliminarPedido = `DELETE FROM pedidos WHERE id = ?`;
-
-        const result = await new Promise((resolve, reject) => {
-            db.query(queryEliminarPedido, [pedidoId], (err, result) => {
-                if (err) {
-                    console.error('Error al eliminar el pedido:', err);
-                    return reject(err);
-                }
-                resolve(result);
-            });
-        });
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'Pedido no encontrado' 
-            });
-        }
-
-        // Solo Exportado tenía stock descontado; Anulado ya devolvió stock al anularse
-        if (debeRestaurarStock && productosDelPedido.length > 0) {
-            for (const producto of productosDelPedido) {
-                await actualizarStockProducto(
-                    producto.producto_id,
-                    producto.cantidad,
-                    'eliminar_pedido_completo'
+        await withTransaction(async (connection) => {
+            const pedidoBloqueado = await getPedidoByIdForUpdate(pedidoId, connection);
+            if (!pedidoBloqueado) throw new Error('Pedido no encontrado');
+            if (pedidoBloqueado.estado === 'Facturado') {
+                const err = new Error(
+                    'No se puede eliminar un pedido facturado. Para anular la operación emita una Nota de Crédito.'
                 );
+                err.statusCode = 400;
+                throw err;
             }
-        }
+            const [delResult] = await connection.query('DELETE FROM pedidos WHERE id = ?', [pedidoId]);
+            if (!delResult || delResult.affectedRows === 0) {
+                throw new Error('Pedido no encontrado');
+            }
+        });
 
-        // Auditar eliminación del pedido
         await auditarOperacion(req, {
             accion: 'DELETE',
             tabla: 'pedidos',
             registroId: pedidoId,
             datosAnteriores,
-            detallesAdicionales: `Pedido eliminado completo - Cliente: ${datosAnteriores.cliente_nombre} - Total: $${datosAnteriores.total} - ${productosDelPedido.length} productos${debeRestaurarStock ? ' - stock restaurado' : ' - sin ajuste de stock (estado no Exportado)'}`
+            detallesAdicionales: `Pedido eliminado completo - Cliente: ${datosAnteriores.cliente_nombre} - Total: $${datosAnteriores.total} - ${(productosDelPedido || []).length} productos`
         });
 
         res.json({ 
             success: true, 
-            message: debeRestaurarStock
-                ? 'Pedido eliminado correctamente y stock restaurado para todos los productos'
-                : 'Pedido eliminado correctamente'
+            message: 'Pedido eliminado correctamente'
         });
 
     } catch (error) {
         console.error('Error en eliminarPedido:', error);
         
-        // Auditar error
         await auditarOperacion(req, {
             accion: 'DELETE',
             tabla: 'pedidos',
             registroId: pedidoId,
             detallesAdicionales: `Error al eliminar pedido: ${error.message}`
         });
+
+        if (error.statusCode === 400) {
+            return res.status(400).json({ success: false, message: error.message });
+        }
         
         res.status(500).json({ 
             success: false, 
@@ -1274,12 +1065,18 @@ const agregarProductoPedidoExistente = async (req, res) => {
                         err.statusCode = 400;
                         throw err;
                     }
+
                     const stockDisp = parseFloat(stockRows[0].stock_actual);
-                    if (stockDisp < parseFloat(cantidad)) {
-                        throw new Error(
-                            `Stock insuficiente. Stock disponible: ${stockDisp}, solicitado: ${cantidad}`
-                        );
-                    }
+                    const avisoFaltante =
+                        stockDisp < parseFloat(cantidad)
+                            ? {
+                                  id: producto_id,
+                                  nombre: stockRows[0].nombre || producto_nombre,
+                                  disponible: stockDisp,
+                                  requerido: parseFloat(cantidad),
+                                  faltante: parseFloat(cantidad) - stockDisp
+                              }
+                            : null;
 
                     const [insertData] = [
                         {
@@ -1301,31 +1098,18 @@ const agregarProductoPedidoExistente = async (req, res) => {
                     const insertResults = await pedidosRepository.insertProductosPedido(pedidoId, [insertData], connection);
                     const insertResult = insertResults[0] || { insertId: null };
 
-                    await actualizarStockProducto(
-                        producto_id,
-                        -cantidad,
-                        'agregar_producto_pedido',
-                        connection,
-                        {
-                            tipoOperacion: 'PEDIDO_ITEM_AGREGADO',
-                            referenciaTipo: 'pedidos',
-                            referenciaId: Number(pedidoId),
-                            usuarioId: req.user?.id ?? null,
-                            usuarioNombre: req.user?.nombre ?? null
-                        }
-                    );
-
                     const totalesActualizados = await recalcularYActualizarTotalesPedido(
                         pedidoId,
                         null,
                         connection
                     );
 
-                    return { insertResult, totalesActualizados };
+                    return { insertResult, totalesActualizados, avisoFaltante };
         });
 
         const insertResult = insertResultTx.insertResult;
         const totalesActualizados = insertResultTx.totalesActualizados;
+        const avisoFaltante = insertResultTx.avisoFaltante;
 
         await auditarOperacion(req, {
             accion: 'INSERT',
@@ -1336,15 +1120,16 @@ const agregarProductoPedidoExistente = async (req, res) => {
                 pedido_id: pedidoId,
                 ...req.body
             },
-            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad} - Nuevos totales: $${totalesActualizados.total}${offlineMeta.op_id ? ` - OfflineOp: ${offlineMeta.op_id}` : ''}`
+            detallesAdicionales: `Producto agregado al pedido ${pedidoId}: ${producto_nombre} x${cantidad} - Nuevos totales: $${totalesActualizados.total}${offlineMeta.op_id ? ` - OfflineOp: ${offlineMeta.op_id}` : ''}${avisoFaltante ? ' - aviso faltante stock' : ''}`
         });
 
         res.json({
             success: true,
-            message: 'Producto agregado correctamente, stock y totales actualizados',
+            message: 'Producto agregado correctamente y totales actualizados',
             data: {
                 producto: insertResult,
-                totales: totalesActualizados
+                totales: totalesActualizados,
+                ...(avisoFaltante && { faltantes: [avisoFaltante], avisoStock: true })
             }
         });
     } catch (error) {
@@ -1356,13 +1141,6 @@ const agregarProductoPedidoExistente = async (req, res) => {
             detallesAdicionales: `Error al agregar producto al pedido ${pedidoId}: ${error.message}`,
             datosNuevos: req.body
         });
-
-        if (error.message && error.message.includes('Stock insuficiente')) {
-            return res.status(400).json({
-                success: false,
-                message: error.message
-            });
-        }
 
         if (error.code === 'PRODUCT_INACTIVE' || (error.message && error.message.includes('dado de baja'))) {
             return res.status(400).json({
@@ -1434,9 +1212,7 @@ const actualizarProductoPedido = async (req, res) => {
         }
 
         const cantidadAnterior = datosAnteriores.cantidad;
-        const productoId = datosAnteriores.producto_id;
         const pedidoId = datosAnteriores.pedido_id;
-        const diferenciaCantidad = cantidad - cantidadAnterior;
 
         const pedido = await getPedidoById(pedidoId);
         const permiso = canEditPedido(pedido, req.user);
@@ -1466,23 +1242,6 @@ const actualizarProductoPedido = async (req, res) => {
         const nombreFinal = producto_nombre || datosAnteriores.producto_nombre;
 
         const totalesActualizados = await withTransaction(async (connection) => {
-                    if (diferenciaCantidad > 0) {
-                        const stockRows = await queryPromiseWithConnection(
-                            connection,
-                            `SELECT stock_actual FROM productos WHERE id = ?`,
-                            [productoId]
-                        );
-                        if (!stockRows || stockRows.length === 0) {
-                            throw new Error('Producto no encontrado');
-                        }
-                        const stockActual = parseFloat(stockRows[0].stock_actual);
-                        if (stockActual < diferenciaCantidad) {
-                            throw new Error(
-                                `Stock insuficiente. Stock disponible: ${stockActual}, necesitas: ${diferenciaCantidad} adicionales`
-                            );
-                        }
-                    }
-
                     const updResult = await pedidosRepository.updateProductoPedido(
                         pedidoId,
                         {
@@ -1503,22 +1262,6 @@ const actualizarProductoPedido = async (req, res) => {
                     );
                     if (!updResult || updResult.affectedRows === 0) {
                         throw new Error('Producto no encontrado');
-                    }
-
-                    if (diferenciaCantidad !== 0) {
-                        await actualizarStockProducto(
-                            productoId,
-                            -diferenciaCantidad,
-                            'actualizar_cantidad_pedido',
-                            connection,
-                            {
-                                tipoOperacion: 'PEDIDO_ITEM_MODIFICADO',
-                                referenciaTipo: 'pedidos',
-                                referenciaId: Number(pedidoId),
-                                usuarioId: req.user?.id ?? null,
-                                usuarioNombre: req.user?.nombre ?? null
-                            }
-                        );
                     }
 
                     const totales = await recalcularYActualizarTotalesPedido(pedidoId, null, connection);
@@ -1548,7 +1291,7 @@ const actualizarProductoPedido = async (req, res) => {
         // ✅ 9. RESPUESTA CON INFORMACIÓN DETALLADA
         res.json({
             success: true,
-            message: `Producto actualizado correctamente${descuentoFinal > 0 ? ` con ${descuentoFinal}% de descuento` : ''}, stock y totales ajustados`,
+            message: `Producto actualizado correctamente${descuentoFinal > 0 ? ` con ${descuentoFinal}% de descuento` : ''}, totales ajustados`,
             data: {
                 totales: totalesActualizados,
                 descuento: {
@@ -1569,13 +1312,6 @@ const actualizarProductoPedido = async (req, res) => {
             registroId: productId,
             detallesAdicionales: `Error al actualizar producto: ${error.message}`
         });
-        
-        if (error.message && error.message.includes('Stock insuficiente')) {
-            return res.status(400).json({ 
-                success: false,
-                message: error.message
-            });
-        }
 
         if (error.message === 'Producto no encontrado') {
             return res.status(404).json({
@@ -1629,20 +1365,6 @@ const eliminarProductoPedido = async (req, res) => {
                         throw new Error('Producto en pedido no encontrado');
                     }
 
-                    await actualizarStockProducto(
-                        datosProducto.producto_id,
-                        datosProducto.cantidad,
-                        'eliminar_producto_pedido',
-                        connection,
-                        {
-                            tipoOperacion: 'PEDIDO_ITEM_ELIMINADO',
-                            referenciaTipo: 'pedidos',
-                            referenciaId: Number(pedidoId),
-                            usuarioId: req.user?.id ?? null,
-                            usuarioNombre: req.user?.nombre ?? null
-                        }
-                    );
-
                     const totales = await recalcularYActualizarTotalesPedido(pedidoId, null, connection);
 
                     return totales;
@@ -1659,7 +1381,7 @@ const eliminarProductoPedido = async (req, res) => {
 
         res.json({ 
             success: true, 
-            message: 'Producto eliminado correctamente, stock restaurado y totales actualizados',
+            message: 'Producto eliminado correctamente y totales actualizados',
             data: {
                 totales: totalesActualizados
             }

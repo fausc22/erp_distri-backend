@@ -105,6 +105,12 @@ router.get('/stock-reservado/:id',
     productosController.obtenerStockReservado
 );
 
+router.get('/stock-faltantes',
+    requireEmployee,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'productos' }),
+    productosController.obtenerStockFaltantes
+);
+
 /** Producto plantilla para fletes en Venta Directa: nombre exacto "FLETE DE HACIENDA". */
 router.get('/producto-flete-hacienda',
     requireEmployee,

@@ -675,6 +675,88 @@ const facturarPedido = async (req, res) => {
             }
             
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
+
+            // Descontar stock físico al facturar (bloqueo si no alcanza)
+            const idsProductos = [...new Set(productos.map((p) => p.producto_id).filter(Boolean))];
+            const stockRows = idsProductos.length > 0
+                ? await queryPromiseWithConnection(
+                    connection,
+                    `SELECT id, nombre, stock_actual FROM productos WHERE id IN (${idsProductos.map(() => '?').join(',')}) FOR UPDATE`,
+                    idsProductos
+                )
+                : [];
+            const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
+
+            const requeridoPorProducto = productos.reduce((acc, p) => {
+                const id = Number(p.producto_id);
+                if (!id) return acc;
+                acc[id] = (acc[id] || 0) + parseFloat(p.cantidad);
+                return acc;
+            }, {});
+
+            const faltantesStock = [];
+            for (const [idStr, cantidadRequerida] of Object.entries(requeridoPorProducto)) {
+                const id = Number(idStr);
+                const row = stockMap.get(id);
+                if (!row) {
+                    faltantesStock.push({
+                        id,
+                        nombre: productos.find((p) => Number(p.producto_id) === id)?.producto_nombre || String(id),
+                        disponible: 0,
+                        requerido: cantidadRequerida,
+                        faltante: cantidadRequerida
+                    });
+                    continue;
+                }
+                const disponible = parseFloat(row.stock_actual);
+                if (disponible < cantidadRequerida) {
+                    faltantesStock.push({
+                        id,
+                        nombre: row.nombre,
+                        disponible,
+                        requerido: cantidadRequerida,
+                        faltante: cantidadRequerida - disponible
+                    });
+                }
+            }
+
+            if (faltantesStock.length > 0) {
+                const detalle = faltantesStock
+                    .map((f) => `"${f.nombre}" le faltan ${f.faltante} unidades (disponible ${f.disponible}, requerido ${f.requerido})`)
+                    .join(' | ');
+                const stockError = new Error(
+                    `No se puede facturar: stock insuficiente. ${detalle}`
+                );
+                stockError.statusCode = 422;
+                stockError.code = 'INSUFFICIENT_STOCK';
+                stockError.faltantes = faltantesStock;
+                throw stockError;
+            }
+
+            for (const [idStr, cantidadRequerida] of Object.entries(requeridoPorProducto)) {
+                const id = Number(idStr);
+                const row = stockMap.get(id);
+                const stockAntes = parseFloat(row.stock_actual);
+                await queryPromiseWithConnection(
+                    connection,
+                    `UPDATE productos SET stock_actual = stock_actual - ? WHERE id = ?`,
+                    [cantidadRequerida, id]
+                );
+                await registrarMovimientoStock(connection, {
+                    productoId: id,
+                    delta: -cantidadRequerida,
+                    stockAntes,
+                    stockDespues: stockAntes - cantidadRequerida,
+                    tipoOperacion: 'PEDIDO_FACTURADO',
+                    referenciaTipo: 'pedidos',
+                    referenciaId: Number(pedidoId),
+                    usuarioId: req.user?.id ?? null,
+                    usuarioNombre: req.user?.nombre ?? null,
+                    observaciones: `Facturación pedido #${pedidoId}`
+                });
+                row.stock_actual = stockAntes - cantidadRequerida;
+            }
+            console.log('📦 Stock físico descontado por facturación');
             
             // ✅ 4. IMPORTES: fuente única = suma de líneas en pedidos_cont (coherencia BD / PDF / ARCA).
             // totalConIva del front puede ser menor (descuento global), nunca mayor que neto+IVA de líneas.
@@ -1053,7 +1135,9 @@ const facturarPedido = async (req, res) => {
         const errorStatus = Number.isInteger(error.statusCode) ? error.statusCode : 500;
         return res.status(errorStatus).json({
             success: false,
-            message: error.message || 'Error en el proceso de facturación'
+            message: error.message || 'Error en el proceso de facturación',
+            ...(error.code && { code: error.code }),
+            ...(error.faltantes && { faltantes: error.faltantes })
         });
     }
 };

@@ -135,7 +135,7 @@ const buscarProducto = (req, res) => {
     const baseFrom = `FROM productos p
         LEFT JOIN categorias c ON p.categoria_id = c.id
         LEFT JOIN (
-            SELECT pc.producto_id, SUM(pc.cantidad) AS stock_reservado
+            SELECT pc.producto_id, SUM(pc.cantidad) AS pendiente_pedidos
             FROM pedidos_cont pc
             JOIN pedidos ped ON ped.id = pc.pedido_id
             WHERE ped.estado = 'Exportado'
@@ -167,8 +167,10 @@ const buscarProducto = (req, res) => {
     const countQuery = `SELECT COUNT(*) as total ${baseFrom} ${whereClause}`;
     const dataQuery = `
         SELECT p.*, c.nombre as categoria_nombre,
-               COALESCE(r.stock_reservado, 0) AS stock_reservado,
-               (p.stock_actual - COALESCE(r.stock_reservado, 0)) AS stock_libre
+               COALESCE(r.pendiente_pedidos, 0) AS en_pedidos_pendientes,
+               (p.stock_actual - COALESCE(r.pendiente_pedidos, 0)) AS disponible_estimado,
+               COALESCE(r.pendiente_pedidos, 0) AS stock_reservado,
+               (p.stock_actual - COALESCE(r.pendiente_pedidos, 0)) AS stock_libre
         ${baseFrom}
         ${whereClause}
         ${orderLimit}
@@ -1061,7 +1063,8 @@ const actualizarEstadoRemito = async (req, res) => {
 };
 
 /**
- * Stock reservado en pedidos activos (estado Exportado).
+ * Cantidad en pedidos pendientes de facturar (estado Exportado).
+ * Ya no es "reserva" sobre stock físico: stock_actual solo baja al facturar.
  */
 const obtenerStockReservado = async (req, res) => {
     const productoId = parseInt(req.params.id, 10);
@@ -1073,7 +1076,7 @@ const obtenerStockReservado = async (req, res) => {
     try {
         const result = await new Promise((resolve, reject) => {
             db.query(
-                `SELECT COALESCE(SUM(pc.cantidad), 0) AS reservado
+                `SELECT COALESCE(SUM(pc.cantidad), 0) AS pendiente_pedidos
                  FROM pedidos_cont pc
                  JOIN pedidos p ON p.id = pc.pedido_id
                  WHERE pc.producto_id = ? AND p.estado = 'Exportado'`,
@@ -1085,15 +1088,112 @@ const obtenerStockReservado = async (req, res) => {
             );
         });
 
-        const reservado = result?.length ? parseFloat(result[0].reservado) : 0;
+        const pendiente = result?.length ? parseFloat(result[0].pendiente_pedidos) : 0;
 
         return res.json({
             success: true,
-            data: { reservado }
+            data: {
+                pendiente_pedidos: pendiente,
+                reservado: pendiente
+            }
         });
     } catch (error) {
-        console.error('Error al obtener stock reservado:', error);
-        return res.status(500).json({ success: false, message: 'Error al obtener stock reservado' });
+        console.error('Error al obtener stock en pedidos pendientes:', error);
+        return res.status(500).json({ success: false, message: 'Error al obtener stock en pedidos pendientes' });
+    }
+};
+
+/**
+ * Alertas de reposición: stock físico bajo + faltantes por pedidos pendientes.
+ */
+const obtenerStockFaltantes = async (req, res) => {
+    try {
+        const umbral = Number(req.query.umbral);
+        const umbralBajo = Number.isFinite(umbral) && umbral >= 0
+            ? umbral
+            : STOCK_THRESHOLDS.BAJO_LISTADO;
+
+        const proximosAgotarse = await queryPromise(
+            `SELECT p.id, p.nombre, p.unidad_medida, p.stock_actual, p.stock_minimo,
+                    c.nombre AS categoria_nombre
+             FROM productos p
+             LEFT JOIN categorias c ON c.id = p.categoria_id
+             WHERE p.activo = 1 AND p.stock_actual <= ?
+             ORDER BY p.stock_actual ASC, p.nombre ASC
+             LIMIT 200`,
+            [umbralBajo]
+        );
+
+        const faltantesPorPedidos = await queryPromise(
+            `SELECT p.id, p.nombre, p.unidad_medida, p.stock_actual,
+                    COALESCE(r.pendiente_pedidos, 0) AS en_pedidos_pendientes,
+                    (p.stock_actual - COALESCE(r.pendiente_pedidos, 0)) AS disponible_estimado,
+                    (COALESCE(r.pendiente_pedidos, 0) - p.stock_actual) AS cantidad_faltante,
+                    c.nombre AS categoria_nombre
+             FROM productos p
+             LEFT JOIN categorias c ON c.id = p.categoria_id
+             INNER JOIN (
+                SELECT pc.producto_id, SUM(pc.cantidad) AS pendiente_pedidos
+                FROM pedidos_cont pc
+                JOIN pedidos ped ON ped.id = pc.pedido_id
+                WHERE ped.estado = 'Exportado'
+                GROUP BY pc.producto_id
+             ) r ON r.producto_id = p.id
+             WHERE p.activo = 1
+               AND (p.stock_actual - COALESCE(r.pendiente_pedidos, 0)) < 0
+             ORDER BY cantidad_faltante DESC, p.nombre ASC
+             LIMIT 200`
+        );
+
+        const detallePedidos = faltantesPorPedidos.length > 0
+            ? await queryPromise(
+                `SELECT pc.producto_id, ped.id AS pedido_id, ped.fecha, ped.cliente_nombre,
+                        ped.empleado_nombre, pc.cantidad, ped.estado
+                 FROM pedidos_cont pc
+                 JOIN pedidos ped ON ped.id = pc.pedido_id
+                 WHERE ped.estado = 'Exportado'
+                   AND pc.producto_id IN (${faltantesPorPedidos.map(() => '?').join(',')})
+                 ORDER BY ped.fecha ASC, ped.id ASC`,
+                faltantesPorPedidos.map((p) => p.id)
+            )
+            : [];
+
+        const detallePorProducto = detallePedidos.reduce((acc, row) => {
+            const key = Number(row.producto_id);
+            if (!acc[key]) acc[key] = [];
+            acc[key].push({
+                pedido_id: row.pedido_id,
+                fecha: row.fecha,
+                cliente_nombre: row.cliente_nombre,
+                empleado_nombre: row.empleado_nombre,
+                cantidad: parseFloat(row.cantidad)
+            });
+            return acc;
+        }, {});
+
+        const faltantesConDetalle = faltantesPorPedidos.map((p) => ({
+            ...p,
+            pedidos: detallePorProducto[Number(p.id)] || []
+        }));
+
+        return res.json({
+            success: true,
+            data: {
+                proximos_agotarse: proximosAgotarse,
+                faltantes_por_pedidos: faltantesConDetalle,
+                resumen: {
+                    total_proximos_agotarse: proximosAgotarse.length,
+                    total_faltantes: faltantesConDetalle.length,
+                    umbral_bajo: umbralBajo
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Error al obtener faltantes de stock:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error al obtener faltantes de stock'
+        });
     }
 };
 
@@ -1137,6 +1237,7 @@ module.exports = {
     generarPdfRemitosMultiples,
     obtenerStock,
     obtenerStockReservado,
+    obtenerStockFaltantes,
     actualizarProductoBasico,
     obtenerTodosProductos,
     eliminarProducto,
