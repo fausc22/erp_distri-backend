@@ -382,6 +382,12 @@ router.get('/generar-pdf-reporte',
     finanzasController.generarPDFReporteFinanciero
 );
 
+router.get('/consulta-comercial',
+    requireManager,
+    middlewareAuditoria({ accion: 'VIEW', tabla: 'consulta_comercial', incluirQuery: true }),
+    finanzasController.obtenerConsultaComercial
+);
+
 // ✅ Reporte Gerencial: datos JSON
 router.get('/reporte-gerencial',
     requireManager,

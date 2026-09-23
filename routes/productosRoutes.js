@@ -131,6 +131,7 @@ router.get('/obtener-todos-productos',
 
 router.put('/actualizar-producto-basico/:id',
     requireEmployee,
+    authorizeRole(['GERENTE']),
     middlewareAuditoria({ accion: 'UPDATE', tabla: 'productos', incluirBody: true }),
     productosController.actualizarProductoBasico
 );

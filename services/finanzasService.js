@@ -2302,6 +2302,118 @@ const generarPDFReporteGerencial = async (req, res) => {
   }
 };
 
+const obtenerConsultaComercial = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    const validacion = validarRangoReporteGerencial(desde, hasta);
+    if (!validacion.ok) {
+      return res.status(400).json({ success: false, message: validacion.message });
+    }
+
+    const { pagina, porPagina, offset } = parsePagination(req.query, {
+      defaultPageSize: 50,
+      maxPageSize: 100
+    });
+
+    const where = [
+      `v.estado = 'Facturada'`,
+      `v.tipo_doc IN ('FACTURA','NOTA_DEBITO','NOTA_CREDITO')`,
+      `DATE(COALESCE(v.fecha_fiscal, v.fecha)) BETWEEN ? AND ?`,
+      `UPPER(vc.producto_nombre) NOT LIKE '%FLETE%'`
+    ];
+    const params = [desde, hasta];
+
+    const productoId = parseInt(req.query.producto_id, 10);
+    if (Number.isFinite(productoId) && productoId > 0) {
+      where.push(`(
+        vc.producto_id = ?
+        OR vc.producto_nombre = (SELECT nombre FROM productos WHERE id = ? LIMIT 1)
+      )`);
+      params.push(productoId, productoId);
+    }
+
+    const clienteId = parseInt(req.query.cliente_id, 10);
+    if (Number.isFinite(clienteId) && clienteId > 0) {
+      where.push('v.cliente_id = ?');
+      params.push(clienteId);
+    }
+
+    const vendedor = (req.query.vendedor || '').toString().trim();
+    if (vendedor) {
+      where.push('LOWER(TRIM(v.empleado_nombre)) = LOWER(TRIM(?))');
+      params.push(vendedor);
+    }
+
+    const whereSql = where.join(' AND ');
+    const signo = `(CASE WHEN v.tipo_doc = 'NOTA_CREDITO' THEN -1 ELSE 1 END)`;
+    const fromSql = `
+      FROM ventas v
+      JOIN ventas_cont vc ON vc.venta_id = v.id
+      WHERE ${whereSql}
+    `;
+
+    const queryResumen = `
+      SELECT
+        ROUND(COALESCE(SUM(vc.cantidad * ${signo}), 0), 2) AS unidades,
+        ROUND(COALESCE(SUM(vc.precio * vc.cantidad * ${signo}), 0), 2) AS importe_neto,
+        COUNT(DISTINCT v.id) AS comprobantes
+      ${fromSql}
+    `;
+    const queryTotal = `SELECT COUNT(*) AS total ${fromSql}`;
+    const queryDetalle = `
+      SELECT
+        DATE_FORMAT(COALESCE(v.fecha_fiscal, v.fecha), '%Y-%m-%d') AS fecha,
+        v.tipo_doc,
+        v.numero_factura,
+        COALESCE(NULLIF(TRIM(v.cliente_nombre), ''), 'Sin cliente') AS cliente_nombre,
+        COALESCE(NULLIF(TRIM(v.empleado_nombre), ''), 'Sin vendedor') AS empleado_nombre,
+        vc.producto_nombre,
+        ROUND(vc.cantidad * ${signo}, 2) AS cantidad,
+        ROUND(vc.precio * vc.cantidad * ${signo}, 2) AS importe
+      ${fromSql}
+      ORDER BY DATE(COALESCE(v.fecha_fiscal, v.fecha)) DESC, v.id DESC, vc.id DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const [resumenRows, totalRows, detalleRows] = await Promise.all([
+      ejecutarQuery(queryResumen, params),
+      ejecutarQuery(queryTotal, params),
+      ejecutarQuery(queryDetalle, [...params, porPagina, offset])
+    ]);
+
+    const resumenRow = resumenRows?.[0] || {};
+    const total = Number(totalRows?.[0]?.total || 0);
+
+    res.json({
+      success: true,
+      data: {
+        resumen: {
+          unidades: Number(resumenRow.unidades || 0),
+          importe_neto: Number(resumenRow.importe_neto || 0),
+          comprobantes: Number(resumenRow.comprobantes || 0)
+        },
+        detalle: (detalleRows || []).map((row) => ({
+          fecha: row.fecha,
+          tipo_doc: row.tipo_doc,
+          numero_factura: row.numero_factura,
+          cliente_nombre: row.cliente_nombre,
+          empleado_nombre: row.empleado_nombre,
+          producto_nombre: row.producto_nombre,
+          cantidad: Number(row.cantidad || 0),
+          importe: Number(row.importe || 0)
+        })),
+        paginacion: { pagina, porPagina, total }
+      }
+    });
+  } catch (error) {
+    console.error('Error en consulta comercial:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener la consulta comercial: ' + error.message
+    });
+  }
+};
+
 // IMPORTANTE: Exportar todas las funciones
 module.exports = {
   // Funciones de cuentas y movimientos
@@ -2350,5 +2462,6 @@ module.exports = {
 
   // Reporte Gerencial
   obtenerReporteGerencial,
-  generarPDFReporteGerencial
+  generarPDFReporteGerencial,
+  obtenerConsultaComercial
 };
