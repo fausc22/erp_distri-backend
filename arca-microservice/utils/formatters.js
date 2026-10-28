@@ -183,6 +183,13 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     const sumaBaseAlic = redondear(ivaAgrupado.reduce((acc, al) => acc + (parseFloat(al.BaseImp) || 0), 0));
     const sumaIvaAlic = redondear(ivaAgrupado.reduce((acc, al) => acc + (parseFloat(al.Importe) || 0), 0));
     if (Math.abs(sumaBaseAlic - impNeto) > 0.01 || Math.abs(sumaIvaAlic - impIVA) > 0.01) {
+      // No debería ocurrir si los ítems viajan con el neto ya descontado.
+      console.warn(
+        `[ARCA formatter] Divergencia ítems vs cabecera: ` +
+        `neto items=${sumaBaseAlic} vs cabecera=${impNeto}, ` +
+        `iva items=${sumaIvaAlic} vs cabecera=${impIVA}. ` +
+        `Se usa suma de ítems — verificar que precios unitarios incluyan descuentos.`
+      );
       impNeto = sumaBaseAlic;
       impIVA = sumaIvaAlic;
     }

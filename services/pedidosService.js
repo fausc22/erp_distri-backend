@@ -502,6 +502,8 @@ const nuevoPedido = async (req, res) => {
             detallesAdicionales: `Pedido creado para cliente: ${cliente_nombre} - Total: $${total} - ${productos.length} productos${faltantes.length ? ` - ${faltantes.length} con aviso de faltante` : ''}`
         });
 
+        console.log(`✅ Pedido guardado | id=${pedidoId} | hash=${hashPedidoFinal} | productos=${productos.length}${faltantes.length ? ` | faltantes=${faltantes.length}` : ''}`);
+
         return res.json({
             success: true,
             message: 'Pedido y productos insertados correctamente',
@@ -509,6 +511,7 @@ const nuevoPedido = async (req, res) => {
             ...(faltantes.length > 0 && { faltantes, avisoStock: true })
         });
     } catch (err) {
+        console.error(`❌ Error guardando pedido | hash=${hashPedidoFinal} | code=${err.code} | msg=${err.sqlMessage || err.message}`);
         const msg = err.message || String(err);
         const sqlMsg = err.sqlMessage || msg;
         const esDupHash =

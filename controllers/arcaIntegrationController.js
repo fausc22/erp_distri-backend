@@ -496,7 +496,8 @@ const solicitarCAE = async (req, res) => {
         precio, 
         IVA as iva,
         porcentaje_iva,
-        subtotal
+        subtotal,
+        descuento_porcentaje
       FROM ventas_cont
       WHERE venta_id = ?
     `;
@@ -544,7 +545,10 @@ const solicitarCAE = async (req, res) => {
     
     const items = productosRows.map(prod => {
       const cantidad = parseFloat(prod.cantidad) || 0;
-      const precioUnitario = parseFloat(prod.precio) || 0;
+      const subtotalLinea = parseFloat(prod.subtotal) || 0;
+      // Neto unitario ya descontado. `precio` es el de lista; ARCA debe recibir
+      // el mismo neto que quedó en el subtotal de la venta.
+      const precioUnitario = cantidad > 0 ? subtotalLinea / cantidad : 0;
       // Cliente exento: toda la factura a alícuota 0%. Si no, alícuota por línea.
       const porcentajeLinea = resolvePorcentajeIvaLinea(prod);
       const alicuotaIVA = clienteEsExento ? 3 : mapAlicuotaArca(porcentajeLinea);

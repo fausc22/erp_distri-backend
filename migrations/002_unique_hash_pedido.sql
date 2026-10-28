@@ -38,40 +38,56 @@ PREPARE stmt_add_uk_hash FROM @sql_add_uk_hash;
 EXECUTE stmt_add_uk_hash;
 DEALLOCATE PREPARE stmt_add_uk_hash;
 
--- Opcional: eliminar índices no-únicos redundantes (el UNIQUE ya sirve para búsquedas).
--- Descomentar solo si se desea limpiar índices duplicados.
---
--- SET @has_idx_hash := (
---   SELECT COUNT(*)
---   FROM information_schema.statistics
---   WHERE table_schema = DATABASE()
---     AND table_name = 'pedidos'
---     AND index_name = 'idx_hash_pedido'
--- );
--- SET @sql_drop_idx_hash := IF(
---   @has_idx_hash > 0,
---   'ALTER TABLE pedidos DROP INDEX idx_hash_pedido',
---   'SELECT ''idx_hash_pedido no existe'' AS info'
--- );
--- PREPARE stmt_drop_idx_hash FROM @sql_drop_idx_hash;
--- EXECUTE stmt_drop_idx_hash;
--- DEALLOCATE PREPARE stmt_drop_idx_hash;
---
--- SET @has_idx_pedidos_hash := (
---   SELECT COUNT(*)
---   FROM information_schema.statistics
---   WHERE table_schema = DATABASE()
---     AND table_name = 'pedidos'
---     AND index_name = 'idx_pedidos_hash_pedido'
--- );
--- SET @sql_drop_idx_pedidos_hash := IF(
---   @has_idx_pedidos_hash > 0,
---   'ALTER TABLE pedidos DROP INDEX idx_pedidos_hash_pedido',
---   'SELECT ''idx_pedidos_hash_pedido no existe'' AS info'
--- );
--- PREPARE stmt_drop_idx_pedidos_hash FROM @sql_drop_idx_pedidos_hash;
--- EXECUTE stmt_drop_idx_pedidos_hash;
--- DEALLOCATE PREPARE stmt_drop_idx_pedidos_hash;
+-- El UNIQUE ya cubre las búsquedas por hash_pedido. Estos índices no únicos quedan redundantes.
+-- Solo se borran si uk_pedidos_hash_pedido quedó creado. Si 003 no se corrió y siguen
+-- los duplicados, el UNIQUE no existe y estos índices se conservan.
+-- Correr este archivo después de 003_fix_hash_duplicates.sql.
+SET @has_uk_hash_now := (
+  SELECT COUNT(*)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'pedidos'
+    AND index_name = 'uk_pedidos_hash_pedido'
+);
+SET @has_idx_hash := (
+  SELECT COUNT(*)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'pedidos'
+    AND index_name = 'idx_hash_pedido'
+);
+SET @sql_drop_idx_hash := IF(
+  @has_uk_hash_now = 0,
+  'SELECT ''No se borran índices: uk_pedidos_hash_pedido no existe. Correr 003 y reintentar.'' AS warning',
+  IF(
+    @has_idx_hash > 0,
+    'ALTER TABLE pedidos DROP INDEX idx_hash_pedido',
+    'SELECT ''idx_hash_pedido no existe'' AS info'
+  )
+);
+PREPARE stmt_drop_idx_hash FROM @sql_drop_idx_hash;
+EXECUTE stmt_drop_idx_hash;
+DEALLOCATE PREPARE stmt_drop_idx_hash;
+
+SET @has_idx_pedidos_hash := (
+  SELECT COUNT(*)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'pedidos'
+    AND index_name = 'idx_pedidos_hash_pedido'
+);
+SET @sql_drop_idx_pedidos_hash := IF(
+  @has_uk_hash_now = 0,
+  'SELECT ''No se borra idx_pedidos_hash_pedido: uk_pedidos_hash_pedido no existe.'' AS warning',
+  IF(
+    @has_idx_pedidos_hash > 0,
+    'ALTER TABLE pedidos DROP INDEX idx_pedidos_hash_pedido',
+    'SELECT ''idx_pedidos_hash_pedido no existe'' AS info'
+  )
+);
+PREPARE stmt_drop_idx_pedidos_hash FROM @sql_drop_idx_pedidos_hash;
+EXECUTE stmt_drop_idx_pedidos_hash;
+DEALLOCATE PREPARE stmt_drop_idx_pedidos_hash;
 
 -- Verificar resultado
 SELECT

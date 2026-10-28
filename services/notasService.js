@@ -460,7 +460,7 @@ const crearNota = async (req, res) => {
  * GET /notas/buscar-ventas
  */
 const buscarVentas = async (req, res) => {
-    const { q } = req.query;
+    const { q, empleado_id: empleadoIdRaw } = req.query;
 
     if (!q || q.trim().length < 2) {
         return res.json({
@@ -469,8 +469,14 @@ const buscarVentas = async (req, res) => {
         });
     }
 
+    let empleadoId = null;
+    if (empleadoIdRaw && empleadoIdRaw !== 'null' && empleadoIdRaw !== 'undefined') {
+        const num = parseInt(empleadoIdRaw, 10);
+        if (!isNaN(num) && num > 0) empleadoId = num;
+    }
+
     try {
-        const query = `
+        let query = `
             SELECT 
                 id, numero_factura, fecha, 
                 cliente_id, cliente_nombre, cliente_cuit, cliente_condicion,
@@ -479,13 +485,22 @@ const buscarVentas = async (req, res) => {
             FROM ventas
             WHERE (cliente_nombre LIKE ? OR numero_factura LIKE ?)
             AND tipo_doc = 'FACTURA'
+        `;
+
+        const searchTerm = `%${q}%`;
+        const queryParams = [searchTerm, searchTerm];
+
+        if (empleadoId !== null) {
+            query += ' AND empleado_id = ?';
+            queryParams.push(empleadoId);
+        }
+
+        query += `
             ORDER BY fecha DESC
             LIMIT 20
         `;
 
-        const searchTerm = `%${q}%`;
-
-        db.query(query, [searchTerm, searchTerm], (err, results) => {
+        db.query(query, queryParams, (err, results) => {
             if (err) {
                 console.error('Error buscando ventas:', err);
                 return res.status(500).json({
