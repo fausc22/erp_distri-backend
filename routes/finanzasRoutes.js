@@ -4,6 +4,11 @@ const { requireEmployee, requireManager } = require('../middlewares/authMiddlewa
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 const router = express.Router();
 
+// Servicio exclusivo de la interfaz nueva; no cambia endpoints de otros módulos.
+const reportesV2 = require('../reportes/controller').createController();
+router.get('/reportes-v2', requireManager, reportesV2.get);
+router.get('/reportes-v2/:snapshotId/pdf', requireManager, reportesV2.pdf);
+
 // Rutas para las cuentas
 router.get('/obtener-cuentas', 
     requireEmployee,

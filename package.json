@@ -12,7 +12,9 @@
     "test:nota-pedido": "node utils/notaPedidoPdf.test.js",
     "test:nota-pedido-unit": "SKIP_PDF_GENERATE=1 node utils/notaPedidoPdf.test.js",
     "test:arca-homo": "node arca-microservice/scripts/smoke-arca-homo.mjs",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "test:reportes": "node --test tests/reportesV2.test.js tests/reportesV2.http.test.js tests/reportesV2.mysql.test.js tests/reportesV2.pdf.test.js",
+    "test:reportes-ui": "node --test tests/reportesV2.browser.test.js"
   },
   "keywords": [
     "api",
