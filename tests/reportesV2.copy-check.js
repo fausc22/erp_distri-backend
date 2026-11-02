@@ -1,4 +1,4 @@
-// Conciliación read-only de la copia local de septiembre. No carga .env.
+// Conciliación read-only de una copia local. No carga .env.
 const mysql = require('mysql2/promise');
 const assert = require('node:assert/strict');
 const { readReport, HEADER_SQL } = require('../reportes/repository');
@@ -8,18 +8,21 @@ const { period } = require('../reportes/period');
   const socketPath = process.env.REPORTES_TEST_SOCKET;
   if (!socketPath?.startsWith('/tmp/erp-reportes-mysql/'))
     throw Error('Requiere socket local de pruebas');
+  const database = process.env.REPORTES_COPY_DATABASE || 'erp_reportes_copy';
+  assert.ok(['erp_reportes_copy', 'erp_reportes_nov2026'].includes(database));
   const conn = await mysql.createConnection({
     socketPath,
     user: 'root',
-    database: 'erp_reportes_copy',
+    database,
   });
   try {
     const output = [];
-    for (const [desde, hasta] of [
-      ['2026-07-01', '2026-07-31'],
-      ['2026-08-01', '2026-08-31'],
-      ['2026-09-01', '2026-09-20'],
-    ]) {
+    const [months] = await conn.query(`SELECT
+      DATE_FORMAT(COALESCE(fecha_fiscal,fecha),'%Y-%m-01') desde,
+      DATE_FORMAT(LAST_DAY(COALESCE(fecha_fiscal,fecha)),'%Y-%m-%d') hasta
+      FROM ventas GROUP BY desde,hasta ORDER BY desde`);
+    assert.ok(months.length, 'La copia debe contener comprobantes');
+    for (const { desde, hasta } of months) {
       const p = period({ desde, hasta });
       const start = Date.now();
       const raw = await readReport(conn, p);
@@ -41,6 +44,49 @@ const { period } = require('../reportes/period');
       assert.equal(d.conciliacion.libro_iva, String(iva.total));
       assert.equal(d.conciliacion.comercial, String(commercial.total));
       assert.ok(Object.values(d.conciliacion.controles).every(Boolean));
+      const [[outflows]] = await conn.query(
+        `SELECT
+        (SELECT COALESCE(SUM(total),0) FROM compras WHERE estado IN ('Registrada','Confirmada') AND DATE(fecha) BETWEEN ? AND ?) compras,
+        (SELECT COALESCE(SUM(monto),0) FROM gastos WHERE DATE(fecha) BETWEEN ? AND ?) gastos`,
+        [desde, hasta, desde, hasta]
+      );
+      assert.equal(d.resultado.compras, String(outflows.compras));
+      assert.equal(d.resultado.gastos, String(outflows.gastos));
+      const [[cash]] = await conn.query(
+        `SELECT
+        COALESCE(SUM(CASE WHEN UPPER(TRIM(tipo))='INGRESO' AND UPPER(TRIM(COALESCE(origen,'')))<>'TRANSFERENCIA' THEN monto ELSE 0 END),0) ingresos,
+        COALESCE(SUM(CASE WHEN UPPER(TRIM(tipo))='EGRESO' AND UPPER(TRIM(COALESCE(origen,'')))<>'TRANSFERENCIA' THEN monto ELSE 0 END),0) egresos,
+        COALESCE(SUM(CASE WHEN UPPER(TRIM(tipo))='INGRESO' AND UPPER(TRIM(COALESCE(origen,'')))='TRANSFERENCIA' THEN monto ELSE 0 END),0) transferencias_entrada,
+        COALESCE(SUM(CASE WHEN UPPER(TRIM(tipo))='EGRESO' AND UPPER(TRIM(COALESCE(origen,'')))='TRANSFERENCIA' THEN monto ELSE 0 END),0) transferencias_salida,
+        COALESCE(SUM(CASE WHEN UPPER(TRIM(tipo))='INGRESO' THEN monto ELSE -monto END),0) variacion
+        FROM movimiento_fondos WHERE DATE(fecha) BETWEEN ? AND ?`,
+        [desde, hasta]
+      );
+      for (const key of Object.keys(cash))
+        assert.equal(d.caja[key], String(cash[key]));
+      const [classified] = await conn.query(
+        `SELECT v.id,
+        CASE WHEN EXISTS(SELECT 1 FROM ventas_cont c WHERE c.venta_id=v.id AND UPPER(c.producto_nombre) LIKE '%FLETE%') THEN 'flete'
+        WHEN v.tipo_doc IN ('NOTA_CREDITO','NOTA_DEBITO') THEN
+          CASE WHEN NOT EXISTS(SELECT 1 FROM ventas_cont c WHERE c.venta_id=v.venta_referencia_id)
+             OR EXISTS(SELECT 1 FROM ventas_cont c WHERE c.venta_id=v.venta_referencia_id AND TRIM(COALESCE(c.producto_nombre,''))='') THEN 'pendiente'
+          WHEN EXISTS(SELECT 1 FROM ventas_cont c WHERE c.venta_id=v.venta_referencia_id AND UPPER(c.producto_nombre) LIKE '%FLETE%') THEN 'flete' ELSE 'normal' END
+        WHEN NOT EXISTS(SELECT 1 FROM ventas_cont c WHERE c.venta_id=v.id)
+          OR EXISTS(SELECT 1 FROM ventas_cont c WHERE c.venta_id=v.id AND TRIM(COALESCE(c.producto_nombre,''))='') THEN 'pendiente'
+        ELSE 'normal' END segmento,
+        CASE WHEN v.tipo_doc='NOTA_CREDITO' THEN -v.total ELSE v.total END total
+        FROM ventas v WHERE v.estado='Facturada' AND v.tipo_doc IN ('FACTURA','NOTA_DEBITO','NOTA_CREDITO')
+        AND DATE(COALESCE(v.fecha_fiscal,v.fecha)) BETWEEN ? AND ? ORDER BY v.id`,
+        [desde, hasta]
+      );
+      assert.deepEqual(
+        d.documentos.map((r) => ({
+          id: r.id,
+          segmento: r.segmento,
+          total: r.total,
+        })),
+        classified
+      );
       output.push({
         desde,
         hasta,
@@ -48,13 +94,19 @@ const { period } = require('../reportes/period');
         total: d.resumen.total,
         normal: d.resumen.normal,
         flete: d.resumen.flete,
+        pendiente: d.resumen.pendiente,
         pendientes: d.resumen.documentos_pendientes,
+        compras: d.resultado.compras,
+        gastos: d.resultado.gastos,
+        caja: cash,
         alertas: d.alertas.length,
+        controles: d.conciliacion.controles,
+        alertas_resumen: d.alertas_resumen,
         diferencia_iva: d.conciliacion.diferencia_iva,
         lectura_calculo_ms: ms,
         json_bytes: Buffer.byteLength(JSON.stringify(d)),
         validacion:
-          'cabeceras, libro IVA y listado comercial coinciden con SQL independiente',
+          'cabeceras, clasificación por comprobante, libro IVA, listado comercial, compras, gastos y caja coinciden con SQL independiente',
       });
     }
     const p = period({ desde: '2026-08-01', hasta: '2026-08-31' });
@@ -67,7 +119,11 @@ const { period } = require('../reportes/period');
     console.log(
       JSON.stringify(
         {
-          fuente: 'data_sept2026.sql (copia aislada; no certifica noviembre)',
+          base_aislada: database,
+          comprobantes_verificados: output.reduce(
+            (n, r) => n + r.documentos,
+            0
+          ),
           periodos: output,
           plan: explain.map((r) => ({
             tabla: r.table,

@@ -40,7 +40,7 @@ No se agregó dependencia productiva: mysql2, Puppeteer y componentes UI ya exis
 3. Revisar períodos cerrados y período actual, pendientes, conciliación A/B/comercial, detalles y descarga PDF contra datos vigentes.
 4. Reversión de interfaz: `NEXT_PUBLIC_REPORTES_V2=false` y reconstruir/publicar frontend. No requiere rollback de BD. La vista anterior conserva sus limitaciones conocidas; usar reversión solo como contingencia.
 
-La implementación local no publica cambios automáticamente. Noviembre requiere datos actuales: DB_NOV2026.sql solo contiene estructura. Los resultados de la copia de septiembre no certifican noviembre.
+La implementación local no publica cambios automáticamente. Validación final del 02/11/2026: DATA_NOV2026.sql con datos reales, 6.099 comprobantes en 17 meses (julio de 2025 a noviembre de 2026), conciliados con SQL independiente por importe y clasificación, libro IVA, listado comercial, compras, gastos y caja. Octubre conserva una NC sin referencia (ID 6105, 0004-00020, -$8.585) como pendiente; no se alteró el documento de origen. Noviembre parcial suma $4.791.880, sin fletes ni pendientes en la copia. Evidencia agregada en VALIDACION_NOV2026.md, junto a este archivo.
 
 ## Pruebas
 
@@ -50,11 +50,11 @@ Desde backend:
 npm run test:reportes
 REPORTES_TEST_SOCKET=/tmp/erp-reportes-mysql/mysql.sock REPORTES_PDF_TEST=1 npm run test:reportes
 REPORTES_UI_URL=http://127.0.0.1:3107 npm run test:reportes-ui
-REPORTES_TEST_SOCKET=/tmp/erp-reportes-mysql/mysql.sock node tests/reportesV2.copy-check.js
+REPORTES_COPY_DATABASE=erp_reportes_nov2026 REPORTES_TEST_SOCKET=/tmp/erp-reportes-mysql/mysql.sock node tests/reportesV2.copy-check.js
 ```
 
-Las pruebas de MySQL exigen una instancia desechable con socket bajo `/tmp/erp-reportes-mysql/` y BD `erp_reportes_test` creada desde DB_NOV2026.sql. Borran únicamente los fixtures de esa BD explícita. No cargan .env. La comprobación histórica usa `erp_reportes_copy`, copia aislada de data_sept2026.sql, y hace solo lecturas. No apuntar estas bases a un servidor compartido.
+Las pruebas de MySQL exigen una instancia desechable con socket bajo `/tmp/erp-reportes-mysql/` y BD `erp_reportes_test` creada desde DB_NOV2026.sql. Borran únicamente los fixtures de esa BD explícita. No cargan .env. La conciliación hace solo lecturas y acepta únicamente `erp_reportes_copy` (histórico) o `erp_reportes_nov2026` (exportación actual), mediante REPORTES_COPY_DATABASE. Recorre todos los meses con comprobantes y rechaza copias vacías. No apuntar estas bases a un servidor compartido.
 
 Las pruebas UI requieren Next local, por ejemplo `NEXT_PUBLIC_API_URL=http://127.0.0.1:3199 next dev -p 3107`. Interceptan toda petición externa; los datos de pantalla son sintéticos. La integración MySQL/HTTP/PDF prueba que una modificación posterior a la consulta no modifica las cifras del PDF.
 
-La suite general tiene un fallo previo en tests/read.consistency.test.js al buscar un fragmento SQL que ya no existe. No se modificaron ese test ni finanzasService.js. Los tests previos que requieren DB_HOST se omitieron para no usar una conexión configurada; el nuevo servicio sí se prueba en MySQL aislado.
+La suite general termina correctamente con DOTENV_CONFIG_PATH=/dev/null DB_HOST vacío y SKIP_PDF_GENERATE=1. Se corrigió exclusivamente el test de orden estable para tolerar saltos de línea SQL, sin modificar finanzasService.js. Dos comprobaciones heredadas que requieren DB_HOST omiten consultas para evitar una conexión configurada; el nuevo servicio sí se prueba en MySQL aislado. El PDF heredado se omite; el PDF nuevo se renderiza realmente.

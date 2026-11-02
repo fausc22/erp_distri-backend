@@ -94,7 +94,7 @@ function htmlReport(d) {
       .map((r) => [r.nombre, r.unidad, r.cantidad, money(r.neto), money(r.iva)])
   )}
   <p>Total de todas las líneas: ${esc(money(d.productos_totales.total_lineas))}. Ajustes/diferencias contra cabeceras: ${esc(money(d.productos_totales.ajuste_cabeceras))}. Facturación: ${esc(money(s.total))}.</p>
-  <div class="page"></div><h2>Compras, gastos y movimientos de fondos</h2>
+  <h2>Compras, gastos y movimientos de fondos</h2>
   ${table(['Facturación', 'Compras registradas/confirmadas', 'Gastos', 'Diferencia'], [[money(s.total), money(d.resultado.compras), money(d.resultado.gastos), money(d.resultado.diferencia)]])}
   <div class="note">${esc(d.resultado.motivo)}</div>
   ${table(

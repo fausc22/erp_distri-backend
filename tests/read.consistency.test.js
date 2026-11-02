@@ -16,7 +16,7 @@ async function run() {
   assert.ok(ventasRepo.includes('ORDER BY fecha DESC, id DESC'));
 
   // Orden estable para listados financieros críticos
-  assert.ok(finanzasSvc.includes('ORDER BY fecha DESC, id DESC LIMIT ?'));
+  assert.ok(finanzasSvc.replace(/\s+/g, ' ').includes('ORDER BY fecha DESC, id DESC LIMIT ?'));
   assert.ok(finanzasSvc.includes('ORDER BY fecha DESC, referencia DESC LIMIT ?'));
 
   // Reportes con orden explícito determinístico
