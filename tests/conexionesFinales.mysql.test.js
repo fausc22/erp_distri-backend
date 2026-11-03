@@ -192,7 +192,13 @@ async function run() {
   const libroPdf=Buffer.from(await libroResponse.arrayBuffer());
   fs.writeFileSync(path.join(output,'preprod-libro-iva.pdf'),libroPdf);
   const libroText=(await require('pdf-parse')(libroPdf)).text;
-  assert.match(libroText,/AUTORIZADOS CONCILIADOS/); assert.match(libroText,/01\/12\/2026/); assert.ok(!libroText.includes('30/11/2026')); assert.ok(libroText.includes(process.env.AFIP_CUIT)); assert.ok(libroText.includes(bAutorizada.numero_factura));
+  assert.ok(!libroText.includes('AUTORIZADOS CONCILIADOS'));
+  assert.ok(!libroText.includes('PENDIENTES'));
+  assert.ok(!libroText.includes('[PROV]'));
+  assert.match(libroText,/01\/12\/2026/);
+  assert.ok(!libroText.includes('30/11/2026'));
+  assert.ok(libroText.includes(process.env.AFIP_CUIT));
+  assert.ok(libroText.includes(bAutorizada.numero_factura));
   // El reporte gerencial debe usar exactamente el mismo corte temporal.
   const {readReport}=require('../reportes/repository');
   const {period}=require('../reportes/period');

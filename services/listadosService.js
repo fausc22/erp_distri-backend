@@ -2,11 +2,15 @@ const db = require('../db/legacyAdapter');
 const pdfGenerator = require('../utils/pdfGenerator');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 const { resolvePorcentajeIva } = require('../utils/rounding');
-const { fetchProyeccion, FECHA_REPORTE_SQL } = require('../consultas/proyeccion');
+const { fetchProyeccion } = require('../consultas/proyeccion');
 const { libroIvaRevision, sumMoneyField } = require('../consultas/vistas');
 
 /** Excluye productos cuyo nombre contiene "flete" (servicios internos, no mercadería de listados). */
 const SQL_EXCLUIR_FLETE_PRODUCTO = `AND UPPER(p.nombre) NOT LIKE '%FLETE%'`;
+
+/** Listados mensuales: día calendario comercial de la venta (no fecha_fiscal ARCA). */
+const FECHA_LISTADO_SQL = `DATE(v.fecha)`;
+const FECHA_LISTADO_FMT = `DATE_FORMAT(v.fecha, '%Y-%m-%d')`;
 
 // Función auxiliar para convertir consultas callback a promesas
 const queryPromise = (query, params = []) => {
@@ -51,33 +55,25 @@ const generarPdfLibroIva = async (req, res) => {
         const ultimoDia = new Date(anio, mes, 0).getDate(); // Obtiene último día del mes
         const ultimaFecha = `${anio}-${String(mes).padStart(2, '0')}-${ultimoDia}`;
 
-        // Fuente común: proyección canónica + vista libro IVA revisión
-        // Autorizados por fecha fiscal acreditada; pendientes por fecha comercial/provisional.
+        // Libro IVA de presentación: solo A/B con CAE del mes comercial (DATE(v.fecha)).
         const proyeccion = await fetchProyeccion({
             where: `UPPER(TRIM(COALESCE(v.tipo_f,''))) IN ('A','B')
-              AND ${FECHA_REPORTE_SQL} BETWEEN ? AND ?`,
+              AND ${FECHA_LISTADO_SQL} BETWEEN ? AND ?`,
             params: [primerDia, ultimaFecha]
         });
-        const {
-            acreditados,
-            discrepantes = [],
-            evidenciaIncompleta = [],
-            seccionPendientes,
-            totalesAcreditados,
-            totalesPendientes
-        } = libroIvaRevision(proyeccion);
-        const ventas = [...acreditados, ...discrepantes, ...evidenciaIncompleta, ...seccionPendientes];
+        const { acreditados, seccionPendientes } = libroIvaRevision(proyeccion);
 
-        console.log(
-            `📊 Libro IVA revisión: ${acreditados.length} acreditados, ` +
-            `${discrepantes.length} discrepantes, ${evidenciaIncompleta.length} evidencia incompleta, ` +
-            `${seccionPendientes.length} pendientes`
-        );
-
-        if (ventas.length === 0) {
+        if (acreditados.length === 0) {
             return res.status(404).json({
-                error: "No se encontraron ventas tipo A o B para el período seleccionado"
+                error: "No se encontraron comprobantes A/B con CAE para el período seleccionado"
             });
+        }
+
+        if (seccionPendientes.length > 0) {
+            console.log(
+                `ℹ️ Libro IVA ${mes}/${anio}: ${acreditados.length} con CAE en PDF; ` +
+                `${seccionPendientes.length} A/B sin CAE omitidos del documento de presentación`
+            );
         }
 
         const formatearFila = (venta) => {
@@ -94,76 +90,33 @@ const generarPdfLibroIva = async (req, res) => {
                 nombreComprobante = `${tipoDoc.replace(/_/g, ' ')} ${tipoF}`;
             }
 
-            const seccion = venta.seccion || 'ACREDITADOS';
-            const esPendiente = seccion === 'PENDIENTES';
-            const netoFiscal = venta.neto_presentacion;
-            const ivaFiscal = venta.iva_presentacion;
-            const totalFiscal = venta.total_presentacion;
-            // Pendientes: comercial provisional explícito. Acreditados: solo fiscal respaldado (null si falta).
-            const neto = esPendiente
-                ? (venta.neto_provisional != null ? Number(venta.neto_provisional) : Number(venta.comercial_neto) || 0)
-                : (netoFiscal != null ? Number(netoFiscal) : null);
-            const iva = esPendiente
-                ? (venta.iva_provisional != null ? Number(venta.iva_provisional) : Number(venta.comercial_iva) || 0)
-                : (ivaFiscal != null ? Number(ivaFiscal) : null);
-            const total = esPendiente
-                ? (venta.total_provisional != null ? Number(venta.total_provisional) : Number(venta.comercial_total) || 0)
-                : (totalFiscal != null ? Number(totalFiscal) : null);
-
+            const signo = Number(venta.signo) || 1;
             return {
-                fecha: venta.fecha_revision || venta.fecha_fiscal_acreditada || venta.fecha_comercial,
+                // Día comercial del comprobante (mismo criterio que el filtro del mes).
+                fecha: venta.fecha_comercial || venta.fecha_revision || venta.fecha_fiscal_acreditada,
                 comprobante: nombreComprobante,
                 numero: venta.numero_factura || '-',
                 cliente: venta.cliente_nombre || 'Sin nombre',
                 cuit: venta.cliente_cuit || '-',
                 condicionIva: (venta.cliente_condicion || 'Sin especificar').toString().trim(),
-                neto,
-                exento: esPendiente ? ((Number(venta.exento) || 0) * (Number(venta.signo) || 1)) : null,
-                iva,
+                neto: Number(venta.neto_presentacion ?? venta.comercial_neto) || 0,
+                exento: (Number(venta.exento) || 0) * signo,
+                iva: Number(venta.iva_presentacion ?? venta.comercial_iva) || 0,
                 percepciones: 0,
                 retenciones: 0,
-                total,
-                seccion,
-                estado_fiscal: venta.estado_fiscal,
-                estado_conciliacion: venta.estado_conciliacion,
-                fecha_provisional: Boolean(venta.fecha_provisional) || esPendiente,
-                calidad_importe_fiscal: venta.calidad_importe_fiscal,
-                importe_comercial: venta.importe_comercial,
-                importe_fiscal_respaldado: venta.importe_fiscal_respaldado,
-                diferencia_comercial_fiscal: venta.diferencia_comercial_fiscal,
-                verificado: Boolean(venta.verificado)
+                total: Number(venta.total_presentacion ?? venta.comercial_total) || 0
             };
         };
 
-        const ventasFormateadas = [
-            ...acreditados.map(formatearFila),
-            ...discrepantes.map(formatearFila),
-            ...evidenciaIncompleta.map(formatearFila),
-            ...seccionPendientes.map(formatearFila)
-        ];
+        const ventasFormateadas = acreditados.map(formatearFila);
 
         const sumSeccion = (filas) => ({
             ...Object.fromEntries(['neto','exento','iva','percepciones','retenciones','total']
-              .map(field => [field, Number(sumMoneyField(filas, field).total)])),
-            sin_evidencia: filas.filter(v => v.total == null).length
+              .map(field => [field, Number(sumMoneyField(filas, field).total)]))
         });
 
-        // Totales VERIFICADOS = solo acreditados con importe fiscal; pendientes NO se suman ahí.
-        const totalesAcreditadosFmt = sumSeccion(acreditados.map(formatearFila));
-        const totalesPendientesFmt = sumSeccion(seccionPendientes.map(formatearFila));
-        const totalesDiscrepantesFmt = sumSeccion(discrepantes.map(formatearFila));
-        const totales = {
-            ...totalesAcreditadosFmt,
-            meta: {
-                totalesAcreditados,
-                totalesPendientes,
-                totalesDiscrepantes: totalesDiscrepantesFmt,
-                totalesPendientesComercial: totalesPendientesFmt,
-                nota: 'El total principal del PDF es cabecera de comprobantes A/B con CAE; pendientes se informan aparte.'
-            }
-        };
+        const totales = sumSeccion(ventasFormateadas);
 
-        // Desglose por condición: solo acreditados verificados (no mezclar pendientes)
         const addSafe = (a, b) => a + (b == null || Number.isNaN(Number(b)) ? 0 : Number(b));
         const sumFilas = (filas) => filas.reduce((acc, venta) => ({
             neto: addSafe(acc.neto, venta.neto),
@@ -174,10 +127,9 @@ const generarPdfLibroIva = async (req, res) => {
             total: addSafe(acc.total, venta.total)
         }), { neto: 0, exento: 0, iva: 0, percepciones: 0, retenciones: 0, total: 0 });
 
-        const ventasDesglose = acreditados.map(formatearFila);
         const condicionesIva = ['Responsable Inscripto', 'Monotributo', 'Consumidor Final', 'Exento'];
         const desglosePorCondicion = condicionesIva.map(condicion => {
-            const ventasCondicion = ventasDesglose.filter(v =>
+            const ventasCondicion = ventasFormateadas.filter(v =>
                 v.condicionIva.toLowerCase().includes(condicion.toLowerCase())
             );
             return {
@@ -187,11 +139,11 @@ const generarPdfLibroIva = async (req, res) => {
             };
         });
 
-        const ventasOtras = ventasDesglose.filter(v => {
+        const ventasOtras = ventasFormateadas.filter(v => {
             const condicionLower = v.condicionIva.toLowerCase();
             return !condicionesIva.some(c => condicionLower.includes(c.toLowerCase()));
         });
-        
+
         if (ventasOtras.length > 0) {
             desglosePorCondicion.push({
                 condicion: 'Otros',
@@ -200,26 +152,14 @@ const generarPdfLibroIva = async (req, res) => {
             });
         }
 
-        console.log(`📊 Desglose por condición IVA:`, desglosePorCondicion);
+        console.log(`📊 Libro IVA ${mes}/${anio}: ${ventasFormateadas.length} comprobantes A/B con CAE`);
 
-        // Generar PDF usando el generador con la plantilla
         const pdfBuffer = await pdfGenerator.generarLibroIva({
             mes,
             anio,
             ventas: ventasFormateadas,
             totales,
-            desglosePorCondicion,
-            secciones: {
-                acreditados: acreditados.map(formatearFila),
-                discrepantes: discrepantes.map(formatearFila),
-                evidenciaIncompleta: evidenciaIncompleta.map(formatearFila),
-                pendientes: seccionPendientes.map(formatearFila)
-            },
-            totalesPorSeccion: {
-                acreditados: totalesAcreditadosFmt,
-                discrepantes: totalesDiscrepantesFmt,
-                pendientes: totalesPendientesFmt
-            }
+            desglosePorCondicion
         });
 
         const generationTime = Date.now() - startTime;
@@ -228,7 +168,7 @@ const generarPdfLibroIva = async (req, res) => {
         await auditarOperacion(req, {
             accion: 'EXPORT',
             tabla: 'ventas',
-            detallesAdicionales: `Libro IVA generado - ${mes}/${anio} - ${ventas.length} registros en ${generationTime}ms`
+            detallesAdicionales: `Libro IVA generado - ${mes}/${anio} - ${ventasFormateadas.length} A/B con CAE en ${generationTime}ms`
         });
 
         res.setHeader("Content-Type", "application/pdf");
@@ -272,7 +212,7 @@ const generarPdfReporteFletes = async (req, res) => {
         const query = `
             SELECT
                 v.id AS venta_id,
-                ${FECHA_REPORTE_SQL} AS fecha_fiscal,
+                ${FECHA_LISTADO_FMT} AS fecha_fiscal,
                 v.numero_factura,
                 v.tipo_f,
                 v.tipo_doc,
@@ -284,12 +224,12 @@ const generarPdfReporteFletes = async (req, res) => {
                 vc.iva
             FROM ventas_cont vc
             INNER JOIN ventas v ON v.id = vc.venta_id
-            WHERE ${FECHA_REPORTE_SQL} BETWEEN ? AND ?
+            WHERE ${FECHA_LISTADO_SQL} BETWEEN ? AND ?
                 AND (v.tipo_f = 'A' OR v.tipo_f = 'B')
                 AND UPPER(TRIM(COALESCE(v.tipo_doc, 'FACTURA'))) IN ('FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO')
                 AND UPPER(vc.producto_nombre) LIKE '%FLETE%'
             ORDER BY
-                ${FECHA_REPORTE_SQL} ASC,
+                ${FECHA_LISTADO_SQL} ASC,
                 CASE
                     WHEN UPPER(TRIM(v.tipo_doc)) = 'FACTURA' THEN 1
                     WHEN UPPER(TRIM(v.tipo_doc)) = 'NOTA_DEBITO' THEN 2
@@ -697,7 +637,7 @@ const generarPdfListadoVendedores = async (req, res) => {
         const query = `
             SELECT
                 v.id,
-                ${FECHA_REPORTE_SQL} AS fecha,
+                ${FECHA_LISTADO_FMT} AS fecha,
                 v.numero_factura,
                 v.tipo_doc,
                 v.tipo_f,
@@ -711,7 +651,7 @@ const generarPdfListadoVendedores = async (req, res) => {
                 vr.empleado_id AS referencia_empleado_id
             FROM ventas v
             LEFT JOIN ventas vr ON vr.id = v.venta_referencia_id
-            WHERE ${FECHA_REPORTE_SQL} BETWEEN ? AND ?
+            WHERE ${FECHA_LISTADO_SQL} BETWEEN ? AND ?
                 AND UPPER(TRIM(COALESCE(v.tipo_doc, 'FACTURA'))) IN ('FACTURA', 'NOTA_DEBITO', 'NOTA_CREDITO')
                 AND UPPER(TRIM(COALESCE(v.estado, 'FACTURADA'))) IN ('FACTURADA', 'FACTURADO')
                 AND (
@@ -726,7 +666,7 @@ const generarPdfListadoVendedores = async (req, res) => {
                         AND vr.empleado_id = ?
                     )
                 )
-            ORDER BY ${FECHA_REPORTE_SQL} ASC, v.numero_factura ASC
+            ORDER BY ${FECHA_LISTADO_SQL} ASC, v.numero_factura ASC
         `;
 
         const ventas = await queryPromise(query, [primerDia, ultimaFecha, vendedorId, vendedorId]);

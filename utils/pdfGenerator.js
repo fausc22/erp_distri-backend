@@ -38,24 +38,22 @@ class PdfGenerator {
     formatearFecha(fechaBD) {
         if (!fechaBD) return 'Fecha no disponible';
         // DATE no es un instante UTC: conservar el día calendario del comprobante.
-        const dia = typeof fechaBD === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(fechaBD);
-        if (dia) return `${dia[3]}/${dia[2]}/${dia[1]}`;
+        if (typeof fechaBD === 'string') {
+            const match = fechaBD.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (match) return `${match[3]}/${match[2]}/${match[1]}`;
+        }
 
         try {
-            const fecha = new Date(fechaBD);
+            const fecha = fechaBD instanceof Date ? fechaBD : new Date(fechaBD);
             if (isNaN(fecha.getTime())) {
                 console.warn('Fecha inválida recibida:', fechaBD);
                 return 'Fecha inválida';
             }
-
-            const opciones = {
-                timeZone: 'America/Argentina/Buenos_Aires',
-                day: '2-digit',
-                month: '2-digit',
-                year: 'numeric'
-            };
-
-            return fecha.toLocaleDateString('es-AR', opciones);
+            // MySQL DATE → Date midnight UTC: usar UTC para no restar un día en Argentina (UTC-3).
+            const d = String(fecha.getUTCDate()).padStart(2, '0');
+            const m = String(fecha.getUTCMonth() + 1).padStart(2, '0');
+            const y = fecha.getUTCFullYear();
+            return `${d}/${m}/${y}`;
         } catch (error) {
             console.error('Error formateando fecha:', error);
             return 'Error en fecha';
@@ -2337,13 +2335,13 @@ class PdfGenerator {
             .replace(/{{anio}}/g, datos.anio)
             .replace(/{{cuit_emisor}}/g, String(process.env.AFIP_CUIT || '').replace(/\D/g, '') || 'No configurado');
 
-        const fmtMonto = (v) => (v == null || v === '' ? '—' : `$ ${this.formatearMoneda(v)}`);
+        // Libro IVA de presentación: una sola tabla A/B con CAE, sin secciones de auditoría.
+        const fmtMonto = (v) => `$ ${this.formatearMoneda(v == null || v === '' ? 0 : v)}`;
         const filaVenta = (venta) => {
             const fecha = this.formatearFecha(venta.fecha);
-            const marca = venta.verificado ? '' : (venta.seccion === 'PENDIENTES' ? ' [PROV]' : (venta.seccion === 'DISCREPANTES' ? ' [DISC]' : ''));
             return `
                 <tr>
-                    <td>${fecha}${marca}</td>
+                    <td>${fecha}</td>
                     <td>${venta.comprobante}</td>
                     <td>${venta.numero}</td>
                     <td>${venta.cliente}</td>
@@ -2358,32 +2356,7 @@ class PdfGenerator {
             `;
         };
 
-        const secciones = datos.secciones || null;
-        let itemsHTML;
-        if (secciones) {
-            const bloque = (titulo, filas, subtotales) => {
-                if (!filas || filas.length === 0) return '';
-                const rows = filas.map(filaVenta).join('');
-                const sub = subtotales
-                    ? `<tr class="total-row"><td colspan="5" style="text-align:right;font-weight:bold;">Subtotal ${titulo}</td>
-                        <td style="text-align:right;">${fmtMonto(subtotales.neto)}</td>
-                        <td style="text-align:right;">${fmtMonto(subtotales.exento)}</td>
-                        <td style="text-align:right;">${fmtMonto(subtotales.iva)}</td>
-                        <td style="text-align:right;">${fmtMonto(subtotales.percepciones)}</td>
-                        <td style="text-align:right;">${fmtMonto(subtotales.retenciones)}</td>
-                        <td style="text-align:right;font-weight:bold;">${fmtMonto(subtotales.total)}</td></tr>`
-                    : '';
-                return `<tr><td colspan="11" style="background:#eee;font-weight:bold;text-align:left;">${titulo} (${filas.length})</td></tr>${rows}${sub}`;
-            };
-            const ts = datos.totalesPorSeccion || {};
-            itemsHTML =
-                bloque('AUTORIZADOS CONCILIADOS (evidencia fiscal)', secciones.acreditados, ts.acreditados) +
-                bloque('DISCREPANCIAS (autorizados no conciliados)', secciones.discrepantes, ts.discrepantes) +
-                bloque('EVIDENCIA INCOMPLETA', secciones.evidenciaIncompleta, null) +
-                bloque('PENDIENTES (fecha comercial provisional — NO incluidos en total fiscal verificado)', secciones.pendientes, ts.pendientes);
-        } else {
-            itemsHTML = (datos.ventas || []).map(filaVenta).join('');
-        }
+        const itemsHTML = (datos.ventas || []).map(filaVenta).join('');
 
         htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
