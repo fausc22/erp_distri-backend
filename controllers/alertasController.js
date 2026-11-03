@@ -110,11 +110,12 @@ async function obtenerAlertasFiscalesPendientes(req, res) {
   const historicosPrevios = [];
 
   try {
+    // Sin columnas de migraciones (estado_fiscal / estado_conciliacion): se infieren desde CAE.
     const rows = await db.query(
       `SELECT
           id, numero_factura, DATE_FORMAT(fecha, '%Y-%m-%d %H:%i:%s') AS fecha,
           DATE_FORMAT(fecha_fiscal, '%Y-%m-%d') AS fecha_fiscal,
-          tipo_doc, tipo_f, cliente_nombre, total, estado_fiscal, estado_conciliacion,
+          tipo_doc, tipo_f, cliente_nombre, total,
           cae_id, cae_resultado, cae_solicitud_fecha
        FROM ventas
        WHERE UPPER(TRIM(COALESCE(tipo_f, ''))) IN ('A', 'B')

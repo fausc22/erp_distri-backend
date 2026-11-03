@@ -55,23 +55,26 @@ test(
           return req.respond({ status: 204, headers });
         if (url.pathname === '/finanzas/reportes-v2') {
           reads++;
-          const report = createSnapshotStore().put(
-            1,
-            buildReport(
+          const desde =
+            url.searchParams.get('desde') ||
+            `${url.searchParams.get('anio') || '2026'}-01-01`;
+          const hasta =
+            url.searchParams.get('hasta') ||
+            `${url.searchParams.get('anio') || '2026'}-12-31`;
+          const report = createSnapshotStore().put(1, {
+            ...buildReport(
               {
                 ...fixture(),
                 documents: fixture().documents.map((r) => ({
                   ...r,
-                  fecha_fiscal: url.searchParams.get('desde'),
-                  fecha_comercial: url.searchParams.get('desde'),
+                  fecha_fiscal: desde,
+                  fecha_comercial: desde,
                 })),
               },
-              period({
-                desde: url.searchParams.get('desde'),
-                hasta: url.searchParams.get('hasta'),
-              })
-            )
-          );
+              period({ desde, hasta })
+            ),
+            tipo: url.searchParams.get('tipo') || 'mensual',
+          });
           return req.respond({
             status: fail ? 500 : 200,
             contentType: 'application/json',
@@ -113,9 +116,7 @@ test(
         waitUntil: 'networkidle0',
       });
       await page.waitForFunction(() =>
-        document.body.innerText.includes(
-          'Facturación conciliada aritméticamente'
-        )
+        document.body.innerText.includes('Facturación total')
       );
       const click = async (label) => {
         await page.evaluate((label) => {
@@ -161,20 +162,20 @@ test(
         baseline,
         'Cambiar de pestaña conserva la misma versión'
       );
-      await click('Actualizar lectura');
+      await click('Actualizar');
       await page.waitForFunction(
         () => !document.body.innerText.includes('Cargando...')
       );
       await page.waitForNetworkIdle();
       assert.equal(reads, baseline + 1);
-      await click('Descargar PDF gerencial');
+      await click('Descargar PDF');
       await page.waitForFunction(() =>
         document.body.innerText.includes('La versión anterior venció')
       );
       assert.equal(pdfReads, 1);
       assert.equal(reads, baseline + 2);
       fail = true;
-      await click('Actualizar lectura');
+      await click('Actualizar');
       await page.waitForFunction(() =>
         document.body.innerText.includes('Se conserva la lectura anterior')
       );
@@ -182,13 +183,13 @@ test(
         await page.evaluate(
           () =>
             [...document.querySelectorAll('button')].find((b) =>
-              b.textContent.includes('Descargar PDF gerencial')
+              b.textContent.includes('Descargar PDF')
             ).disabled
         ),
         true
       );
       fail = false;
-      await click('Actualizar lectura');
+      await click('Actualizar');
       await page.waitForNetworkIdle();
       await page.screenshot({
         path: '/tmp/erp-reportes-desktop.png',

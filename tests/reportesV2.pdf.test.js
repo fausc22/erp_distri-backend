@@ -52,15 +52,17 @@ test(
       fs.writeFileSync(path.join(dir, `${name}.pdf`), buffer);
       assert.equal(buffer.subarray(0, 5).toString(), '%PDF-');
       const parsed = await parse(buffer);
-      assert.ok(parsed.text.includes(d.snapshot_id));
-      assert.ok(parsed.text.includes('Reglas y trazabilidad'));
+      assert.ok(parsed.text.includes('VERTIMAR'));
+      assert.ok(!parsed.text.includes('Reglas y trazabilidad'));
+      assert.ok(!parsed.text.includes('Excepciones de integridad'));
+      assert.ok(!parsed.text.includes('Pendiente de clasificación'));
       if (name === 'normal') {
         assert.match(parsed.text, /363,00/);
         assert.match(parsed.text, /242,00/);
       }
       if (name === 'empty') assert.match(parsed.text, /Sin operaciones/);
       if (name === 'stress') {
-        assert.ok(parsed.numpages >= 4);
+        assert.ok(parsed.numpages >= 2);
         assert.match(parsed.text, /-121,00/);
         assert.match(parsed.text, /Vendedor 64/);
       }

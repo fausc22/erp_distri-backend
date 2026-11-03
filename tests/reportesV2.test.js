@@ -199,14 +199,51 @@ test('snapshot inmutable, aislado por usuario, caducidad y memoria acotada', () 
     (e) => e.status === 413
   );
 });
-test('PDF usa las mismas cifras, escapa texto y no oculta saldos negativos', () => {
+test('PDF gerencial usa cifras de cabecera y no incluye texto de auditoría', () => {
   const d = build(fixture());
-  d.comentarios.push('<script>alert(1)</script>');
+  d.vendedores[0].nombre = '<script>alert(1)</script>';
   const html = htmlReport(d);
   assert.ok(html.includes('$ 363,00'));
   assert.ok(html.includes('$ 242,00'));
   assert.ok(!html.includes('<script>'));
   assert.ok(html.includes('&lt;script&gt;'));
+  assert.ok(!html.includes('Pendiente de clasificación'));
+  assert.ok(!html.includes('Reglas y trazabilidad'));
+  assert.ok(!html.includes('Excepciones de integridad'));
+  assert.ok(!html.includes('Lectura del período'));
+  assert.ok(!html.includes('Conciliación con listados'));
+});
+test('periodos comparacion y anual se resuelven sin migraciones', () => {
+  const { resolveReportRequest } = require('../reportes/period');
+  const { htmlComparison, htmlAnnual, htmlForPayload } = require('../reportes/pdf');
+  const comp = resolveReportRequest({
+    tipo: 'comparacion',
+    meses: '2026-01,2026-03,2026-09',
+  });
+  assert.equal(comp.tipo, 'comparacion');
+  assert.equal(comp.periodos.length, 3);
+  assert.equal(comp.periodos[0].desde, '2026-01-01');
+  assert.equal(comp.periodos[0].hasta, '2026-01-31');
+  const anual = resolveReportRequest({ tipo: 'anual', anio: '2026' });
+  assert.equal(anual.tipo, 'anual');
+  assert.equal(anual.periodo.desde, '2026-01-01');
+  assert.equal(anual.periodo.hasta, '2026-12-31');
+  const base = build(fixture());
+  const htmlComp = htmlComparison({
+    tipo: 'comparacion',
+    periodos: [
+      { ...base, periodo: { ...base.periodo, mes: '2026-01', desde: '2026-01-01', hasta: '2026-01-31' } },
+      { ...base, periodo: { ...base.periodo, mes: '2026-03', desde: '2026-03-01', hasta: '2026-03-31' } },
+      { ...base, periodo: { ...base.periodo, mes: '2026-09', desde: '2026-09-01', hasta: '2026-09-30' } },
+    ],
+  });
+  assert.ok(htmlComp.includes('Comparación de tres meses'));
+  assert.ok(htmlComp.includes('Enero 2026'));
+  assert.ok(!htmlComp.includes('Reglas y trazabilidad'));
+  const htmlAn = htmlAnnual({ ...base, tipo: 'anual', anio: '2026' });
+  assert.ok(htmlAn.includes('Cierre anual 2026'));
+  assert.equal((htmlAn.match(/Enero 2026|Febrero 2026|Marzo 2026|Abril 2026|Mayo 2026|Junio 2026|Julio 2026|Agosto 2026|Septiembre 2026|Octubre 2026|Noviembre 2026|Diciembre 2026/g) || []).length, 12);
+  assert.equal(htmlForPayload({ ...base, tipo: 'anual', anio: '2026' }).includes('Cierre anual'), true);
 });
 test('período vacío no inventa tickets, ganancias ni saldos', () => {
   const d = build({
