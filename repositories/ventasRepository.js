@@ -5,6 +5,16 @@ class VentasRepository extends BaseRepository {
     return this.query('SELECT * FROM ventas ORDER BY fecha DESC, id DESC', [], connection);
   }
 
+  verificarVentaExistentePorPedidoId(conn, pedidoId) {
+    const sql = `
+      SELECT id, numero_factura, fecha, cliente_nombre, total, tipo_f, estado, pedido_id
+      FROM ventas
+      WHERE pedido_id = ?
+      LIMIT 1
+    `;
+    return this.queryOne(sql, [pedidoId], conn);
+  }
+
   verificarVentaExistentePorPedido(conn, pedidoId) {
     const sql = `
       SELECT v.id, v.numero_factura, v.fecha, v.cliente_nombre, v.total, v.tipo_f, v.estado
@@ -35,6 +45,7 @@ class VentasRepository extends BaseRepository {
   }
 
   insertarVentaCabecera(conn, data) {
+    // Columnas clásicas (sin migraciones M006–M008).
     const sql = `
       INSERT INTO ventas
       (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion,

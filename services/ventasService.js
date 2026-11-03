@@ -554,10 +554,31 @@ const normalizarImporte = (value) => {
     return Number.isFinite(n) ? n : NaN;
 };
 
+// ✅ FUNCIÓN PARA VERIFICAR VENTA EXISTENTE POR PEDIDO_ID (dentro de transacción)
+const verificarVentaExistentePorPedidoId = async (connection, pedidoId) => {
+    try {
+        if (typeof ventasRepository.verificarVentaExistentePorPedidoId !== 'function') {
+            return null;
+        }
+        return await ventasRepository.verificarVentaExistentePorPedidoId(connection, pedidoId);
+    } catch (error) {
+        console.warn('⚠️ No se pudo verificar venta por pedido_id, usando fallback heurístico:', error.message);
+        return null;
+    }
+};
+
 // ✅ FUNCIÓN PARA VERIFICAR VENTA EXISTENTE POR PEDIDO (dentro de transacción)
 const verificarVentaExistentePorPedido = async (connection, pedidoId) => {
     try {
-        return await ventasRepository.verificarVentaExistentePorPedido(connection, pedidoId);
+        const ventaPorPedidoId = await verificarVentaExistentePorPedidoId(connection, pedidoId);
+        if (ventaPorPedidoId) {
+            return ventaPorPedidoId;
+        }
+        // Fallback histórico (sin columna pedido_id): cliente + importe reciente
+        if (typeof ventasRepository.verificarVentaExistentePorPedido === 'function') {
+            return await ventasRepository.verificarVentaExistentePorPedido(connection, pedidoId);
+        }
+        return null;
     } catch (error) {
         console.error('❌ Error verificando venta existente por pedido:', error);
         return null;
@@ -608,6 +629,14 @@ const facturarPedido = async (req, res) => {
             
             const pedido = pedidoResult[0];
             console.log('📋 Pedido obtenido y bloqueado:', pedido.id, '-', pedido.cliente_nombre, '- Estado:', pedido.estado);
+
+            // Contención E1: no facturar pedidos anulados
+            if (String(pedido.estado || '').toLowerCase() === 'anulado') {
+                const anuladoError = new Error('No se puede facturar un pedido anulado');
+                anuladoError.statusCode = 422;
+                anuladoError.code = 'PEDIDO_ANULADO';
+                throw anuladoError;
+            }
             
             // ✅ 2. VERIFICAR ESTADO DENTRO DE LA TRANSACCIÓN
             if (pedido.estado === 'Facturado') {
@@ -667,20 +696,153 @@ const facturarPedido = async (req, res) => {
             }
 
             // ✅ 3. Obtener productos del pedido
-            const productosQuery = `SELECT * FROM pedidos_cont WHERE pedido_id = ?`;
-            const productos = await queryPromiseWithConnection(connection, productosQuery, [pedidoId]);
+            const productosQuery = `SELECT * FROM pedidos_cont WHERE pedido_id = ? ORDER BY id`;
+            let productos = await queryPromiseWithConnection(connection, productosQuery, [pedidoId]);
 
             if (productos.length === 0) {
                 throw new Error('No se encontraron productos en el pedido');
             }
+            productos = await enriquecerLineasConFlete(connection, productos, (producto) => producto.producto_id);
+            assertDocumentoNoMixtoFlete(productos);
             
             console.log('📦 Productos obtenidos:', productos.length, 'productos');
 
-            // Descontar stock físico al facturar (bloqueo si no alcanza)
+            // Contención E1: importes + checks de duplicado ANTES de descontar stock.
+            // ✅ 4. IMPORTES: fuente única = suma de líneas en pedidos_cont (coherencia BD / PDF / ARCA).
+            const lineSubtotal = productos.reduce((acc, p) => acc + (Number(p.subtotal) || 0), 0);
+            const lineIva = productos.reduce((acc, p) => acc + (Number(p.IVA) || 0), 0);
+            const lineTotal = lineSubtotal + lineIva;
+
+            const subtotalSinIvaFinal = lineSubtotal;
+            const ivaTotalFinal = lineIva;
+
+            const totalConIvaRaw = normalizarImporte(totalConIva);
+            const totalConIvaFinal =
+                Number.isFinite(totalConIvaRaw) &&
+                totalConIvaRaw > 0 &&
+                totalConIvaRaw <= lineTotal
+                    ? totalConIvaRaw
+                    : lineTotal;
+
+            if (
+                !Number.isFinite(subtotalSinIvaFinal) ||
+                !Number.isFinite(ivaTotalFinal) ||
+                !Number.isFinite(totalConIvaFinal) ||
+                subtotalSinIvaFinal < 0 ||
+                ivaTotalFinal < 0 ||
+                totalConIvaFinal <= 0
+            ) {
+                const validationError = new Error('Importes de facturación inválidos. No se pudo generar una cabecera de venta válida.');
+                validationError.statusCode = 400;
+                throw validationError;
+            }
+
+            // ✅ 5. GENERAR HASH DETERMINÍSTICO PARA IDEMPOTENCIA
+            const hashFacturacion = generarHashFacturacion(pedidoId, tipoFiscal, {
+                subtotalSinIva: subtotalSinIvaFinal,
+                ivaTotal: ivaTotalFinal,
+                totalConIva: totalConIvaFinal,
+                cuentaId
+            });
+            console.log(`🔐 Hash de facturación generado: ${hashFacturacion}`);
+            
+            // ✅ 6. VERIFICAR VENTA EXISTENTE POR HASH (idempotencia explícita)
+            const ventaExistentePorHash = await verificarVentaExistentePorHash(connection, hashFacturacion);
+            if (ventaExistentePorHash) {
+                const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
+                const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistentePorHash.id]);
+                
+                const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
+                const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorHash.id]);
+                const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
+
+                console.log(`✅ Retornando venta existente por hash ID ${ventaExistentePorHash.id}`);
+
+                try {
+                    await auditarOperacion(req, {
+                        accion: 'DUPLICATE_DETECTED',
+                        tabla: 'ventas',
+                        registroId: ventaExistentePorHash.id,
+                        detallesAdicionales: `Intento de facturación duplicada detectado por hash - Hash: ${hashFacturacion} - Venta existente: ID ${ventaExistentePorHash.id} - Factura: ${ventaExistentePorHash.numero_factura}`
+                    });
+                } catch (auditError) {
+                    console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
+                }
+
+                return {
+                    statusCode: 200,
+                    success: true,
+                    message: 'Esta facturación ya fue procesada anteriormente',
+                    existing: true,
+                    data: {
+                        ventaId: ventaExistentePorHash.id,
+                        numeroFactura: ventaExistentePorHash.numero_factura,
+                        tipoFactura: ventaExistentePorHash.tipo_f,
+                        remitoId: remitoId,
+                        pedidoId: pedidoId,
+                        total: ventaExistentePorHash.total,
+                        productosCount: productosVenta.length,
+                        requiereCAE: ventaExistentePorHash.tipo_f !== 'X',
+                        pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
+                    }
+                };
+            }
+            
+            // ✅ 7. VERIFICAR VENTA EXISTENTE POR PEDIDO (idempotencia por entidad)
+            const ventaExistentePorPedido = await verificarVentaExistentePorPedido(connection, pedidoId);
+            if (ventaExistentePorPedido) {
+                const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
+                const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistentePorPedido.id]);
+                
+                const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
+                const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorPedido.id]);
+                const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
+                
+                if (pedido.estado !== 'Facturado') {
+                    const actualizarPedidoQuery = `UPDATE pedidos SET estado = 'Facturado' WHERE id = ?`;
+                    await queryPromiseWithConnection(connection, actualizarPedidoQuery, [pedidoId]);
+                    console.log('📋 Estado del pedido actualizado a "Facturado"');
+                }
+
+                console.log(`✅ Retornando venta existente por pedido ID ${ventaExistentePorPedido.id}`);
+
+                try {
+                    await auditarOperacion(req, {
+                        accion: 'DUPLICATE_DETECTED',
+                        tabla: 'ventas',
+                        registroId: ventaExistentePorPedido.id,
+                        detallesAdicionales: `Intento de facturar pedido ya facturado - Pedido: ${pedidoId} - Venta existente: ID ${ventaExistentePorPedido.id} - Factura: ${ventaExistentePorPedido.numero_factura}`
+                    });
+                } catch (auditError) {
+                    console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
+                }
+
+                return {
+                    statusCode: 200,
+                    success: true,
+                    message: 'Este pedido ya fue facturado anteriormente',
+                    existing: true,
+                    data: {
+                        ventaId: ventaExistentePorPedido.id,
+                        numeroFactura: ventaExistentePorPedido.numero_factura,
+                        tipoFactura: ventaExistentePorPedido.tipo_f,
+                        remitoId: remitoId,
+                        pedidoId: pedidoId,
+                        total: ventaExistentePorPedido.total,
+                        productosCount: productosVenta.length,
+                        requiereCAE: ventaExistentePorPedido.tipo_f !== 'X',
+                        pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
+                    }
+                };
+            }
+
+            // Descontar stock físico al facturar (solo si no hay venta existente)
+            const lineasMercaderia = productos.filter((p) => !parseBool(p.es_flete));
             const lineasConProductoId = productos.filter(
                 (p) => p.producto_id != null && p.producto_id !== '' && Number(p.producto_id) > 0
+                    && !parseBool(p.es_flete)
             );
-            const lineasSinProductoId = productos.filter(
+            const lineasSinProductoId = lineasMercaderia.filter(
                 (p) => !(p.producto_id != null && p.producto_id !== '' && Number(p.producto_id) > 0)
             );
             if (lineasSinProductoId.length > 0) {
@@ -689,7 +851,7 @@ const facturarPedido = async (req, res) => {
                     lineasSinProductoId.map((p) => p.producto_nombre).join(', ')
                 );
             }
-            if (lineasConProductoId.length === 0) {
+            if (lineasMercaderia.length > 0 && lineasConProductoId.length === 0) {
                 const stockError = new Error(
                     'No se puede facturar: ninguna línea tiene producto de catálogo (producto_id). ' +
                     'Sin eso no se puede descontar ni devolver stock.'
@@ -716,7 +878,7 @@ const facturarPedido = async (req, res) => {
                 return acc;
             }, {});
 
-            if (Object.keys(requeridoPorProducto).length === 0) {
+            if (lineasMercaderia.length > 0 && Object.keys(requeridoPorProducto).length === 0) {
                 const stockError = new Error(
                     'No se puede facturar: no hay productos de catálogo con cantidad válida para descontar stock'
                 );
@@ -788,140 +950,6 @@ const facturarPedido = async (req, res) => {
                 row.stock_actual = stockAntes - cantidadRequerida;
             }
             console.log('📦 Stock físico descontado por facturación');
-            
-            // ✅ 4. IMPORTES: fuente única = suma de líneas en pedidos_cont (coherencia BD / PDF / ARCA).
-            // totalConIva del front puede ser menor (descuento global), nunca mayor que neto+IVA de líneas.
-            const lineSubtotal = productos.reduce((acc, p) => acc + (Number(p.subtotal) || 0), 0);
-            const lineIva = productos.reduce((acc, p) => acc + (Number(p.IVA) || 0), 0);
-            const lineTotal = lineSubtotal + lineIva;
-
-            const subtotalSinIvaFinal = lineSubtotal;
-            const ivaTotalFinal = lineIva;
-
-            const totalConIvaRaw = normalizarImporte(totalConIva);
-            const totalConIvaFinal =
-                Number.isFinite(totalConIvaRaw) &&
-                totalConIvaRaw > 0 &&
-                totalConIvaRaw <= lineTotal
-                    ? totalConIvaRaw
-                    : lineTotal;
-
-            if (
-                !Number.isFinite(subtotalSinIvaFinal) ||
-                !Number.isFinite(ivaTotalFinal) ||
-                !Number.isFinite(totalConIvaFinal) ||
-                subtotalSinIvaFinal < 0 ||
-                ivaTotalFinal < 0 ||
-                totalConIvaFinal <= 0
-            ) {
-                const validationError = new Error('Importes de facturación inválidos. No se pudo generar una cabecera de venta válida.');
-                validationError.statusCode = 400;
-                throw validationError;
-            }
-
-            // ✅ 5. GENERAR HASH DETERMINÍSTICO PARA IDEMPOTENCIA
-            const hashFacturacion = generarHashFacturacion(pedidoId, tipoFiscal, {
-                subtotalSinIva: subtotalSinIvaFinal,
-                ivaTotal: ivaTotalFinal,
-                totalConIva: totalConIvaFinal,
-                cuentaId
-            });
-            console.log(`🔐 Hash de facturación generado: ${hashFacturacion}`);
-            
-            // ✅ 6. VERIFICAR VENTA EXISTENTE POR HASH (idempotencia explícita)
-            const ventaExistentePorHash = await verificarVentaExistentePorHash(connection, hashFacturacion);
-            if (ventaExistentePorHash) {
-                // Obtener productos y remito de la venta existente
-                const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
-                const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistentePorHash.id]);
-                
-                const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
-                const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorHash.id]);
-                const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
-
-                console.log(`✅ Retornando venta existente por hash ID ${ventaExistentePorHash.id}`);
-
-                // Auditar detección de duplicado
-                try {
-                    await auditarOperacion(req, {
-                        accion: 'DUPLICATE_DETECTED',
-                        tabla: 'ventas',
-                        registroId: ventaExistentePorHash.id,
-                        detallesAdicionales: `Intento de facturación duplicada detectado por hash - Hash: ${hashFacturacion} - Venta existente: ID ${ventaExistentePorHash.id} - Factura: ${ventaExistentePorHash.numero_factura}`
-                    });
-                } catch (auditError) {
-                    console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
-                }
-
-                return {
-                    statusCode: 200,
-                    success: true,
-                    message: 'Esta facturación ya fue procesada anteriormente',
-                    existing: true,
-                    data: {
-                        ventaId: ventaExistentePorHash.id,
-                        numeroFactura: ventaExistentePorHash.numero_factura,
-                        tipoFactura: ventaExistentePorHash.tipo_f,
-                        remitoId: remitoId,
-                        pedidoId: pedidoId,
-                        total: ventaExistentePorHash.total,
-                        productosCount: productosVenta.length,
-                        requiereCAE: ventaExistentePorHash.tipo_f !== 'X',
-                        pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
-                    }
-                };
-            }
-            
-            // ✅ 7. VERIFICAR VENTA EXISTENTE POR PEDIDO (idempotencia por entidad)
-            const ventaExistentePorPedido = await verificarVentaExistentePorPedido(connection, pedidoId);
-            if (ventaExistentePorPedido) {
-                // Obtener productos y remito de la venta existente
-                const productosVentaQuery = `SELECT * FROM ventas_cont WHERE venta_id = ?`;
-                const productosVenta = await queryPromiseWithConnection(connection, productosVentaQuery, [ventaExistentePorPedido.id]);
-                
-                const remitoQuery = `SELECT id FROM remitos WHERE venta_id = ? LIMIT 1`;
-                const remitoResult = await queryPromiseWithConnection(connection, remitoQuery, [ventaExistentePorPedido.id]);
-                const remitoId = remitoResult.length > 0 ? remitoResult[0].id : null;
-                
-                // Actualizar estado del pedido si no está actualizado
-                if (pedido.estado !== 'Facturado') {
-                    const actualizarPedidoQuery = `UPDATE pedidos SET estado = 'Facturado' WHERE id = ?`;
-                    await queryPromiseWithConnection(connection, actualizarPedidoQuery, [pedidoId]);
-                    console.log('📋 Estado del pedido actualizado a "Facturado"');
-                }
-
-                console.log(`✅ Retornando venta existente por pedido ID ${ventaExistentePorPedido.id}`);
-
-                // Auditar detección de duplicado
-                try {
-                    await auditarOperacion(req, {
-                        accion: 'DUPLICATE_DETECTED',
-                        tabla: 'ventas',
-                        registroId: ventaExistentePorPedido.id,
-                        detallesAdicionales: `Intento de facturar pedido ya facturado - Pedido: ${pedidoId} - Venta existente: ID ${ventaExistentePorPedido.id} - Factura: ${ventaExistentePorPedido.numero_factura}`
-                    });
-                } catch (auditError) {
-                    console.warn('⚠️ Error en auditoría (no crítico):', auditError.message);
-                }
-
-                return {
-                    statusCode: 200,
-                    success: true,
-                    message: 'Este pedido ya fue facturado anteriormente',
-                    existing: true,
-                    data: {
-                        ventaId: ventaExistentePorPedido.id,
-                        numeroFactura: ventaExistentePorPedido.numero_factura,
-                        tipoFactura: ventaExistentePorPedido.tipo_f,
-                        remitoId: remitoId,
-                        pedidoId: pedidoId,
-                        total: ventaExistentePorPedido.total,
-                        productosCount: productosVenta.length,
-                        requiereCAE: ventaExistentePorPedido.tipo_f !== 'X',
-                        pedidoActualizado: { id: pedidoId, estado: 'Facturado' }
-                    }
-                };
-            }
 
             // ✅ 8. OBTENER SIGUIENTE NÚMERO DE FACTURA (solo si no existe venta)
             const { numeroFactura, numeroCompleto, puntoVenta } = await obtenerSiguienteNumeroFactura(
@@ -936,13 +964,13 @@ const facturarPedido = async (req, res) => {
             const esClienteExento = pedido.cliente_condicion?.toUpperCase() === 'EXENTO';
             const montoExento = esClienteExento ? ivaTotalFinal : 0;
 
-            // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
+            // Cálculo único: cabecera con roundFacturacion (incluye dto global vía totalConIvaFinal)
             const subtotalR = roundFacturacion(subtotalSinIvaFinal);
             const ivaTotalR = roundFacturacion(ivaTotalFinal);
             const exentoR = roundFacturacion(montoExento);
             const totalR = roundFacturacion(totalConIvaFinal);
             
-            console.log(`💰 [Facturar Pedido] Monto exento a guardar en venta: $${montoExento.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
+            console.log(`💰 [Facturar Pedido] Monto exento a guardar en venta: $${Number(exentoR).toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
             
             const ventaId = await ventasRepository.insertarVentaCabecera(connection, {
                 numero_factura: numeroCompleto,
@@ -965,7 +993,8 @@ const facturarPedido = async (req, res) => {
                 observaciones: pedido.observaciones,
                 empleado_id: pedido.empleado_id,
                 empleado_nombre: pedido.empleado_nombre,
-                hash_venta: hashFacturacion
+                hash_venta: hashFacturacion,
+                pedido_id: pedidoId
             });
             console.log('💰 Venta creada con ID:', ventaId, '- Número:', numeroCompleto);
             await ventasRepository.actualizarTotalesVenta(connection, ventaId, {
@@ -974,7 +1003,7 @@ const facturarPedido = async (req, res) => {
                 exento: exentoR,
                 total: totalR
             });
-            
+
             // ✅ Verificar inmediatamente después de insertar
             const verifyQuery = `SELECT exento FROM ventas WHERE id = ?`;
             const verifyResult = await queryPromiseWithConnection(connection, verifyQuery, [ventaId]);
@@ -1066,7 +1095,6 @@ const facturarPedido = async (req, res) => {
                 (cuenta_id, tipo, origen, referencia_id, monto, fecha)
                 VALUES (?, 'INGRESO', ?, ?, ?, NOW())
             `;
-
             await queryPromiseWithConnection(connection, movimientoQuery, [
                 cuentaId,
                 `Facturación ${tipoFiscal} - ${pedido.cliente_nombre}`,
@@ -1081,7 +1109,6 @@ const facturarPedido = async (req, res) => {
                 SET saldo = saldo + ? 
                 WHERE id = ?
             `;
-
             await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalR, cuentaId]);
             console.log('💳 Saldo de cuenta actualizado');
 
@@ -1547,6 +1574,36 @@ const crearErrorNegocioVentaDirecta = (message, code, extra = {}) => {
     return err;
 };
 
+const parseBool = (value) => (
+    value === true ||
+    value === 1 ||
+    value === '1' ||
+    String(value || '').toLowerCase() === 'true'
+);
+
+const enriquecerLineasConFlete = async (_connection, productos, getProductoId) => {
+    // Sin depender de columna es_servicio_flete (migración opcional).
+    return (productos || []).map((producto) => {
+        const nombre = String(producto.nombre || producto.producto_nombre || '');
+        const esFlete = parseBool(producto.es_flete) ||
+            parseBool(producto.es_servicio_flete) ||
+            /flete/i.test(nombre);
+        return { ...producto, es_flete: esFlete };
+    });
+};
+
+const assertDocumentoNoMixtoFlete = (productos) => {
+    const tieneFlete = (productos || []).some((producto) => parseBool(producto.es_flete) || parseBool(producto.es_servicio_flete));
+    const tieneMercaderia = (productos || []).some((producto) => !(parseBool(producto.es_flete) || parseBool(producto.es_servicio_flete)));
+
+    if (tieneFlete && tieneMercaderia) {
+        throw crearErrorNegocioVentaDirecta(
+            'No se permiten documentos mixtos con flete y mercadería',
+            'DOCUMENTO_MIXTO_NO_PERMITIDO'
+        );
+    }
+};
+
 const ventaDirecta = async (req, res) => {
     const { 
         // Datos del cliente
@@ -1569,7 +1626,7 @@ const ventaDirecta = async (req, res) => {
         observaciones,
         empleado_id,
         empleado_nombre,
-        hash_venta  // ✅ Hash para idempotencia
+        hash_venta  // ✅ Hash para idempotencia (operacion_id del cliente se ignora)
     } = req.body;
 
     // ✅ VALIDACIÓN DE ROL - SOLO GERENTES
@@ -1612,41 +1669,33 @@ const ventaDirecta = async (req, res) => {
         console.log(`🔐 Hash de venta generado en backend: ${hashVentaFinal}`);
     }
 
-    // ✅ VERIFICAR DUPLICADOS ANTES DE PROCESAR
+    // Dedup histórico por hash (sin exigir operacion_id / tablas nuevas)
     const ventaDuplicada = await verificarVentaDuplicada(hashVentaFinal);
     if (ventaDuplicada) {
         console.log(`⚠️ Venta duplicada detectada, retornando venta existente ID: ${ventaDuplicada.id}`);
-        
-        await auditarOperacion(req, {
-            accion: 'DUPLICATE_DETECTED',
-            tabla: 'ventas',
-            registroId: ventaDuplicada.id,
-            detallesAdicionales: `Intento de duplicar venta detectado - Hash: ${hashVentaFinal} - Venta existente: ID ${ventaDuplicada.id} - Cliente: ${ventaDuplicada.cliente_nombre} - Factura: ${ventaDuplicada.numero_factura}`
-        });
-
-        return res.json({ 
-            success: true, 
+        return res.json({
+            success: true,
             message: 'Esta venta ya fue registrada anteriormente',
             data: ventaDuplicada,
-            existing: true // ✅ INDICADOR DE DUPLICADO
+            existing: true
         });
     }
 
     console.log(`💰 [Venta Directa] Iniciando proceso - Usuario: ${empleado_nombre} - Cliente: ${cliente_nombre} - Hash: ${hashVentaFinal}`);
 
-
-
-    
     try {
         const txResult = await withTransaction(async (connection) => {
             // ============================================
             // 1️⃣ CREAR EL PEDIDO
             // ============================================
             console.log('📋 [Venta Directa] Paso 1: Creando pedido...');
+
+            const productosProcesados = await enriquecerLineasConFlete(connection, productos, (producto) => producto.id);
+            assertDocumentoNoMixtoFlete(productosProcesados);
             
             // ✅ Importes desde líneas del body (fuente única); total clampado ≤ neto+IVA (descuento global).
-            const lineSubtotal = productos.reduce((acc, p) => acc + (Number(p.subtotal) || 0), 0);
-            const lineIva = productos.reduce((acc, p) => acc + (Number(p.iva) || 0), 0);
+            const lineSubtotal = productosProcesados.reduce((acc, p) => acc + (Number(p.subtotal) || 0), 0);
+            const lineIva = productosProcesados.reduce((acc, p) => acc + (Number(p.iva) || 0), 0);
             const lineTotal = lineSubtotal + lineIva;
 
             const subtotalSinIvaFinal = lineSubtotal;
@@ -1687,13 +1736,12 @@ const ventaDirecta = async (req, res) => {
             const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
             const montoExento = esClienteExento ? ivaTotalFinal : 0;
 
-            // ✅ Redondeo para facturación
             const subtotalR = roundFacturacion(subtotalSinIvaFinal);
             const ivaTotalR = roundFacturacion(ivaTotalFinal);
             const exentoR = roundFacturacion(montoExento);
             const totalR = roundFacturacion(totalConIvaFinal);
             
-            console.log(`💰 [Venta Directa] Monto exento final a guardar: $${montoExento.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
+            console.log(`💰 [Venta Directa] Monto exento final a guardar: $${Number(exentoR).toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
 
             const pedidoValues = [
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
@@ -1718,9 +1766,8 @@ const ventaDirecta = async (req, res) => {
             `;
 
             // Merge solo líneas idénticas (id + nombre + precio + alícuota).
-            // Fletes/manuales con mismo producto_id pero distinto nombre/IVA quedan separados.
             const productosMergeados = Object.values(
-                productos.reduce((acc, p) => {
+                productosProcesados.reduce((acc, p) => {
                     const porcentajeIva = resolvePorcentajeIvaLinea(p);
                     const key = [
                         String(p.id),
@@ -1740,7 +1787,8 @@ const ventaDirecta = async (req, res) => {
             );
 
             // Fase A: lock + validación global de stock (sumar cantidades por producto_id)
-            const idsProductos = [...new Set(productosMergeados.map((p) => p.id))];
+            const productosConStock = productosMergeados.filter((p) => !parseBool(p.es_flete));
+            const idsProductos = [...new Set(productosConStock.map((p) => p.id))];
             const stockRows = idsProductos.length > 0
                 ? await queryPromiseWithConnection(
                     connection,
@@ -1750,7 +1798,7 @@ const ventaDirecta = async (req, res) => {
                 : [];
             const stockMap = new Map(stockRows.map((r) => [Number(r.id), r]));
 
-            const requeridoPorProducto = productosMergeados.reduce((acc, p) => {
+            const requeridoPorProducto = productosConStock.reduce((acc, p) => {
                 const id = Number(p.id);
                 acc[id] = (acc[id] || 0) + parseFloat(p.cantidad);
                 return acc;
@@ -1795,6 +1843,22 @@ const ventaDirecta = async (req, res) => {
                 );
             }
 
+            // Contención E1: capturar stockAntes ANTES del descuento (por producto_id agregado).
+            const stockAntesPorProducto = new Map();
+            for (const [idStr, cantidadRequerida] of Object.entries(requeridoPorProducto)) {
+                const id = Number(idStr);
+                const row = stockMap.get(id);
+                const stockAntes = parseFloat(row.stock_actual);
+                stockAntesPorProducto.set(id, stockAntes);
+                await queryPromiseWithConnection(
+                    connection,
+                    `UPDATE productos SET stock_actual = stock_actual - ? WHERE id = ?`,
+                    [cantidadRequerida, id]
+                );
+                row.stock_actual = stockAntes - cantidadRequerida;
+                console.log(`✅ Stock actualizado - Producto id=${id}, Cantidad: ${cantidadRequerida}, Nuevo stock: ${row.stock_actual}`);
+            }
+
             for (const producto of productosMergeados) {
                 const {
                     id,
@@ -1826,16 +1890,6 @@ const ventaDirecta = async (req, res) => {
                         descuento_porcentaje || 0
                     ]
                 );
-
-                await queryPromiseWithConnection(
-                    connection,
-                    `UPDATE productos SET stock_actual = stock_actual - ? WHERE id = ?`,
-                    [parseFloat(cantidad), id]
-                );
-
-                const row = stockMap.get(Number(id));
-                row.stock_actual = parseFloat(row.stock_actual) - parseFloat(cantidad);
-                console.log(`✅ Stock actualizado - Producto: ${nombre}, Cantidad: ${cantidad}, Nuevo stock: ${row.stock_actual}`);
             }
 
             // ============================================
@@ -1872,21 +1926,21 @@ const ventaDirecta = async (req, res) => {
                 observaciones: observaciones || '',
                 empleado_id,
                 empleado_nombre,
-                hash_venta: hashVentaFinal
+                hash_venta: hashVentaFinal,
+                pedido_id: pedidoId
             });
             
             console.log(`✅ [Venta Directa] Venta creada con ID: ${ventaId}`);
 
-            for (const producto of productosMergeados) {
-                const row = stockMap.get(Number(producto.id));
-                if (!row) continue;
-                const stockAntes = parseFloat(row.stock_actual);
-                const cantidad = parseFloat(producto.cantidad);
+            for (const [idStr, cantidadRequerida] of Object.entries(requeridoPorProducto)) {
+                const id = Number(idStr);
+                const stockAntes = stockAntesPorProducto.get(id);
+                if (stockAntes == null) continue;
                 await registrarMovimientoStock(connection, {
-                    productoId: producto.id,
-                    delta: -cantidad,
+                    productoId: id,
+                    delta: -cantidadRequerida,
                     stockAntes,
-                    stockDespues: stockAntes - cantidad,
+                    stockDespues: stockAntes - cantidadRequerida,
                     tipoOperacion: 'VENTA_DIRECTA',
                     referenciaTipo: 'ventas',
                     referenciaId: ventaId,
@@ -1972,34 +2026,29 @@ const ventaDirecta = async (req, res) => {
             // 7️⃣ CREAR MOVIMIENTO DE FONDOS (INGRESO)
             // ============================================
             console.log('💰 [Venta Directa] Paso 7: Registrando movimiento de fondos...');
-            
+
             const movimientoQuery = `
-                INSERT INTO movimiento_fondos 
+                INSERT INTO movimiento_fondos
                 (cuenta_id, tipo, origen, referencia_id, monto, fecha)
                 VALUES (?, 'INGRESO', ?, ?, ?, NOW())
             `;
-
             await queryPromiseWithConnection(connection, movimientoQuery, [
                 cuentaId,
                 `Venta Directa - ${cliente_nombre}`,
                 ventaId,
                 totalR
             ]);
-            
             console.log('✅ [Venta Directa] Movimiento de fondos registrado');
 
             // ============================================
             // 8️⃣ ACTUALIZAR SALDO DE LA CUENTA
             // ============================================
             console.log('💳 [Venta Directa] Paso 8: Actualizando saldo de cuenta...');
-            
-            const actualizarSaldoQuery = `
-                UPDATE cuenta_fondos 
-                SET saldo = saldo + ? 
-                WHERE id = ?
-            `;
-
-            await queryPromiseWithConnection(connection, actualizarSaldoQuery, [totalR, cuentaId]);
+            await queryPromiseWithConnection(
+                connection,
+                `UPDATE cuenta_fondos SET saldo = saldo + ? WHERE id = ?`,
+                [totalR, cuentaId]
+            );
             console.log('✅ [Venta Directa] Saldo de cuenta actualizado');
 
             // ============================================
@@ -2027,13 +2076,10 @@ const ventaDirecta = async (req, res) => {
             }
 
             console.log('🎉 [Venta Directa] Proceso completado exitosamente');
-            
-            // ============================================
-            // ✅ RESPUESTA EXITOSA
-            // ============================================
-            return { 
+
+            return {
                 statusCode: 200,
-                success: true, 
+                success: true,
                 message: 'Venta directa completada exitosamente',
                 data: {
                     pedidoId,
@@ -2069,7 +2115,17 @@ const ventaDirecta = async (req, res) => {
 };
 
 // ✅ DUPLICAR VENTA EN MODO BORRADOR (sin solicitar CAE)
+// Contención E1: deshabilitada por defecto. Crea Facturada sin efectos operativos.
 const duplicarVentaBorrador = async (req, res) => {
+    const habilitado = String(process.env.DUPLICAR_VENTA_HABILITADO || 'false').toLowerCase() === 'true';
+    if (!habilitado) {
+        return res.status(503).json({
+            error: 'FUNCIONALIDAD_DESHABILITADA',
+            motivo: 'Duplicación directa a Facturada sin efectos operativos está deshabilitada.',
+            administracion_requerida: true
+        });
+    }
+
     const ventaIdOrigen = parseInt(req.params.id, 10);
 
     if (!Number.isInteger(ventaIdOrigen) || ventaIdOrigen <= 0) {

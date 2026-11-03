@@ -10,6 +10,55 @@ const queryWithConnection = async (connection, sql, params = []) => {
     return rows;
 };
 
+const parseBool = (value) => (
+    value === true ||
+    value === 1 ||
+    value === '1' ||
+    String(value || '').toLowerCase() === 'true'
+);
+
+const crearErrorNegocioNota = (message, code, statusCode = 422, extra = {}) => {
+    const error = new Error(message);
+    error.code = code;
+    error.statusCode = statusCode;
+    Object.assign(error, extra);
+    return error;
+};
+
+const assertDocumentoNoMixtoFlete = (productos) => {
+    const tieneFlete = (productos || []).some((producto) => parseBool(producto.es_flete) || parseBool(producto.es_servicio_flete));
+    const tieneMercaderia = (productos || []).some((producto) => !(parseBool(producto.es_flete) || parseBool(producto.es_servicio_flete)));
+
+    if (tieneFlete && tieneMercaderia) {
+        throw crearErrorNegocioNota(
+            'No se permiten documentos mixtos con flete y mercadería',
+            'DOCUMENTO_MIXTO_NO_PERMITIDO'
+        );
+    }
+};
+
+const enriquecerProductosConFlete = async (connection, productos) => {
+    const ids = [...new Set((productos || [])
+        .map((producto) => Number(producto.id ?? producto.producto_id ?? producto.productoId))
+        .filter((id) => Number.isFinite(id) && id > 0))];
+    const rows = ids.length
+        ? await queryWithConnection(
+            connection,
+            `SELECT id FROM productos WHERE id IN (${ids.map(() => '?').join(',')})`,
+            ids
+        )
+        : [];
+    void rows;
+
+    return (productos || []).map((producto) => {
+        const nombre = String(producto.nombre || producto.producto_nombre || '');
+        const esFlete = parseBool(producto.es_flete) ||
+            parseBool(producto.es_servicio_flete) ||
+            /flete/i.test(nombre);
+        return { ...producto, es_flete: esFlete };
+    });
+};
+
 /**
  * ✅ OBTENER SIGUIENTE NÚMERO DE NOTA (NUMERACIÓN LOCAL)
  * 
@@ -121,7 +170,9 @@ const crearNota = async (req, res) => {
         productos,
         observaciones,
         empleado_id,
-        empleado_nombre
+        empleado_nombre,
+        tipo_nc,
+        vendedor_atribuible_id
     } = req.body;
 
     console.log(`\n╔══════════════════════════════════════════╗`);
@@ -147,6 +198,14 @@ const crearNota = async (req, res) => {
         return res.status(400).json({
             success: false,
             message: 'Debe proporcionar al menos un producto'
+        });
+    }
+
+    if (tipoNota === 'NOTA_CREDITO' && tipo_nc && !['DEVOLUCION', 'AJUSTE_PRECIO'].includes(tipo_nc)) {
+        return res.status(400).json({
+            success: false,
+            code: 'TIPO_NC_INVALIDO',
+            message: 'tipo_nc debe ser DEVOLUCION o AJUSTE_PRECIO'
         });
     }
 
@@ -186,17 +245,44 @@ const crearNota = async (req, res) => {
             connection = await db.getConnection();
             await connection.beginTransaction();
 
+            const productosProcesados = await enriquecerProductosConFlete(connection, productos);
+            assertDocumentoNoMixtoFlete(productosProcesados);
+
             // ✅ 1. Si hay venta de referencia, obtener datos del cliente de esa venta
             let clienteFinal = {};
+            let ventaRef = null;
+            let saldoDisponibleNota = null;
+            let vendedorAtribuibleId = null;
+            let vendedorAtribuibleOrigen = 'sin_atribucion';
             if (ventaReferenciaId) {
-                const ventaQuery = `SELECT * FROM ventas WHERE id = ?`;
+                const ventaQuery = `SELECT * FROM ventas WHERE id = ? FOR UPDATE`;
                 const ventaResult = await queryWithConnection(connection, ventaQuery, [ventaReferenciaId]);
 
                 if (ventaResult.length === 0) {
                     throw new Error('Venta de referencia no encontrada');
                 }
 
-                const ventaRef = ventaResult[0];
+                ventaRef = ventaResult[0];
+                const tipoFiscalRef = String(ventaRef.tipo_f || '').trim().toUpperCase();
+                const tipoDocRef = String(ventaRef.tipo_doc || '').trim().toUpperCase();
+                const caeAprobado = String(ventaRef.cae_resultado || '').trim().toUpperCase() === 'A' &&
+                    String(ventaRef.cae_id || '').trim() !== '';
+
+                if (['A', 'B'].includes(tipoFiscal)) {
+                    if (
+                        tipoDocRef !== 'FACTURA' ||
+                        tipoFiscalRef !== tipoFiscal ||
+                        !caeAprobado
+                    ) {
+                        throw crearErrorNegocioNota(
+                            'La nota A/B requiere referencia a una factura compatible AUTORIZADO',
+                            'REFERENCIA_FACTURA_AUTORIZADA_REQUERIDA'
+                        );
+                    }
+                }
+
+                vendedorAtribuibleId = ventaRef.vendedor_atribuible_id || ventaRef.empleado_id || null;
+                vendedorAtribuibleOrigen = 'referencia';
                 clienteFinal = {
                     id: ventaRef.cliente_id,
                     nombre: ventaRef.cliente_nombre,
@@ -208,6 +294,21 @@ const crearNota = async (req, res) => {
                     cuit: ventaRef.cliente_cuit
                 };
             } else {
+                if (['A', 'B'].includes(tipoFiscal)) {
+                    throw crearErrorNegocioNota(
+                        'Las notas A/B requieren una venta de referencia',
+                        'REFERENCIA_REQUERIDA'
+                    );
+                }
+                const vendedorExplicitado = Number(vendedor_atribuible_id);
+                if (
+                    Number.isFinite(vendedorExplicitado) &&
+                    vendedorExplicitado > 0 &&
+                    String(req.user?.rol || '').toUpperCase() === 'GERENTE'
+                ) {
+                    vendedorAtribuibleId = vendedorExplicitado;
+                    vendedorAtribuibleOrigen = 'asignacion_explicita';
+                }
                 // ✅ Usar cliente proporcionado
                 clienteFinal = {
                     id: cliente_id,
@@ -219,6 +320,19 @@ const crearNota = async (req, res) => {
                     condicion: cliente_condicion || '',
                     cuit: cliente_cuit || ''
                 };
+            }
+
+            if (tipoNota === 'NOTA_CREDITO' && ventaRef) {
+                const ncRows = await queryWithConnection(
+                    connection,
+                    `SELECT COALESCE(SUM(total), 0) AS total_nc
+                     FROM ventas
+                     WHERE venta_referencia_id = ?
+                       AND tipo_doc = 'NOTA_CREDITO'
+                       AND UPPER(TRIM(COALESCE(estado, 'Facturada'))) IN ('FACTURADA','FACTURADO','EN_CURSO')`,
+                    [ventaReferenciaId]
+                );
+                saldoDisponibleNota = (parseFloat(ventaRef.total) || 0) - (parseFloat(ncRows[0]?.total_nc) || 0);
             }
 
             // ✅ 2. OBTENER SIGUIENTE NÚMERO DE NOTA
@@ -236,14 +350,17 @@ const crearNota = async (req, res) => {
             // NO EXENTO => exento = 0
             const esClienteExento = clienteFinal.condicion?.toUpperCase() === 'EXENTO';
 
-            // ✅ Redondeo para facturación: ,01–,59 mantienen; ,60–,99 suben
             const subtotalR = roundFacturacion(subtotalSinIva);
             const ivaTotalR = roundFacturacion(ivaTotal);
             const exentoR = esClienteExento ? ivaTotalR : 0;
             const totalR = roundFacturacion(totalConIva);
 
+            if (saldoDisponibleNota !== null && totalR > saldoDisponibleNota + 0.0001) {
+                throw crearErrorNegocioNota('La nota de crédito supera el saldo disponible de la factura original',
+                    'SALDO_FACTURA_INSUFICIENTE', 422, { saldoDisponible: saldoDisponibleNota });
+            }
+
             // ✅ 4. CREAR LA NOTA EN LA TABLA VENTAS
-            // ✅ Incluir venta_referencia_id si existe
             const notaQuery = `
                 INSERT INTO ventas 
                 (fecha, numero_factura, cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
@@ -255,7 +372,7 @@ const crearNota = async (req, res) => {
             `;
 
             const notaValues = [
-                numeroCompleto,  // numero_factura
+                numeroCompleto,
                 clienteFinal.id,
                 clienteFinal.nombre,
                 clienteFinal.telefono,
@@ -265,14 +382,16 @@ const crearNota = async (req, res) => {
                 clienteFinal.condicion,
                 clienteFinal.cuit,
                 cuentaId,
-                tipoNota,  // tipo_doc: 'NOTA_DEBITO' o 'NOTA_CREDITO'
+                tipoNota,
                 tipoFiscal,
-                ventaReferenciaId || null,  // ✅ ID de la venta de referencia (si existe)
+                ventaReferenciaId || null,
                 subtotalR,
                 ivaTotalR,
                 exentoR,
                 totalR,
-                observaciones || 'sin observaciones',
+                tipoNota === 'NOTA_CREDITO' && tipo_nc
+                    ? `${observaciones || 'sin observaciones'} | tipo_nc=${tipo_nc}`
+                    : (observaciones || 'sin observaciones'),
                 empleado_id,
                 empleado_nombre
             ];
@@ -283,7 +402,7 @@ const crearNota = async (req, res) => {
             console.log(`✅ Nota creada con ID: ${notaId} - Número: ${numeroCompleto}`);
 
             // ✅ 5. INSERTAR PRODUCTOS EN ventas_cont
-            for (const producto of productos) {
+            for (const producto of productosProcesados) {
                 const productoQuery = `
                     INSERT INTO ventas_cont 
                     (venta_id, producto_id, producto_nombre, producto_um, cantidad, precio, IVA, porcentaje_iva, subtotal)
@@ -333,7 +452,7 @@ const crearNota = async (req, res) => {
                 );
 
                 // Devolución de mercadería al stock solo en Nota de Crédito y líneas con producto de catálogo
-                if (tipoNota === 'NOTA_CREDITO') {
+                if (tipoNota === 'NOTA_CREDITO' && (tipo_nc || 'DEVOLUCION') === 'DEVOLUCION' && !parseBool(producto.es_flete)) {
                     if (productoId == null) {
                         if (!esManual) {
                             throw new Error(
@@ -398,18 +517,18 @@ const crearNota = async (req, res) => {
                 const montoAbs = Math.abs(parseFloat(totalR));
 
                 await fondosRepository.obtenerCuentaPorIdForUpdate(connection, cuentaId);
-                await fondosRepository.registrarMovimiento(connection, {
-                    cuenta_id: cuentaId,
-                    tipo: tipoMov,
-                    origen: 'notas',
-                    monto: montoAbs,
-                    referencia_id: notaId
-                });
+                await queryWithConnection(
+                    connection,
+                    `INSERT INTO movimiento_fondos (cuenta_id, tipo, origen, monto, referencia_id, fecha)
+                     VALUES (?, ?, 'notas', ?, ?, NOW())`,
+                    [cuentaId, tipoMov, montoAbs, notaId]
+                );
                 const delta = tipoMov === 'INGRESO' ? montoAbs : -montoAbs;
                 await fondosRepository.actualizarSaldo(connection, cuentaId, delta);
-
                 console.log(`✅ Cuenta ${cuentaId} actualizada con movimiento ${tipoMov}: ${delta > 0 ? '+' : ''}${montoAbs.toFixed(2)}`);
             }
+
+            const dataResp = { notaId, numeroCompleto, tipoNota };
 
             // ✅ 7. COMMIT
             await connection.commit();
@@ -431,11 +550,7 @@ const crearNota = async (req, res) => {
             return res.json({
                 success: true,
                 message: `${tipoNota} creada exitosamente`,
-                data: {
-                    notaId,
-                    numeroCompleto,
-                    tipoNota
-                }
+                data: dataResp
             });
         } catch (error) {
             console.error('Error creando nota:', error);
@@ -446,9 +561,12 @@ const crearNota = async (req, res) => {
                     console.error('Error realizando rollback de nota:', rollbackError);
                 }
             }
-            return res.status(500).json({
+            const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+            return res.status(statusCode).json({
                 success: false,
-                message: error.message || 'Error al crear la nota'
+                message: error.message || 'Error al crear la nota',
+                ...(error.code && { code: error.code }),
+                ...(error.saldoDisponible !== undefined && { saldoDisponible: error.saldoDisponible })
             });
         } finally {
             connection?.release();

@@ -3,6 +3,7 @@ import { createRequire } from 'module';
 import afipConfig from '../config/afip.config.js';
 
 const require = createRequire(import.meta.url);
+const { normalizarConsulta, validarRecuperacionAutomatica } = require('../../services/consultaFiscal');
 const discordLogger = require('../../utils/discordLogger.js');
 
 /** Envía log a consola y a Discord (canal ARCA/AFIP). */
@@ -82,32 +83,6 @@ function normalizeCreateVoucherResult(arcasdkResult) {
 }
 
 /** Convierte getVoucherInfo de @arcasdk/core a un objeto con claves tipo ResultGet de AFIP (PascalCase). */
-function voucherInfoToLegacyShape(v) {
-  if (!v) return null;
-  return {
-    CodAutorizacion: v.codAutorizacion,
-    EmisionTipo: v.emisionTipo,
-    FchVto: v.fchVto,
-    FchProceso: v.fchProceso,
-    Resultado: v.resultado,
-    Concepto: v.concepto,
-    DocTipo: v.docTipo,
-    DocNro: v.docNro,
-    CbteDesde: v.cbteDesde,
-    CbteHasta: v.cbteHasta,
-    CbteFch: v.cbteFch,
-    ImpTotal: v.impTotal,
-    ImpTotConc: v.impTotConc,
-    ImpNeto: v.impNeto,
-    ImpOpEx: v.impOpEx,
-    ImpIVA: v.impIVA,
-    ImpTrib: v.impTrib,
-    MonId: v.monId,
-    MonCotiz: v.monCotiz,
-    observacionesMsg: v.observaciones,
-    Observaciones: v.observaciones
-  };
-}
 
 /**
  * SERVICIO PRINCIPAL DE AFIP/ARCA
@@ -192,7 +167,8 @@ class AfipService {
           const recuperado = await this._intentarRecuperarComprobanteAutorizado(
             ptoVta,
             cbteTipo,
-            cbteDesde
+            cbteDesde,
+            datosComprobante
           );
           if (recuperado) {
             return recuperado;
@@ -222,7 +198,8 @@ class AfipService {
             const recuperado = await this._intentarRecuperarComprobanteAutorizado(
               ptoVta,
               cbteTipo,
-              cbteDesde
+              cbteDesde,
+              datosComprobante
             );
             if (recuperado) {
               return recuperado;
@@ -253,13 +230,12 @@ class AfipService {
    *   null = el nº aún no existe en ARCA (se puede crear).
    *   Si el nº ya existe y no hay CAE legible, lanza error de reconciliación (no re-emitir).
    */
-  async _intentarRecuperarComprobanteAutorizado(puntoVenta, tipoComprobante, numeroComprobante) {
+  async _intentarRecuperarComprobanteAutorizado(puntoVenta, tipoComprobante, numeroComprobante, esperado) {
     let ultimo;
     try {
       ultimo = await this.obtenerUltimoComprobante(puntoVenta, tipoComprobante);
     } catch (error) {
-      arcaLog(`⚠️ No se pudo consultar último comprobante para reconciliar: ${error.message}`);
-      return null;
+      throw new Error(`Reconciliar: no se pudo verificar el resultado de la emisión: ${error.message}`);
     }
 
     if (ultimo < numeroComprobante) {
@@ -284,6 +260,7 @@ class AfipService {
       );
     }
 
+    validarRecuperacionAutomatica(info, esperado);
     const resultado = {
       CAE: String(cae),
       CAEFchVto: formatCaeFchVto(info.FchVto),
@@ -340,7 +317,7 @@ class AfipService {
       }
 
       arcaLog('✓ Información del comprobante obtenida');
-      return voucherInfoToLegacyShape(info);
+      return normalizarConsulta(info, { tipo: tipoComprobante, puntoVenta, numero: numeroComprobante });
     } catch (error) {
       arcaErr('❌ Error al obtener información: ' + error.message);
       throw new Error(`Error al consultar comprobante: ${error.message}`);

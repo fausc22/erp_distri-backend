@@ -2,6 +2,7 @@ const express = require('express');
 const ventasController = require('../controllers/ventasController');
 const { requireEmployee, requireManager } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
+const { requireClientVersionWhenUuidRequired } = require('../middlewares/clientVersionMiddleware');
 const router = express.Router();
 
 router.get('/obtener-ventas', 
@@ -82,11 +83,13 @@ router.get('/buscar-por-cliente',
 
 router.post('/venta-directa', 
     requireManager,  // ✅ SOLO GERENTES
+    requireClientVersionWhenUuidRequired(),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'venta_directa', incluirBody: true }),
     ventasController.ventaDirecta
 );
 
 router.post('/duplicar-venta/:id',
+    requireManager,
     middlewareAuditoria({ accion: 'INSERT', tabla: 'ventas', incluirBody: true }),
     ventasController.duplicarVentaBorrador
 );

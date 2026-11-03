@@ -1,3 +1,4 @@
+import documento from '../../dominio/calculo/documento.js';
 import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento, esNotaCredito, esNotaDebito } from '../types/billing.types.js';
 
 /**
@@ -141,6 +142,45 @@ export function formatearDocumento(documento) {
  * ✅ ACTUALIZADO: Maneja todos los casos (RI, Monotributo, Consumidor Final, Exento)
  */
 export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVenta) {
+  // Operaciones v1: trasladar el cálculo persistido, sin reconstruir ni corregir precios.
+  if (datosUsuario.reglaCalculo === 'v1') {
+    const { centavos } = documento;
+    if (esExento(datosUsuario.cliente.condicionIVA)) throw new Error('EXENTO no habilitado para v1');
+    const tasas = { 3: 0n, 4: 1050n, 5: 2100n, 6: 2700n };
+    const alicuotas = datosUsuario.ivaCalculado;
+    if (!Array.isArray(alicuotas) || !alicuotas.length) throw new Error('Falta desglose IVA del cálculo');
+    let neto = 0n, iva = 0n;
+    const ids = new Set();
+    for (const a of alicuotas) {
+      const base = centavos(a.BaseImp), impuesto = centavos(a.Importe);
+      if (!(a.Id in tasas) || ids.has(a.Id) || base < 0n || impuesto < 0n) throw new Error('Alícuota inválida');
+      ids.add(a.Id);
+      if ((base * tasas[a.Id] + 5000n) / 10000n !== impuesto) throw new Error('IVA diferente del cálculo por alícuota');
+      neto += base; iva += impuesto;
+    }
+    if (neto !== centavos(datosUsuario.impNeto) || iva !== centavos(datosUsuario.impIVA) || neto + iva !== centavos(datosUsuario.impTotal)) {
+      throw new Error('Importes v1 inconsistentes: envío bloqueado');
+    }
+    for (const field of ['impOpEx', 'impTotConc', 'impTrib']) {
+      if (centavos(datosUsuario[field] ?? 0) !== 0n) throw new Error('Componente no soportado en cálculo v1');
+    }
+    const data = {
+      CantReg: 1, PtoVta: puntoVenta, CbteTipo: datosUsuario.tipoComprobante,
+      Concepto: datosUsuario.concepto || 1, DocTipo: datosUsuario.cliente.tipoDocumento,
+      DocNro: Number(formatearDocumento(datosUsuario.cliente.numeroDocumento)) || 0,
+      CbteDesde: numeroComprobante, CbteHasta: numeroComprobante,
+      CbteFch: Number(datosUsuario.fecha),
+      ImpNeto: Number(datosUsuario.impNeto), ImpIVA: Number(datosUsuario.impIVA), ImpTotal: Number(datosUsuario.impTotal),
+      ImpOpEx: 0, ImpTotConc: 0, ImpTrib: 0, MonId: 'PES', MonCotiz: 1,
+      CondicionIVAReceptorId: datosUsuario.cliente.condicionIVA,
+      Iva: alicuotas.map(a => ({ Id: a.Id, BaseImp: Number(a.BaseImp), Importe: Number(a.Importe) }))
+    };
+    if (esNotaCredito(data.CbteTipo) || esNotaDebito(data.CbteTipo)) {
+      data.CbtesAsoc = formatearComprobantesAsociados(datosUsuario.comprobantesAsociados);
+      if (!data.CbtesAsoc.length) throw new Error('Nota sin comprobante asociado');
+    }
+    return data;
+  }
   const condicionIVAReceptor = datosUsuario.cliente.condicionIVA;
   const receptorEsExento = esExento(condicionIVAReceptor);
   const toNumber = (value, fallback = 0) => {

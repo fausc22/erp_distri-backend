@@ -2,6 +2,7 @@ const express = require('express');
 const notasController = require('../controllers/notasController');
 const { requireEmployee } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
+const { requireClientVersionWhenUuidRequired } = require('../middlewares/clientVersionMiddleware');
 const router = express.Router();
 
 /**
@@ -10,6 +11,7 @@ const router = express.Router();
  */
 router.post('/crear-nota',
     requireEmployee,
+    requireClientVersionWhenUuidRequired(),
     middlewareAuditoria({ accion: 'INSERT', tabla: 'ventas', incluirBody: true }),
     notasController.crearNota
 );

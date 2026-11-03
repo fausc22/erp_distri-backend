@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS venta_calculos (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  venta_id INT NULL,
+  regla_version VARCHAR(20) NOT NULL,
+  input_hash CHAR(64) NOT NULL,
+  input_json JSON NOT NULL,
+  resultado_json JSON NOT NULL,
+  ok TINYINT(1) NOT NULL DEFAULT 1,
+  error_code VARCHAR(80) NULL,
+  neto_centavos BIGINT NULL,
+  iva_centavos BIGINT NULL,
+  total_centavos BIGINT NULL,
+  creado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  creado_por_id INT NULL,
+  KEY idx_venta_calculos_input_hash (input_hash),
+  KEY idx_venta_calculos_venta (venta_id),
+  KEY idx_venta_calculos_regla (regla_version),
+  KEY idx_venta_calculos_creado (creado_en),
+  CONSTRAINT FK_venta_calculos_venta FOREIGN KEY (venta_id) REFERENCES ventas(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

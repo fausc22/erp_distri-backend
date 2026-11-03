@@ -1,3 +1,4 @@
+const { cargarCalculo, validarDocumento } = require('../dominio/calculo/documento');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
@@ -36,6 +37,9 @@ class PdfGenerator {
 
     formatearFecha(fechaBD) {
         if (!fechaBD) return 'Fecha no disponible';
+        // DATE no es un instante UTC: conservar el día calendario del comprobante.
+        const dia = typeof fechaBD === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(fechaBD);
+        if (dia) return `${dia[3]}/${dia[2]}/${dia[1]}`;
 
         try {
             const fecha = new Date(fechaBD);
@@ -103,8 +107,8 @@ class PdfGenerator {
             return num.toFixed(0);
         }
         
-        // Si tiene decimales, mostrar con hasta 2 decimales (elimina ceros finales)
-        return parseFloat(num.toFixed(2)).toString();
+        // Si tiene decimales, mostrar con hasta 3 decimales (escala operativa, elimina ceros finales)
+        return parseFloat(num.toFixed(3)).toString();
     }
 
     formatearMoneda(valor) {
@@ -1085,6 +1089,8 @@ class PdfGenerator {
      * - Páginas intermedias solo con tabla, footer vacío (Regla 3)
      */
   async generarFacturaARCA(venta, productos) {
+    const calculoGuardado = await cargarCalculo(db, venta.id);
+    validarDocumento(venta, productos, calculoGuardado);
     const templatePath = path.join(this.templatesPath, 'factura_arca.html');
 
     if (!fs.existsSync(templatePath)) {
@@ -1160,7 +1166,7 @@ class PdfGenerator {
     // ✅ DETECTAR SI HAY DESCUENTOS EN ALGÚN PRODUCTO
     const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
     const totalFacturaCabecera = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : null;
-    const totalesVisualesFacturaB = esFacturaB
+    const totalesVisualesFacturaB = esFacturaB && !calculoGuardado
       ? this.construirTotalesVisualesRedondeados(
           productos.map((p) => {
             const subtotalLinea = parseFloat(p.subtotal) || 0;
@@ -1171,7 +1177,7 @@ class PdfGenerator {
         )
       : [];
 
-    const fmtMontoFactura = esFacturaB
+    const fmtMontoFactura = esFacturaB && !calculoGuardado
       ? (v) => this.formatearMonedaRedondeadaCeroCentavos(v)
       : (v) => this.formatearMoneda(v);
     
@@ -1189,7 +1195,7 @@ class PdfGenerator {
       // Para Factura A (Responsable Inscripto): mantener base imponible SIN IVA (correcto legalmente).
       const totalItemRaw = esFacturaB ? (subtotalItem + ivaItem) : subtotalItem;
       const totalItemBase = esFacturaB
-        ? (totalesVisualesFacturaB[index] ?? Math.round(totalItemRaw))
+        ? (calculoGuardado ? totalItemRaw : (totalesVisualesFacturaB[index] ?? Math.round(totalItemRaw)))
         : totalItemRaw;
       const precioConDescuento = cantidad > 0 ? (totalItemBase / cantidad) : 0;
       const precioOriginal = descuento > 0
@@ -1320,7 +1326,7 @@ class PdfGenerator {
       cae: venta.cae_id,
       fechaVencimientoCAE,
       esExento: ocultarIvaDiscriminado,
-      forzarCentavosCero: esFacturaB
+      forzarCentavosCero: esFacturaB && !calculoGuardado
     });
 
     const commonReplacements = {
@@ -1364,6 +1370,8 @@ class PdfGenerator {
    * asociado) idéntico en todas las páginas; total y QR solo en la última.
    */
   async generarNotaCreditoARCA(nota, productos, facturaAsociada) {
+    const calculoGuardado = await cargarCalculo(db, nota.id);
+    validarDocumento(nota, productos, calculoGuardado);
     const templatePath = path.join(this.templatesPath, 'nota_credito_arca.html');
     
     if (!fs.existsSync(templatePath)) {
@@ -1418,7 +1426,7 @@ class PdfGenerator {
     const facturaAsociadaTotal = this.formatearMoneda(facturaAsociada?.total || 0);
 
     const totalNotaCabecera = Number.isFinite(parseFloat(nota.total)) ? parseFloat(nota.total) : null;
-    const totalesVisualesNota = ocultarIvaDiscriminado
+    const totalesVisualesNota = ocultarIvaDiscriminado && !calculoGuardado
       ? this.construirTotalesVisualesRedondeados(
           productos.map((p) => (parseFloat(p.subtotal) || 0) + (parseFloat(p.iva || p.iva_calculado) || 0)),
           totalNotaCabecera
@@ -1431,7 +1439,7 @@ class PdfGenerator {
       const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
       const cantidadFormateada = this.formatearCantidad(cantidad);
       const subtotalMostrado = ocultarIvaDiscriminado
-        ? (totalesVisualesNota[index] ?? Math.round(subtotal + ivaItem))
+        ? (calculoGuardado ? subtotal + ivaItem : (totalesVisualesNota[index] ?? Math.round(subtotal + ivaItem)))
         : subtotal;
       const precioUnitario = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
       
@@ -1538,6 +1546,8 @@ class PdfGenerator {
    * asociado) idéntico en todas las páginas; total y QR solo en la última.
    */
   async generarNotaDebitoARCA(nota, productos, facturaAsociada) {
+    const calculoGuardado = await cargarCalculo(db, nota.id);
+    validarDocumento(nota, productos, calculoGuardado);
     const templatePath = path.join(this.templatesPath, 'nota_debito_arca.html');
     
     if (!fs.existsSync(templatePath)) {
@@ -1698,6 +1708,8 @@ class PdfGenerator {
    * ✅ FACTURA GENÉRICA (C) - CON IVA INCLUIDO, SIN $
    */
   async generarFacturaGenerica(venta, productos) {
+    const calculoGuardado = await cargarCalculo(db, venta.id);
+    validarDocumento(venta, productos, calculoGuardado);
     const templatePath = path.join(this.templatesPath, 'factura.html');
     
     if (!fs.existsSync(templatePath)) {
@@ -1734,7 +1746,7 @@ class PdfGenerator {
     const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
 
     const esFacturaB = (venta.tipo_f || '').toString().trim().toUpperCase() === 'B';
-    const fmtMontoFacturaGen = esFacturaB
+    const fmtMontoFacturaGen = esFacturaB && !calculoGuardado
       ? (v) => this.formatearMonedaRedondeadaCeroCentavos(v)
       : (v) => this.formatearMoneda(v);
 
@@ -2322,27 +2334,56 @@ class PdfGenerator {
         // Reemplazar datos del encabezado
         htmlTemplate = htmlTemplate
             .replace(/{{mes}}/g, mesNombre)
-            .replace(/{{anio}}/g, datos.anio);
+            .replace(/{{anio}}/g, datos.anio)
+            .replace(/{{cuit_emisor}}/g, String(process.env.AFIP_CUIT || '').replace(/\D/g, '') || 'No configurado');
 
-        // Generar filas de la tabla principal
-        const itemsHTML = datos.ventas.map(venta => {
+        const fmtMonto = (v) => (v == null || v === '' ? '—' : `$ ${this.formatearMoneda(v)}`);
+        const filaVenta = (venta) => {
             const fecha = this.formatearFecha(venta.fecha);
+            const marca = venta.verificado ? '' : (venta.seccion === 'PENDIENTES' ? ' [PROV]' : (venta.seccion === 'DISCREPANTES' ? ' [DISC]' : ''));
             return `
                 <tr>
-                    <td>${fecha}</td>
+                    <td>${fecha}${marca}</td>
                     <td>${venta.comprobante}</td>
                     <td>${venta.numero}</td>
                     <td>${venta.cliente}</td>
                     <td>${venta.cuit}</td>
-                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.neto)}</td>
-                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.exento)}</td>
-                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.iva)}</td>
-                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.percepciones)}</td>
-                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.retenciones)}</td>
-                    <td style="white-space: nowrap;">$ ${this.formatearMoneda(venta.total)}</td>
+                    <td style="white-space: nowrap;">${fmtMonto(venta.neto)}</td>
+                    <td style="white-space: nowrap;">${fmtMonto(venta.exento)}</td>
+                    <td style="white-space: nowrap;">${fmtMonto(venta.iva)}</td>
+                    <td style="white-space: nowrap;">${fmtMonto(venta.percepciones)}</td>
+                    <td style="white-space: nowrap;">${fmtMonto(venta.retenciones)}</td>
+                    <td style="white-space: nowrap;">${fmtMonto(venta.total)}</td>
                 </tr>
             `;
-        }).join('');
+        };
+
+        const secciones = datos.secciones || null;
+        let itemsHTML;
+        if (secciones) {
+            const bloque = (titulo, filas, subtotales) => {
+                if (!filas || filas.length === 0) return '';
+                const rows = filas.map(filaVenta).join('');
+                const sub = subtotales
+                    ? `<tr class="total-row"><td colspan="5" style="text-align:right;font-weight:bold;">Subtotal ${titulo}</td>
+                        <td style="text-align:right;">${fmtMonto(subtotales.neto)}</td>
+                        <td style="text-align:right;">${fmtMonto(subtotales.exento)}</td>
+                        <td style="text-align:right;">${fmtMonto(subtotales.iva)}</td>
+                        <td style="text-align:right;">${fmtMonto(subtotales.percepciones)}</td>
+                        <td style="text-align:right;">${fmtMonto(subtotales.retenciones)}</td>
+                        <td style="text-align:right;font-weight:bold;">${fmtMonto(subtotales.total)}</td></tr>`
+                    : '';
+                return `<tr><td colspan="11" style="background:#eee;font-weight:bold;text-align:left;">${titulo} (${filas.length})</td></tr>${rows}${sub}`;
+            };
+            const ts = datos.totalesPorSeccion || {};
+            itemsHTML =
+                bloque('AUTORIZADOS CONCILIADOS (evidencia fiscal)', secciones.acreditados, ts.acreditados) +
+                bloque('DISCREPANCIAS (autorizados no conciliados)', secciones.discrepantes, ts.discrepantes) +
+                bloque('EVIDENCIA INCOMPLETA', secciones.evidenciaIncompleta, null) +
+                bloque('PENDIENTES (fecha comercial provisional — NO incluidos en total fiscal verificado)', secciones.pendientes, ts.pendientes);
+        } else {
+            itemsHTML = (datos.ventas || []).map(filaVenta).join('');
+        }
 
         htmlTemplate = htmlTemplate.replace(/{{items}}/g, itemsHTML);
 
@@ -2571,7 +2612,8 @@ class PdfGenerator {
         htmlTemplate = htmlTemplate
             .replace(/{{vendedor}}/g, datos.vendedorNombre)
             .replace(/{{mes}}/g, mesNombre)
-            .replace(/{{anio}}/g, datos.anio);
+            .replace(/{{anio}}/g, datos.anio)
+            .replace(/{{cuit_emisor}}/g, String(process.env.AFIP_CUIT || '').replace(/\D/g, '') || 'No configurado');
 
         // Generar filas de la tabla
         const itemsHTML = datos.ventas.map(venta => {

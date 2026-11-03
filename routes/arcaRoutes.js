@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
-const { authenticateToken } = require('../middlewares/authMiddleware');
+const { authenticateToken, requireManager } = require('../middlewares/authMiddleware');
 const { middlewareAuditoria } = require('../middlewares/auditoriaMiddleware');
 
 // ✅ Importar controlador de integración
@@ -62,6 +62,17 @@ router.post('/solicitar-cae-batch',
 );
 
 /**
+ * Recuperación de CAE (gerente) — consulta número reservado específico
+ * POST /arca/recuperar-cae
+ */
+router.post('/recuperar-cae',
+  requireManager,
+  middlewareAuditoria({ accion: 'UPDATE', tabla: 'ventas', incluirBody: true }),
+  arcaIntegrationController.verificarARCA,
+  arcaIntegrationController.recuperarCAE
+);
+
+/**
  * ✅ HEALTH CHECK DEL SERVICIO
  * GET /arca/health
  */
@@ -78,7 +89,7 @@ router.get('/health',
  * POST /arca/facturas/consumidor-final
  */
 router.post('/facturas/consumidor-final', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearFacturaConsumidorFinal(req, res)
 );
@@ -88,7 +99,7 @@ router.post('/facturas/consumidor-final',
  * POST /arca/facturas/responsable-inscripto
  */
 router.post('/facturas/responsable-inscripto', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearFacturaResponsableInscripto(req, res)
 );
@@ -213,7 +224,7 @@ router.post('/generar-qr', async (req, res) => {
  * }
  */
 router.post('/notas-credito/tipo-a', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearNotaCreditoA(req, res)
 );
@@ -229,7 +240,7 @@ router.post('/notas-credito/tipo-a',
  * }
  */
 router.post('/notas-credito/tipo-b', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearNotaCreditoB(req, res)
 );
@@ -246,7 +257,7 @@ router.post('/notas-credito/tipo-b',
  * }
  */
 router.post('/notas-credito', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearNotaCreditoGeneral(req, res)
 );
@@ -263,7 +274,7 @@ router.post('/notas-credito',
  * }
  */
 router.post('/notas-debito/tipo-a', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearNotaDebitoA(req, res)
 );
@@ -279,7 +290,7 @@ router.post('/notas-debito/tipo-a',
  * }
  */
 router.post('/notas-debito/tipo-b', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearNotaDebitoB(req, res)
 );
@@ -296,7 +307,7 @@ router.post('/notas-debito/tipo-b',
  * }
  */
 router.post('/notas-debito', 
-  authenticateToken,
+  requireManager,
   verificarControlador, 
   (req, res) => billingController.crearNotaDebitoGeneral(req, res)
 );

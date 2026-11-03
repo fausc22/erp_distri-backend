@@ -1,3 +1,4 @@
+const { FECHA_REPORTE_SQL } = require('../consultas/fechas');
 // Solo lectura, aislado de los repositorios usados por listados y operaciones.
 const HEADER_SQL = `
  WITH detalle AS (
@@ -8,7 +9,7 @@ const HEADER_SQL = `
    FROM ventas_cont GROUP BY venta_id
  )
  SELECT v.id, DATE_FORMAT(v.fecha, '%Y-%m-%d') AS fecha_comercial,
-   DATE_FORMAT(COALESCE(v.fecha_fiscal, v.fecha), '%Y-%m-%d') AS fecha_fiscal,
+   DATE_FORMAT(${FECHA_REPORTE_SQL}, '%Y-%m-%d') AS fecha_fiscal,
    v.numero_factura, v.tipo_doc, v.tipo_f, v.estado, v.subtotal, v.iva_total, v.total, v.exento,
    v.empleado_id, v.empleado_nombre, v.cliente_id, v.cliente_nombre, v.cliente_ciudad, v.cliente_provincia,
    v.cuenta_id, v.venta_referencia_id, v.cae_resultado,
@@ -20,15 +21,13 @@ const HEADER_SQL = `
  LEFT JOIN detalle d ON d.venta_id = v.id
  LEFT JOIN ventas vr ON vr.id = v.venta_referencia_id
  LEFT JOIN detalle dr ON dr.venta_id = vr.id
- WHERE (v.fecha_fiscal >= ? AND v.fecha_fiscal < ?)
-    OR (v.fecha_fiscal IS NULL AND v.fecha >= ? AND v.fecha < ?)
+ WHERE (${FECHA_REPORTE_SQL} >= ? AND ${FECHA_REPORTE_SQL} < ?)
     OR (v.fecha >= ? AND v.fecha < ?)
  ORDER BY v.id`;
 const LINES_SQL = `SELECT vc.id, vc.venta_id, vc.producto_id, vc.producto_nombre, vc.producto_um,
  vc.cantidad, vc.subtotal, vc.IVA AS iva
  FROM ventas_cont vc JOIN ventas v ON v.id = vc.venta_id
- WHERE (v.fecha_fiscal >= ? AND v.fecha_fiscal < ?)
- OR (v.fecha_fiscal IS NULL AND v.fecha >= ? AND v.fecha < ?)
+ WHERE ${FECHA_REPORTE_SQL} >= ? AND ${FECHA_REPORTE_SQL} < ?
  ORDER BY vc.id`;
 async function readReport(connection, p) {
   await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
@@ -42,8 +41,8 @@ async function readReport(connection, p) {
     const range = [p.anterior.desde, p.fin_exclusivo];
     const current = [p.desde, p.fin_exclusivo];
     // Secuencial sobre la misma conexión: una sola fotografía InnoDB.
-    const documents = await read(HEADER_SQL, [...range, ...range, ...range]);
-    const lines = await read(LINES_SQL, [...current, ...current]);
+    const documents = await read(HEADER_SQL, [...range, ...range]);
+    const lines = await read(LINES_SQL, current);
     const purchases = await read(
       `SELECT id, total, estado, cuenta_id, DATE_FORMAT(fecha,'%Y-%m-%d') AS fecha FROM compras WHERE fecha >= ? AND fecha < ?`,
       current

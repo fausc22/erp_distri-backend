@@ -1,0 +1,92 @@
+[
+  {
+    "nombre": "formula_critica_250_por_3",
+    "input": {
+      "regla_version": "v1",
+      "lineas": [{ "linea_id": "1", "precio_int": "2500000", "cantidad_int": "3000", "alicuota_id": 3 }]
+    },
+    "expected": { "ok": true, "neto": "750", "iva": "0", "total": "750" }
+  },
+  {
+    "nombre": "linea_neta_half_up_fraccion",
+    "input": {
+      "regla_version": "v1",
+      "lineas": [{ "linea_id": "1", "precio_int": "1333333", "cantidad_int": "1500", "alicuota_id": 3 }]
+    },
+    "expected": { "ok": true, "neto": "200", "iva": "0", "total": "200" }
+  },
+  {
+    "nombre": "iva_21_base_100",
+    "input": {
+      "regla_version": "v1",
+      "lineas": [{ "linea_id": "1", "precio_int": "100000000", "cantidad_int": "1000", "alicuota_id": 5 }]
+    },
+    "expected": { "ok": true, "neto": "10000", "iva": "2100", "total": "12100" }
+  },
+  {
+    "nombre": "descuento_linea_10_pct",
+    "input": {
+      "regla_version": "v1",
+      "lineas": [
+        {
+          "linea_id": "1",
+          "precio_int": "100000000",
+          "cantidad_int": "1000",
+          "alicuota_id": 5,
+          "descuento_linea_pct": "1000"
+        }
+      ]
+    },
+    "expected": { "ok": true, "neto": "9000", "iva": "1890", "total": "10890" }
+  },
+  {
+    "nombre": "descuento_porcentaje_multi_alicuota",
+    "input": {
+      "regla_version": "v1",
+      "descuento_global_pct": "500",
+      "lineas": [
+        { "linea_id": "1", "precio_int": "100000000", "cantidad_int": "1000", "alicuota_id": 5 },
+        {
+          "linea_id": "2",
+          "precio_int": "50000000",
+          "cantidad_int": "2000",
+          "alicuota_id": 4,
+          "descuento_linea_pct": "1000"
+        }
+      ]
+    },
+    "expected": { "ok": true, "neto": "18050", "iva": "2893", "total": "20943" }
+  },
+  {
+    "nombre": "descuento_fijo_residuo_exento",
+    "input": {
+      "regla_version": "v1",
+      "descuento_global_fijo_centavos": "1",
+      "lineas": [
+        { "linea_id": "1", "precio_int": "1000000", "cantidad_int": "1000", "alicuota_id": 3 },
+        { "linea_id": "2", "precio_int": "1000000", "cantidad_int": "1000", "alicuota_id": 3 },
+        { "linea_id": "3", "precio_int": "1000000", "cantidad_int": "1000", "alicuota_id": 3 }
+      ]
+    },
+    "expected": { "ok": true, "neto": "299", "iva": "0", "total": "299" }
+  },
+  {
+    "nombre": "descuento_fijo_no_representable_21",
+    "input": {
+      "regla_version": "v1",
+      "descuento_global_fijo_centavos": "20",
+      "lineas": [{ "linea_id": "1", "precio_int": "1000000", "cantidad_int": "1000", "alicuota_id": 5 }]
+    },
+    "expected": { "ok": false, "code": "COMBINACION_NO_REPRESENTABLE", "diferencia_no_representable": "1" }
+  },
+  {
+    "nombre": "exento_no_acreditado",
+    "input": {
+      "regla_version": "v1",
+      "tratamiento_exento": true,
+      "acreditado": false,
+      "lineas": [{ "linea_id": "1", "precio_int": "1000000", "cantidad_int": "1000", "alicuota_id": 3 }]
+    },
+    "expected": { "ok": false, "code": "HABILITACION_NO_DISPONIBLE" }
+  }
+]

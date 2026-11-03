@@ -6,7 +6,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "discord-resumen": "node scripts/discord-resumen-diario.js",
-    "test": "node utils/rounding.test.js && node utils/notaPedidoPdf.test.js && node tests/compras.registrarCompra.test.js && node tests/pedidos.nuevoPedido.test.js && node tests/ventas.facturarPedido.test.js && node tests/finanzas.transferencia.test.js && node tests/read.consistency.test.js && node tests/concurrency.guards.test.js && node tests/db.pagination.test.js && node tests/finanzas.consistency.test.js && node tests/ping.cors.test.js",
+    "test": "node utils/rounding.test.js && node utils/notaPedidoPdf.test.js && node tests/compras.registrarCompra.test.js && node tests/pedidos.nuevoPedido.test.js && node tests/ventas.facturarPedido.test.js && node tests/finanzas.transferencia.test.js && node tests/read.consistency.test.js && node tests/concurrency.guards.test.js && node tests/db.pagination.test.js && node tests/finanzas.consistency.test.js && node tests/ping.cors.test.js && node tests/e1_contencion.test.js && node tests/e2_schema.test.js && node tests/e5_notas.test.js && node tests/e2_coordinator.test.js && node tests/e3_consultas.test.js && node tests/dominio.calculo.v1.test.js && node tests/e4_fiscal_v2.test.js && node tests/motor.autoridad.v1.test.js && node tests/fiscal.serie.identidad.test.js && node tests/mysql.integracion.bloques.test.js && node tests/integracion.idempotencia.alertas.test.js",
     "test:ping-cors": "node tests/ping.cors.test.js",
     "verify:pwa-offline": "node scripts/verify-pwa-offline-release.mjs",
     "test:nota-pedido": "node utils/notaPedidoPdf.test.js",
@@ -14,7 +14,8 @@
     "test:arca-homo": "node arca-microservice/scripts/smoke-arca-homo.mjs",
     "postinstall": "patch-package",
     "test:reportes": "node --test tests/reportesV2.test.js tests/reportesV2.http.test.js tests/reportesV2.mysql.test.js tests/reportesV2.pdf.test.js",
-    "test:reportes-ui": "node --test tests/reportesV2.browser.test.js"
+    "test:reportes-ui": "node --test tests/reportesV2.browser.test.js",
+    "test:conexiones": "node tests/conexionesFinales.unit.test.js && node tests/conexionesFinales.mysql.test.js"
   },
   "keywords": [
     "api",

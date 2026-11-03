@@ -239,6 +239,7 @@ const solicitarCAE = async (req, res) => {
   let lockAcquired = false;
   let lockConnection = null;
   let intentoId = null;
+  let serieClaveActiva = null;
   const inicioSolicitudMs = Date.now();
   
   console.log(`\n╔══════════════════════════════════════════╗`);
@@ -284,6 +285,44 @@ const solicitarCAE = async (req, res) => {
         success: false,
         message: 'Esta venta ya tiene un CAE asignado',
         cae: venta.cae_id
+      });
+    }
+
+    // Contención E1: bloquear reintentos con intento EN_PROCESO
+    const [intentosAbiertos] = await db.execute(
+      `
+      SELECT id, estado, fecha_solicitud
+      FROM arca_solicitudes_log
+      WHERE venta_id = ? AND estado = 'EN_PROCESO'
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [ventaId]
+    );
+    if (intentosAbiertos.length > 0) {
+      const intento = intentosAbiertos[0];
+      const edadMs = Date.now() - new Date(intento.fecha_solicitud).getTime();
+      if (edadMs <= 65000) {
+        return res.status(409).json({
+          success: false,
+          error: 'IN_PROGRESS',
+          message: 'Ya hay una solicitud de CAE en curso para esta venta',
+          intentoId: intento.id
+        });
+      }
+      await db.execute(
+        `UPDATE arca_solicitudes_log SET estado = 'DESCONOCIDO', mensaje_error = ? WHERE id = ?`,
+        [
+          'Marcado DESCONOCIDO por reintento tras EN_PROCESO > 65s (resultado no confirmado; requiere recuperación)',
+          intento.id
+        ]
+      );
+      return res.status(409).json({
+        success: false,
+        error: 'RECOVERY_REQUIRED',
+        requiere_recuperacion: true,
+        message: 'Existe un intento previo con resultado desconocido. Se requiere recuperación antes de reemitir.',
+        intentoId: intento.id
       });
     }
     
@@ -623,41 +662,42 @@ const solicitarCAE = async (req, res) => {
       }
     }
     
-    const subtotalDetalle = roundFacturacion(productosRows.reduce((acc, prod) => acc + (parseFloat(prod.subtotal) || 0), 0));
-    const ivaDetalle = roundFacturacion(productosRows.reduce((acc, prod) => acc + (parseFloat(prod.iva) || 0), 0));
+    // Fuente única: cabecera persistida (incluye descuentos). No sustituir por suma de líneas.
+    const subtotalDetalle = roundFacturacion(
+      productosRows.reduce((acc, prod) => acc + (parseFloat(prod.subtotal) || 0), 0)
+    );
+    const ivaDetalle = roundFacturacion(
+      productosRows.reduce((acc, prod) => acc + (parseFloat(prod.iva) || 0), 0)
+    );
 
-    const subtotalVenta = Number.isFinite(parseFloat(venta.subtotal))
+    const subtotalFinal = Number.isFinite(parseFloat(venta.subtotal))
       ? roundFacturacion(parseFloat(venta.subtotal))
       : subtotalDetalle;
-    const ivaVenta = Number.isFinite(parseFloat(venta.iva_total))
+    const ivaFinal = Number.isFinite(parseFloat(venta.iva_total))
       ? roundFacturacion(parseFloat(venta.iva_total))
       : ivaDetalle;
     const exentoVentaCabecera = Number.isFinite(parseFloat(venta.exento))
       ? roundFacturacion(parseFloat(venta.exento))
       : 0;
 
-    const divergeCabeceraDetalle =
-      Math.abs(subtotalDetalle - subtotalVenta) > 1 ||
-      Math.abs(ivaDetalle - ivaVenta) > 1;
-
-    const subtotalFinal =
-      Math.abs(subtotalDetalle - subtotalVenta) > 1 ? subtotalDetalle : subtotalVenta;
-    const ivaFinal =
-      Math.abs(ivaDetalle - ivaVenta) > 1 ? ivaDetalle : ivaVenta;
-
-    if (subtotalFinal !== subtotalVenta || ivaFinal !== ivaVenta) {
+    if (
+      Math.abs(subtotalDetalle - subtotalFinal) > 0.005 ||
+      Math.abs(ivaDetalle - ivaFinal) > 0.005
+    ) {
       console.warn(
-        `⚠️ [ARCA] Divergencia corregida en venta ${ventaId}: usando suma de detalle. ` +
-          `cabecera(subtotal=${subtotalVenta}, iva=${ivaVenta}) → detalle(subtotal=${subtotalFinal}, iva=${ivaFinal})`
+        `⚠️ [ARCA] Cabecera ≠ suma de líneas (p.ej. dto global). Se envía cabecera. ` +
+          `venta ${ventaId}: cabecera(subtotal=${subtotalFinal}, iva=${ivaFinal}) ` +
+          `líneas(subtotal=${subtotalDetalle}, iva=${ivaDetalle})`
       );
     }
 
     const impOpExExento = clienteEsExento
       ? (exentoVentaCabecera > 0 ? exentoVentaCabecera : ivaFinal)
       : 0;
-    const totalVenta = roundFacturacion(
-      subtotalFinal + (clienteEsExento ? impOpExExento : ivaFinal)
-    );
+    // Total = ventas.total guardado. Si falta, reconstruir desde cabecera (no desde líneas).
+    let totalVenta = Number.isFinite(parseFloat(venta.total))
+      ? roundFacturacion(parseFloat(venta.total))
+      : roundFacturacion(subtotalFinal + (clienteEsExento ? impOpExExento : ivaFinal));
 
     const datosFactura = {
       tipoComprobante: tipoComprobante,
@@ -671,20 +711,17 @@ const solicitarCAE = async (req, res) => {
       fecha: fechaFormateada,
       moneda: 'PES',
       cotizacionMoneda: 1,
-      // ✅ Importes reconciliados (detalle si cabecera diverge > $1)
-      // Exento: todo el total en impNeto (alícuota 0%), impOpEx=0 — compatible con SDK @arcasdk/core
+      // Exento: total en impNeto (alícuota 0%), impOpEx=0 — compatible con SDK @arcasdk/core
       impNeto: clienteEsExento ? totalVenta : subtotalFinal,
       impIVA: clienteEsExento ? 0 : ivaFinal,
       impOpEx: 0,
       impTotal: totalVenta,
-      // ✅ Usar el número obtenido desde ARCA (no el de la BD)
       puntoVenta: parseInt(puntoVentaARCA) || 1,
-      // ✅ Agregar comprobantes asociados si es una nota
       comprobantesAsociados: comprobantesAsociados,
-      // ✅ Para notas, pasar el número de comprobante que ya tenemos (no que lo obtenga ARCA)
       numeroComprobante: esNota ? numeroARCA : undefined
     };
 
+    let promesaArca = null;
     const [intentoInsertResult] = await db.execute(
       `
       INSERT INTO arca_solicitudes_log
@@ -695,6 +732,7 @@ const solicitarCAE = async (req, res) => {
       [ventaId, JSON.stringify(datosFactura), 'EN_PROCESO']
     );
     intentoId = intentoInsertResult?.insertId || null;
+    serieClaveActiva = null;
     
     console.log('✅ Datos preparados para ARCA');
     if (esNota && comprobantesAsociados.length > 0) {
@@ -723,10 +761,47 @@ const solicitarCAE = async (req, res) => {
       statusCode: 200,
       jsonData: null
     };
+
+    promesaArca = billingController.crearFactura(mockReq, mockRes);
+    const intentoIdCapturado = intentoId;
+    // Respuesta tardía: solo actualizar log (sin fiscalV2 / series).
+    promesaArca.then(async () => {
+      if (!intentoIdCapturado || !mockRes.jsonData) return;
+      try {
+        const ok = Boolean(mockRes.jsonData.success);
+        await db.execute(
+          `UPDATE arca_solicitudes_log
+           SET response_data = ?, estado = ?, mensaje_error = ?
+           WHERE id = ? AND estado IN ('EN_PROCESO','DESCONOCIDO')`,
+          [
+            JSON.stringify(mockRes.jsonData),
+            ok ? 'EXITOSO' : 'ERROR',
+            ok ? null : (mockRes.jsonData.message || 'Respuesta tardía con error'),
+            intentoIdCapturado
+          ]
+        );
+      } catch (lateErr) {
+        console.warn('⚠️ No se pudo persistir respuesta tardía ARCA:', lateErr.message);
+      }
+    }).catch(async (lateErr) => {
+      try {
+        if (!intentoIdCapturado) return;
+        await db.execute(
+          `UPDATE arca_solicitudes_log
+           SET response_data = ?, estado = 'DESCONOCIDO', mensaje_error = ?
+           WHERE id = ? AND estado IN ('EN_PROCESO','DESCONOCIDO')`,
+          [
+            JSON.stringify({ error: String(lateErr && lateErr.message) }),
+            (lateErr && lateErr.message) || 'Error tardío',
+            intentoIdCapturado
+          ]
+        );
+      } catch (_) { /* ignore */ }
+    });
     
     console.log(`⏳ Esperando respuesta de ARCA/AFIP (timeout ${AFIP_CREATE_TIMEOUT_MS / 1000}s)...`);
     await withTimeout(
-      billingController.crearFactura(mockReq, mockRes),
+      promesaArca,
       AFIP_CREATE_TIMEOUT_MS,
       `Timeout (${AFIP_CREATE_TIMEOUT_MS / 1000}s) esperando respuesta de ARCA/AFIP. Los servidores de AFIP no respondieron a tiempo; reintente en unos minutos.`
     );
@@ -749,6 +824,7 @@ const solicitarCAE = async (req, res) => {
         [JSON.stringify(responseARCA), 'EXITOSO', tiempoRespuesta, intentoId]
       );
     }
+    // NO liberar serie aquí: recién después de persistir CAE en ventas (paso 6).
     
     console.log('✅ Respuesta de ARCA recibida');
     console.log('🔍 Estructura respuesta:', JSON.stringify(responseARCA.data, null, 2));
@@ -800,10 +876,13 @@ const solicitarCAE = async (req, res) => {
     // ============================================
     console.log('\n💾 Paso 6: Guardando CAE en la base de datos...');
     
-    const fechaFiscalSql = arcaFechaToSqlDate(fechaFormateada);
-    const updateQuery = `
-      UPDATE ventas 
-      SET 
+    const fechaFiscalSql = arcaFechaToSqlDate(
+      datosRespuesta?.datosARCA?.CbteFch || fechaFormateada
+    );
+    await db.execute(
+      `
+      UPDATE ventas
+      SET
         cae_id = ?,
         cae_fecha = ?,
         cae_resultado = ?,
@@ -811,18 +890,18 @@ const solicitarCAE = async (req, res) => {
         fecha_fiscal = IF(? IS NOT NULL, ?, fecha_fiscal),
         importe_afip = ?
       WHERE id = ?
-    `;
-    
-    await db.execute(updateQuery, [
-      cae,
-      caeVencimiento,
-      caeResultado,
-      fechaFiscalSql,
-      fechaFiscalSql,
-      impTotalAfip,
-      ventaId
-    ]);
-    
+      `,
+      [
+        cae,
+        caeVencimiento,
+        caeResultado,
+        fechaFiscalSql,
+        fechaFiscalSql,
+        impTotalAfip,
+        ventaId
+      ]
+    );
+
     console.log(`\n╔══════════════════════════════════════════╗`);
     console.log(`║  ✅ CAE OBTENIDO Y GUARDADO EXITOSAMENTE  ║`);
     console.log(`╚══════════════════════════════════════════╝`);
@@ -990,17 +1069,31 @@ const solicitarCAE = async (req, res) => {
     if (intentoId) {
       try {
         const tiempoRespuesta = Date.now() - inicioSolicitudMs;
+        const esTimeout = error.code === 'RECOVERY_REQUIRED' || /timeout/i.test(error.message || '');
+        const estadoLog = esTimeout ? 'DESCONOCIDO' : 'ERROR';
+        // Preservar el mensaje real de ARCA/timeout (no reemplazar por genérico)
+        const mensajeReal = (error.message || 'Error sin mensaje').substring(0, 65535);
         await db.execute(
           `
           UPDATE arca_solicitudes_log
           SET estado = ?, mensaje_error = ?, tiempo_respuesta = ?
           WHERE id = ?
           `,
-          ['ERROR', (error.message || 'Error sin mensaje').substring(0, 65535), tiempoRespuesta, intentoId]
+          [estadoLog, mensajeReal, tiempoRespuesta, intentoId]
         );
       } catch (logError) {
         console.warn('⚠️  No se pudo registrar error en arca_solicitudes_log:', logError.message);
       }
+    }
+
+    if (error.code === 'RECOVERY_REQUIRED' || /timeout/i.test(error.message || '')) {
+      return res.status(409).json({
+        success: false,
+        error: 'RECOVERY_REQUIRED',
+        requiere_recuperacion: true,
+        message: error.message,
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
     }
     
     res.status(500).json({
@@ -1151,6 +1244,116 @@ const solicitarCAEBatch = async (req, res) => {
 };
 
 /**
+ * Recuperación clásica: si el log ya tiene respuesta EXITOSA con CAE y la venta aún no,
+ * aplica ese CAE sobre la cabecera. Sin tablas de migraciones / reserva de serie.
+ * POST /arca/recuperar-cae  body: { ventaId }
+ */
+const recuperarCAE = async (req, res) => {
+  const { ventaId } = req.body || {};
+  if (!ventaId) {
+    return res.status(400).json({ success: false, message: 'ventaId requerido' });
+  }
+  try {
+    const [ventasRows] = await db.execute(
+      'SELECT id, cae_id, total, numero_factura, tipo_f, tipo_doc FROM ventas WHERE id = ? LIMIT 1',
+      [ventaId]
+    );
+    const venta = ventasRows?.[0];
+    if (!venta) {
+      return res.status(404).json({ success: false, message: 'Venta inexistente' });
+    }
+    if (venta.cae_id && String(venta.cae_id).trim() !== '') {
+      return res.json({
+        success: true,
+        existing: true,
+        message: 'La venta ya tiene CAE',
+        data: { ventaId, cae: venta.cae_id, numero: venta.numero_factura }
+      });
+    }
+
+    const [intentos] = await db.execute(
+      `SELECT * FROM arca_solicitudes_log
+       WHERE venta_id = ?
+         AND estado IN ('EXITOSO', 'EN_PROCESO', 'DESCONOCIDO')
+       ORDER BY id DESC LIMIT 1`,
+      [ventaId]
+    );
+    if (!intentos.length) {
+      return res.status(404).json({
+        success: false,
+        error: 'SIN_INTENTO_PENDIENTE',
+        message: 'No hay intento en log para recuperar'
+      });
+    }
+    const intento = intentos[0];
+    const responseData = typeof intento.response_data === 'string'
+      ? JSON.parse(intento.response_data || 'null')
+      : (intento.response_data || null);
+    const requestData = typeof intento.request_data === 'string'
+      ? JSON.parse(intento.request_data || '{}')
+      : (intento.request_data || {});
+
+    const autorizacion = responseData?.data?.autorizacion || responseData?.autorizacion || {};
+    const cae = autorizacion.cae || responseData?.data?.cae || responseData?.cae;
+    const caeVencimiento = autorizacion.fechaVencimiento || autorizacion.caeFechaVto || null;
+    const caeResultado = autorizacion.resultado || 'A';
+    const impTotalAfipRaw =
+      responseData?.data?.importes?.total ??
+      responseData?.importes?.total ??
+      requestData.impTotal;
+    const impTotalAfip = Number.isFinite(parseFloat(impTotalAfipRaw))
+      ? Math.round(parseFloat(impTotalAfipRaw) * 100) / 100
+      : parseFloat(venta.total);
+
+    if (!cae) {
+      return res.status(409).json({
+        success: false,
+        error: 'SIN_CAE_EN_LOG',
+        message: 'El intento no tiene CAE en response_data; no se puede recuperar sin reemitir',
+        intentoId: intento.id,
+        estado: intento.estado
+      });
+    }
+
+    const fechaFiscalSql = arcaFechaToSqlDate(
+      responseData?.data?.datosARCA?.CbteFch || requestData.fecha
+    );
+    const caeFechaSql = arcaFechaToSqlDate(caeVencimiento) || caeVencimiento;
+
+    await db.execute(
+      `UPDATE ventas
+       SET cae_id = ?,
+           cae_fecha = ?,
+           cae_resultado = ?,
+           cae_solicitud_fecha = NOW(),
+           fecha_fiscal = IF(? IS NOT NULL, ?, fecha_fiscal),
+           importe_afip = ?
+       WHERE id = ? AND (cae_id IS NULL OR TRIM(cae_id) = '')`,
+      [String(cae), caeFechaSql, caeResultado, fechaFiscalSql, fechaFiscalSql, impTotalAfip, ventaId]
+    );
+    await db.execute(
+      `UPDATE arca_solicitudes_log SET estado = 'EXITOSO' WHERE id = ?`,
+      [intento.id]
+    );
+
+    return res.json({
+      success: true,
+      message: 'CAE recuperado desde log y aplicado a la venta',
+      data: {
+        ventaId,
+        cae: String(cae),
+        intentoId: intento.id,
+        importe_autorizado: impTotalAfip,
+        importe_cabecera: parseFloat(venta.total)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error en recuperarCAE:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * ✅ HEALTH CHECK DEL SERVICIO ARCA
  * GET /arca/health
  */
@@ -1203,5 +1406,6 @@ module.exports = {
   verificarARCA,
   solicitarCAE,
   solicitarCAEBatch,
+  recuperarCAE,
   healthCheck
 };

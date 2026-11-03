@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS arca_autorizaciones_canonicas (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  venta_id INT NULL,
+  intento_id INT NULL,
+  emisor_cuit VARCHAR(20) NOT NULL,
+  entorno ENUM('homologacion','produccion') NOT NULL,
+  cbte_tipo SMALLINT NOT NULL,
+  pto_vta SMALLINT NOT NULL,
+  cbte_nro INT NOT NULL,
+  cae VARCHAR(20) NULL,
+  cae_vencimiento DATE NULL,
+  fecha_emision DATE NULL,
+  imp_total DECIMAL(15,2) NULL,
+  moneda_id VARCHAR(10) NULL,
+  resultado_json JSON NULL,
+  evidencia_json JSON NULL,
+  creado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_arca_autorizacion_identidad (emisor_cuit, entorno, cbte_tipo, pto_vta, cbte_nro),
+  KEY idx_arca_autorizacion_venta (venta_id),
+  KEY idx_arca_autorizacion_cae (cae)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
