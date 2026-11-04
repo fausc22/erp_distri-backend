@@ -42,7 +42,6 @@ const listadosRoutes = require('./routes/listadosRoutes');
 const notasRoutes = require('./routes/notasRoutes');
 const scriptsRoutes = require('./routes/scriptsRoutes');
 const alertasRoutes = require('./routes/alertasRoutes');
-const cortesRoutes = require('./routes/cortesRoutes');
 
 
 // ==============================================
@@ -388,7 +387,6 @@ app.use('/listados', listadosRoutes);
 app.use('/notas', notasRoutes);
 app.use('/scripts', scriptsRoutes);
 app.use('/alertas', alertasRoutes);
-app.use('/cortes', cortesRoutes);
 app.use('/', scriptsRoutes);
 
 

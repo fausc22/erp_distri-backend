@@ -5,14 +5,9 @@ class VentasRepository extends BaseRepository {
     return this.query('SELECT * FROM ventas ORDER BY fecha DESC, id DESC', [], connection);
   }
 
-  verificarVentaExistentePorPedidoId(conn, pedidoId) {
-    const sql = `
-      SELECT id, numero_factura, fecha, cliente_nombre, total, tipo_f, estado, pedido_id
-      FROM ventas
-      WHERE pedido_id = ?
-      LIMIT 1
-    `;
-    return this.queryOne(sql, [pedidoId], conn);
+  verificarVentaExistentePorPedidoId(_conn, _pedidoId) {
+    // ventas.pedido_id pertenece a una migración no aplicada. No consultar esa columna.
+    return null;
   }
 
   verificarVentaExistentePorPedido(conn, pedidoId) {

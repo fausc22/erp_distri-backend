@@ -21,14 +21,12 @@ function validarVistaPrevia(resolucion, totalMostrado) {
     err.statusCode = 422; err.code = 'PREVIEW_DESACTUALIZADA'; throw err;
   }
 }
-async function cargarCalculo(connection, ventaId) {
-  const result = await connection.query(
-    `SELECT resultado_json FROM venta_calculos WHERE venta_id = ? AND aplicacion = 'AUTORITATIVO' AND ok = 1`, [ventaId]);
-  const rows = Array.isArray(result[0]) ? result[0] : result;
-  if (rows.length > 1) throw new Error('Más de un cálculo autoritativo para la venta');
-  if (!rows.length) return null;
-  const raw = rows[0].resultado_json;
-  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+/**
+ * Cálculo autoritativo (venta_calculos) — desconectado.
+ * La vía operativa usa cabecera persistida; no exige migraciones M013+.
+ */
+async function cargarCalculo(_connection, _ventaId) {
+  return null;
 }
 function validarDocumento(venta, productos, calculo) {
   if (!calculo) return;
