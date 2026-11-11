@@ -3,7 +3,7 @@ const pdfGenerator = require('../utils/pdfGenerator');
 const { auditarOperacion } = require('../middlewares/auditoriaMiddleware');
 const { resolvePorcentajeIva } = require('../utils/rounding');
 const { fetchProyeccion } = require('../consultas/proyeccion');
-const { libroIvaRevision, sumMoneyField } = require('../consultas/vistas');
+const { libroIvaRevision, sumMoneyField, compararFilasLibroIva } = require('../consultas/vistas');
 
 /** Excluye productos cuyo nombre contiene "flete" (servicios internos, no mercadería de listados). */
 const SQL_EXCLUIR_FLETE_PRODUCTO = `AND UPPER(p.nombre) NOT LIKE '%FLETE%'`;
@@ -94,8 +94,13 @@ const generarPdfLibroIva = async (req, res) => {
             return {
                 // Día comercial del comprobante (mismo criterio que el filtro del mes).
                 fecha: venta.fecha_comercial || venta.fecha_revision || venta.fecha_fiscal_acreditada,
+                fecha_comercial: venta.fecha_comercial || venta.fecha_revision || venta.fecha_fiscal_acreditada,
                 comprobante: nombreComprobante,
                 numero: venta.numero_factura || '-',
+                numero_factura: venta.numero_factura || '-',
+                tipo_doc: venta.tipo_doc || 'FACTURA',
+                tipo_f: venta.tipo_f || '',
+                venta_id: venta.venta_id || venta.id,
                 cliente: venta.cliente_nombre || 'Sin nombre',
                 cuit: venta.cliente_cuit || '-',
                 condicionIva: (venta.cliente_condicion || 'Sin especificar').toString().trim(),
@@ -108,7 +113,8 @@ const generarPdfLibroIva = async (req, res) => {
             };
         };
 
-        const ventasFormateadas = acreditados.map(formatearFila);
+        // Fecha ASC + tipo + número ASC (presentación al ente).
+        const ventasFormateadas = acreditados.map(formatearFila).sort(compararFilasLibroIva);
 
         const sumSeccion = (filas) => ({
             ...Object.fromEntries(['neto','exento','iva','percepciones','retenciones','total']

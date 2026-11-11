@@ -2,13 +2,9 @@ const { cargarCalculo, validarDocumento } = require('../dominio/calculo/document
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 const QRCode = require('qrcode');
 const db = require('../db/legacyAdapter');
 const { resolvePorcentajeIvaLinea } = require('./rounding');
-
-// URL del microservicio ARCA (desde .env)
-const ARCA_MICROSERVICE_URL = process.env.ARCA_MICROSERVICE_URL;
 
 class PdfGenerator {
     constructor() {
@@ -262,71 +258,122 @@ class PdfGenerator {
         };
     }
 
-    async generatePdfFromHtml(htmlContent, options = {}) {
+    construirLaunchOptions(pdfOptions = null) {
+        const options = pdfOptions || this.getOptions();
+        const launchOptions = {
+            headless: 'new',
+            args: options.args || [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage'
+            ]
+        };
+
+        if (options.executablePath && fs.existsSync(options.executablePath)) {
+            launchOptions.executablePath = options.executablePath;
+            console.log(`✅ Usando Chrome del sistema: ${options.executablePath}`);
+        }
+
+        return launchOptions;
+    }
+
+    async aplicarViewportPdf(page) {
+        // Viewport A4 para que mm/CSS se interpreten bien (210×297mm ≈ 794×1123px @96dpi)
+        await page.setViewport({
+            width: 794,
+            height: 1123,
+            deviceScaleFactor: 2
+        });
+    }
+
+    async abrirSesionPdf() {
+        const browser = await puppeteer.launch(this.construirLaunchOptions());
+        const page = await browser.newPage();
+        await this.aplicarViewportPdf(page);
+        return { browser, page };
+    }
+
+    async cerrarSesionPdf(sesion) {
+        if (!sesion?.browser) return;
+        try {
+            await sesion.browser.close();
+        } catch (error) {
+            console.error('❌ Error cerrando sesión PDF:', error.message);
+        }
+    }
+
+    async reiniciarPaginaSesion(sesion) {
+        if (!sesion?.browser) return;
+        if (sesion.page) {
+            try {
+                await sesion.page.close();
+            } catch (_) {
+                // La página puede estar ya cerrada tras el error
+            }
+        }
+        sesion.page = await sesion.browser.newPage();
+        await this.aplicarViewportPdf(sesion.page);
+    }
+
+    opcionesPdfPagina(pdfOptions) {
+        return {
+            format: pdfOptions.format || 'A4',
+            printBackground: pdfOptions.printBackground !== false,
+            margin: pdfOptions.margin || {
+                top: '8mm',
+                right: '6mm',
+                bottom: '8mm',
+                left: '6mm'
+            }
+        };
+    }
+
+    async generatePdfFromHtml(htmlContent, options = {}, sesion = null) {
         let browser = null;
         try {
             const environment = process.env.NODE_ENV === 'production' ? 'PRODUCCIÓN' : 'DESARROLLO';
             console.log(`🔧 Generando PDF con Puppeteer (${environment})...`);
 
             htmlContent = this.inyectarLogoEmpresa(htmlContent);
-            
             const pdfOptions = this.getOptions(options);
-            
-            // Configurar Puppeteer
-            const launchOptions = {
-                headless: 'new',
-                args: pdfOptions.args || [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage'
-                ]
-            };
+            const pagePdfOptions = this.opcionesPdfPagina(pdfOptions);
+            const contentTimeout = pdfOptions.timeout || 30000;
 
-            // Usar Chrome del sistema si está disponible (macOS)
-            if (pdfOptions.executablePath && fs.existsSync(pdfOptions.executablePath)) {
-                launchOptions.executablePath = pdfOptions.executablePath;
-                console.log(`✅ Usando Chrome del sistema: ${pdfOptions.executablePath}`);
+            if (sesion) {
+                try {
+                    await sesion.page.setContent(htmlContent, {
+                        waitUntil: 'load',
+                        timeout: contentTimeout
+                    });
+                    const pdfBuffer = await sesion.page.pdf(pagePdfOptions);
+                    console.log(`✅ PDF generado exitosamente - Tamaño: ${pdfBuffer.length} bytes`);
+                    return pdfBuffer;
+                } catch (error) {
+                    await this.reiniciarPaginaSesion(sesion);
+                    throw error;
+                }
             }
-            
-            // Lanzar navegador
-            browser = await puppeteer.launch(launchOptions);
+
+            browser = await puppeteer.launch(this.construirLaunchOptions(pdfOptions));
             const page = await browser.newPage();
-            
-            // Viewport A4 para que mm/CSS se interpreten bien (210×297mm ≈ 794×1123px @96dpi)
-            await page.setViewport({
-                width: 794,
-                height: 1123,
-                deviceScaleFactor: 2
-            });
-            
-            // Configurar contenido HTML
+            await this.aplicarViewportPdf(page);
+
             await page.setContent(htmlContent, {
                 waitUntil: 'networkidle0',
-                timeout: pdfOptions.timeout || 30000
+                timeout: contentTimeout
             });
-            
-            // Generar PDF
-            const pdfBuffer = await page.pdf({
-                format: pdfOptions.format || 'A4',
-                printBackground: pdfOptions.printBackground !== false,
-                margin: pdfOptions.margin || {
-                    top: '8mm',
-                    right: '6mm',
-                    bottom: '8mm',
-                    left: '6mm'
-                }
-            });
-            
+
+            const pdfBuffer = await page.pdf(pagePdfOptions);
+
             await browser.close();
             browser = null;
-            
+
             console.log(`✅ PDF generado exitosamente - Tamaño: ${pdfBuffer.length} bytes`);
             return pdfBuffer;
-            
+
         } catch (error) {
             console.error('❌ Error generando PDF:', error.message);
-            
-            // Cerrar navegador si quedó abierto
+
             if (browser) {
                 try {
                     await browser.close();
@@ -334,7 +381,7 @@ class PdfGenerator {
                     // Ignorar errores al cerrar
                 }
             }
-            
+
             throw error;
         }
     }
@@ -380,132 +427,14 @@ class PdfGenerator {
     }
 
     async generarQRDesdeARCA(venta) {
-        try {
-            console.log(`🔍 Generando QR según especificaciones ARCA para venta ${venta.id}...`);
-            
-            // ✅ MAPEO DE TIPOS DE COMPROBANTE SEGÚN ARCA
-            // Detectar si es una nota
-            const esNota = venta.tipo_doc === 'NOTA_DEBITO' || venta.tipo_doc === 'NOTA_CREDITO';
-            
-            let tipoComprobante;
-            if (esNota) {
-                const esNotaDebito = venta.tipo_doc === 'NOTA_DEBITO';
-                if (venta.tipo_f === 'A') {
-                    tipoComprobante = esNotaDebito ? 2 : 3; // NOTA_DEBITO_A: 2, NOTA_CREDITO_A: 3
-                } else if (venta.tipo_f === 'B') {
-                    tipoComprobante = esNotaDebito ? 7 : 8; // NOTA_DEBITO_B: 7, NOTA_CREDITO_B: 8
-                } else {
-                    tipoComprobante = esNotaDebito ? 7 : 8; // Default a tipo B
-                }
-            } else {
-                const tipoComprobanteMap = { 
-                    'A': 1,   // Factura A
-                    'B': 6,   // Factura B
-                    'C': 11   // Factura C
-                };
-                tipoComprobante = tipoComprobanteMap[venta.tipo_f] || 6;
-            }
-            
-            // ✅ TIPO DE DOCUMENTO RECEPTOR
-            let tipoDocReceptor = 99; // Por defecto: Sin identificar
-            let nroDocReceptor = 0;
-            
-            if (venta.cliente_cuit) {
-                const cuitLimpio = venta.cliente_cuit.replace(/[^0-9]/g, '');
-                if (cuitLimpio.length === 11) {
-                    tipoDocReceptor = 80; // CUIT
-                    nroDocReceptor = parseInt(cuitLimpio);
-                } else if (cuitLimpio.length >= 7 && cuitLimpio.length <= 8) {
-                    tipoDocReceptor = 96; // DNI
-                    nroDocReceptor = parseInt(cuitLimpio);
-                }
-            }
-
-            // ✅ FORMATEAR FECHA SEGÚN RFC3339 (YYYY-MM-DD)
-            const fechaFormateada = this.formatearFechaFiscalQR(venta);
-            if (!fechaFormateada) {
-                throw new Error('No se pudo determinar fecha fiscal para QR');
-            }
-
-            // ✅ VALIDAR CAE
-            const cae = venta.cae_id;
-            if (!cae) {
-                console.warn('⚠️ Venta sin CAE, no se puede generar QR válido');
-                return this.generarQRPlaceholder();
-            }
-
-            // ✅ DESGLOSAR NÚMERO DE FACTURA/NOTA
-            let puntoVenta = 1;
-            let numeroComprobante = venta.id;
-            
-            if (venta.numero_factura) {
-                // Formato factura: "A 0004-00000001"
-                const regexFactura = /^([A-Z]+)\s+(\d{4})-(\d{8})$/;
-                // Formato nota: "0004-00001"
-                const regexNota = /^(\d{4})-(\d{5})$/;
-                
-                const matchFactura = venta.numero_factura.trim().match(regexFactura);
-                const matchNota = venta.numero_factura.trim().match(regexNota);
-                
-                if (matchFactura) {
-                    puntoVenta = parseInt(matchFactura[2]);
-                    numeroComprobante = parseInt(matchFactura[3]);
-                } else if (matchNota) {
-                    puntoVenta = parseInt(matchNota[1]);
-                    numeroComprobante = parseInt(matchNota[2]);
-                }
-            }
-            
-            // ✅ CONSTRUIR JSON SEGÚN ESPECIFICACIÓN ARCA v1
-            const datosQR = {
-                ver: 1,                                          // Versión del formato
-                fecha: fechaFormateada,                          // Fecha emisión (YYYY-MM-DD)
-                cuit: this.obtenerCuitEmisorQR(),                      // CUIT emisor (sin guiones)
-                ptoVta: puntoVenta,                               // Punto de venta
-                tipoCmp: tipoComprobante,                        // Tipo comprobante
-                nroCmp: numeroComprobante,                        // Número de comprobante
-                importe: parseFloat(venta.importe_afip ?? venta.total),                // Importe total (AFIP)
-                moneda: "PES",                                   // Moneda (PES = Pesos)
-                ctz: 1,                                          // Cotización (1 para pesos)
-                tipoDocRec: tipoDocReceptor,                     // Tipo doc receptor
-                nroDocRec: nroDocReceptor,                       // Nro doc receptor
-                tipoCodAut: "E",                                 // Tipo autorización (E = CAE)
-                codAut: parseInt(cae)                            // CAE
-            };
-
-            console.log('📋 Datos QR construidos:', JSON.stringify(datosQR, null, 2));
-
-            // ✅ SOLICITAR QR AL MICROSERVICIO
-            const response = await axios.post(
-                `${ARCA_MICROSERVICE_URL}/api/arca/generar-qr`, 
-                datosQR,
-                { timeout: 5000 }
-            );
-
-            if (response.data && response.data.qrBase64) {
-                console.log('✅ QR obtenido del microservicio ARCA correctamente');
-                console.log('🔗 URL del QR:', response.data.qrUrl);
-                return response.data.qrBase64;
-            }
-
-            throw new Error('No se recibió QR del microservicio');
-            
-        } catch (error) {
-            console.error('❌ Error generando QR desde ARCA:', error.message);
-            if (error.response) {
-                console.error('📋 Respuesta del servidor:', error.response.data);
-            }
-            
-            // ✅ GENERAR QR LOCAL SI FALLA EL MICROSERVICIO
-            console.log('🔄 Intentando generar QR localmente...');
-            return await this.generarQRLocal(venta);
-        }
+        // El microservicio no expone /api/arca/generar-qr. El QR oficial se arma acá.
+        return this.generarQRLocal(venta);
     }
 
     // ✅ FUNCIÓN DE RESPALDO: GENERAR QR LOCALMENTE
     async generarQRLocal(venta) {
         try {
-            console.log('⚠️ Generando QR localmente (fallback)...');
+            console.log('📱 Generando QR del comprobante...');
             
             const QRCode = require('qrcode');
             
@@ -720,70 +649,73 @@ class PdfGenerator {
      * Medición: solo se considera "footer" el bloque visible (.factura-footer-wrapper:not(.is-empty))
      * para que availableFinal se mida correctamente cuando el HTML tiene footer completo.
      */
-    async medirLayoutFacturaARCA(htmlMedicion) {
+    async evaluarMetricasLayoutFacturaARCA(page) {
+        const safePadding = 8;
+        return page.evaluate((padding) => {
+            const facturaPage = document.querySelector('.factura-page');
+            if (!facturaPage) return null;
+
+            const theadEl = facturaPage.querySelector('.row-details thead');
+            const footerEl = facturaPage.querySelector('.factura-footer-wrapper:not(.is-empty)');
+            const rows = Array.from(facturaPage.querySelectorAll('.row-details tbody tr'));
+            if (!theadEl) return null;
+
+            const pageRect = facturaPage.getBoundingClientRect();
+            const theadBottom = theadEl.getBoundingClientRect().bottom;
+            const pageHeight = pageRect.height;
+
+            // Espacio bajo el thead en hoja sin footer (páginas intermedias)
+            const availableIntermedia = Math.max(0, pageRect.bottom - theadBottom - padding);
+
+            // Espacio para filas en la ÚLTIMA hoja: altura fija A4 menos encabezado menos bloque totales/QR
+            let availableFinal = availableIntermedia;
+            if (footerEl) {
+                const headerHeight = theadBottom - pageRect.top;
+                const footerHeight = footerEl.getBoundingClientRect().height;
+                availableFinal = Math.max(0, pageHeight - headerHeight - footerHeight - padding);
+            }
+
+            return {
+                availableIntermedia,
+                availableFinal,
+                rowHeights: rows.map((row) => row.getBoundingClientRect().height)
+            };
+        }, safePadding);
+    }
+
+    async medirLayoutFacturaARCA(htmlMedicion, sesion = null) {
         let browser = null;
         try {
             const pdfOptions = this.getOptions();
-            const launchOptions = {
-                headless: 'new',
-                args: pdfOptions.args || [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage'
-                ]
-            };
+            const contentTimeout = pdfOptions.timeout || 30000;
+            let metrics;
 
-            if (pdfOptions.executablePath && fs.existsSync(pdfOptions.executablePath)) {
-                launchOptions.executablePath = pdfOptions.executablePath;
-            }
-
-            browser = await puppeteer.launch(launchOptions);
-            const page = await browser.newPage();
-            await page.setViewport({
-                width: 794,
-                height: 1123,
-                deviceScaleFactor: 2
-            });
-
-            await page.setContent(htmlMedicion, {
-                waitUntil: 'networkidle0',
-                timeout: pdfOptions.timeout || 30000
-            });
-
-            const safePadding = 8;
-            const metrics = await page.evaluate((padding) => {
-                const facturaPage = document.querySelector('.factura-page');
-                if (!facturaPage) return null;
-
-                const theadEl = facturaPage.querySelector('.row-details thead');
-                const footerEl = facturaPage.querySelector('.factura-footer-wrapper:not(.is-empty)');
-                const rows = Array.from(facturaPage.querySelectorAll('.row-details tbody tr'));
-                if (!theadEl) return null;
-
-                const pageRect = facturaPage.getBoundingClientRect();
-                const theadBottom = theadEl.getBoundingClientRect().bottom;
-                const pageHeight = pageRect.height;
-
-                // Espacio bajo el thead en hoja sin footer (páginas intermedias)
-                const availableIntermedia = Math.max(0, pageRect.bottom - theadBottom - padding);
-
-                // Espacio para filas en la ÚLTIMA hoja: altura fija A4 menos encabezado menos bloque totales/QR
-                let availableFinal = availableIntermedia;
-                if (footerEl) {
-                    const headerHeight = theadBottom - pageRect.top;
-                    const footerHeight = footerEl.getBoundingClientRect().height;
-                    availableFinal = Math.max(0, pageHeight - headerHeight - footerHeight - padding);
+            if (sesion) {
+                try {
+                    await sesion.page.setContent(htmlMedicion, {
+                        waitUntil: 'load',
+                        timeout: contentTimeout
+                    });
+                    metrics = await this.evaluarMetricasLayoutFacturaARCA(sesion.page);
+                } catch (error) {
+                    await this.reiniciarPaginaSesion(sesion);
+                    throw error;
                 }
+            } else {
+                browser = await puppeteer.launch(this.construirLaunchOptions(pdfOptions));
+                const page = await browser.newPage();
+                await this.aplicarViewportPdf(page);
 
-                return {
-                    availableIntermedia,
-                    availableFinal,
-                    rowHeights: rows.map((row) => row.getBoundingClientRect().height)
-                };
-            }, safePadding);
+                await page.setContent(htmlMedicion, {
+                    waitUntil: 'networkidle0',
+                    timeout: contentTimeout
+                });
 
-            await browser.close();
-            browser = null;
+                metrics = await this.evaluarMetricasLayoutFacturaARCA(page);
+
+                await browser.close();
+                browser = null;
+            }
 
             if (!metrics || !Array.isArray(metrics.rowHeights)) {
                 throw new Error('No se pudieron medir alturas de la factura ARCA');
@@ -897,7 +829,8 @@ class PdfGenerator {
         commonReplacements,
         rowsByItem,
         footerContent,
-        tableHeader
+        tableHeader,
+        sesion = null
     }) {
         if (!fs.existsSync(templatePath)) {
             throw new Error(`Plantilla no encontrada: ${path.basename(templatePath)}`);
@@ -932,7 +865,7 @@ class PdfGenerator {
             .replace(/\{\{page_number\}\}/g, '1')
             .replace(/\{\{page_total\}\}/g, '1');
         const htmlMedicionIntermedia = htmlSkeleton.replace('{{pages_html}}', medicionIntermediaHtml);
-        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia);
+        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia, sesion);
         const { rowHeights, availableIntermedia } = metricsIntermedia;
 
         // Medición 2: una fila + footer completo → availableFinal (espacio para ítems en la hoja que lleva total/QR)
@@ -944,7 +877,7 @@ class PdfGenerator {
             .replace(/\{\{page_number\}\}/g, '1')
             .replace(/\{\{page_total\}\}/g, '1');
         const htmlMedicionFinal = htmlSkeleton.replace('{{pages_html}}', medicionFinalHtml);
-        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal);
+        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal, sesion);
         const availableFinal = metricsFinal.availableFinal;
 
         const pages = this.paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, {
@@ -1052,7 +985,7 @@ class PdfGenerator {
         };
     }
 
-    async generarFactura(venta, productos) {
+    async generarFactura(venta, productos, sesion = null) {
     const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
     const condicionIVA = (venta.cliente_condicion || '').toString().trim();
     
@@ -1066,15 +999,15 @@ class PdfGenerator {
 
       if (tieneCAEAprobado) {
         console.log(`📋 Generando Factura ARCA tipo ${tipoFiscal} con CAE:`, venta.cae_id);
-        return await this.generarFacturaARCA(venta, productos);
+        return await this.generarFacturaARCA(venta, productos, sesion);
       } else {
         console.warn(`⚠️ Factura tipo ${tipoFiscal} sin CAE aprobado, usando genérica`);
-        return await this.generarFacturaGenerica(venta, productos);
+        return await this.generarFacturaGenerica(venta, productos, sesion);
       }
     } else {
       // ✅ Facturas C o cualquier otro tipo → Genérica
       console.log(`📋 Generando Factura Genérica tipo ${tipoFiscal}`);
-      return await this.generarFacturaGenerica(venta, productos);
+      return await this.generarFacturaGenerica(venta, productos, sesion);
     }
   }
 
@@ -1086,7 +1019,7 @@ class PdfGenerator {
      * - Totales + QR + CAE solo en la última (Regla 2)
      * - Páginas intermedias solo con tabla, footer vacío (Regla 3)
      */
-  async generarFacturaARCA(venta, productos) {
+  async generarFacturaARCA(venta, productos, sesion = null) {
     const calculoGuardado = await cargarCalculo(db, venta.id);
     validarDocumento(venta, productos, calculoGuardado);
     const templatePath = path.join(this.templatesPath, 'factura_arca.html');
@@ -1349,7 +1282,8 @@ class PdfGenerator {
       commonReplacements,
       rowsByItem,
       footerContent,
-      tableHeader
+      tableHeader,
+      sesion
     });
 
     console.log('📄 Generando PDF de Factura ARCA...');
@@ -1358,7 +1292,7 @@ class PdfGenerator {
     console.log(`   Total: $${total.toFixed(2)}`);
     console.log(`   Páginas generadas: ${pageCount}`);
 
-    return await this.generatePdfFromHtml(finalHtml);
+    return await this.generatePdfFromHtml(finalHtml, {}, sesion);
   }
 
   /**
@@ -1705,7 +1639,7 @@ class PdfGenerator {
   /**
    * ✅ FACTURA GENÉRICA (C) - CON IVA INCLUIDO, SIN $
    */
-  async generarFacturaGenerica(venta, productos) {
+  async generarFacturaGenerica(venta, productos, sesion = null) {
     const calculoGuardado = await cargarCalculo(db, venta.id);
     validarDocumento(venta, productos, calculoGuardado);
     const templatePath = path.join(this.templatesPath, 'factura.html');
@@ -1833,7 +1767,7 @@ class PdfGenerator {
     const totalFacturaMostrado = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : totalFactura;
     htmlTemplate = htmlTemplate.replace(/{{total}}/g, fmtMontoFacturaGen(totalFacturaMostrado));
 
-    return await this.generatePdfFromHtml(htmlTemplate);
+    return await this.generatePdfFromHtml(htmlTemplate, {}, sesion);
   }
 
     // ✅ RESTO DE FUNCIONES SIN CAMBIOS
@@ -2628,10 +2562,9 @@ class PdfGenerator {
      * ✅ GENERAR NOTA DE DÉBITO O CRÉDITO
      * Detecta si tiene CAE y usa template ARCA o genérico
      */
-    async generarNota(venta, productos) {
+    async generarNota(venta, productos, sesion = null) {
         const tipoFiscal = (venta.tipo_f || '').toString().trim().toUpperCase();
         const tipoDoc = (venta.tipo_doc || '').toString().trim();
-        const esNotaDebito = tipoDoc === 'NOTA_DEBITO';
         
         console.log(`📋 Generando ${tipoDoc} tipo ${tipoFiscal}...`);
         
@@ -2643,15 +2576,15 @@ class PdfGenerator {
 
             if (tieneCAEAprobado) {
                 console.log(`📋 Generando ${tipoDoc} ARCA tipo ${tipoFiscal} con CAE:`, venta.cae_id);
-                return await this.generarNotaARCA(venta, productos);
+                return await this.generarNotaARCA(venta, productos, sesion);
             } else {
                 console.warn(`⚠️ ${tipoDoc} tipo ${tipoFiscal} sin CAE aprobado, usando genérica`);
-                return await this.generarNotaGenerica(venta, productos);
+                return await this.generarNotaGenerica(venta, productos, sesion);
             }
         } else {
             // ✅ Notas X o cualquier otro tipo → Genérica
             console.log(`📋 Generando ${tipoDoc} Genérica tipo ${tipoFiscal}`);
-            return await this.generarNotaGenerica(venta, productos);
+            return await this.generarNotaGenerica(venta, productos, sesion);
         }
     }
 
@@ -2661,7 +2594,7 @@ class PdfGenerator {
      * y Notas D/C (encabezado fijo, total/QR solo última, numeración). Comprobante asociado
      * en encabezado, se repite en todas las páginas.
      */
-    async generarNotaARCA(venta, productos) {
+    async generarNotaARCA(venta, productos, sesion = null) {
         const esNotaDebito = venta.tipo_doc === 'NOTA_DEBITO';
         const templateName = esNotaDebito ? 'nota_debito_arca.html' : 'nota_credito_arca.html';
         const templatePath = path.join(this.templatesPath, templateName);
@@ -2890,17 +2823,18 @@ class PdfGenerator {
             commonReplacements,
             rowsByItem,
             footerContent,
-            tableHeader
+            tableHeader,
+            sesion
         });
 
         console.log(`📄 Generando PDF de Nota ARCA - Páginas: ${pageCount}`);
-        return await this.generatePdfFromHtml(finalHtml);
+        return await this.generatePdfFromHtml(finalHtml, {}, sesion);
     }
 
     /**
      * ✅ GENERAR NOTA GENÉRICA (X o sin CAE)
      */
-    async generarNotaGenerica(venta, productos) {
+    async generarNotaGenerica(venta, productos, sesion = null) {
         const esNotaDebito = venta.tipo_doc === 'NOTA_DEBITO';
         const templateName = esNotaDebito ? 'nota_debito.html' : 'nota_credito.html';
         const templatePath = path.join(this.templatesPath, templateName);
@@ -2967,7 +2901,7 @@ class PdfGenerator {
         const totalNotaMostrado = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : totalNota;
         htmlTemplate = htmlTemplate.replace(/{{total}}/g, this.formatearMoneda(totalNotaMostrado));
 
-        return await this.generatePdfFromHtml(htmlTemplate);
+        return await this.generatePdfFromHtml(htmlTemplate, {}, sesion);
     }
 
     // ============================================================

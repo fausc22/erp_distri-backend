@@ -379,33 +379,57 @@ const generarPdfRankingVentas = async (req, res) => {
             });
         }
 
+        let sesionPdf = null;
         try {
             console.log(`📄 Generando ${ventasIds.length} comprobantes múltiples...`);
             const startTime = Date.now();
             const pdfBuffers = [];
 
-            for (const ventaId of ventasIds) {
-                try {
-                    const ventaRows = await new Promise((resolve, reject) => {
-                        db.query('SELECT * FROM ventas WHERE id = ?', [ventaId], (err, results) => {
-                            if (err) return reject(err);
-                            resolve(results);
-                        });
-                    });
+            const placeholders = ventasIds.map(() => '?').join(',');
+            const ventaRows = await new Promise((resolve, reject) => {
+                db.query(
+                    `SELECT * FROM ventas WHERE id IN (${placeholders})`,
+                    ventasIds,
+                    (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    }
+                );
+            });
 
-                    if (ventaRows.length === 0) {
+            const ventasPorId = new Map(ventaRows.map((venta) => [Number(venta.id), venta]));
+
+            const productoRows = await new Promise((resolve, reject) => {
+                db.query(
+                    `SELECT *, descuento_porcentaje FROM ventas_cont WHERE venta_id IN (${placeholders})`,
+                    ventasIds,
+                    (err, results) => {
+                        if (err) return reject(err);
+                        resolve(results);
+                    }
+                );
+            });
+
+            const productosPorVenta = new Map();
+            for (const producto of productoRows) {
+                const ventaIdNum = Number(producto.venta_id);
+                const lista = productosPorVenta.get(ventaIdNum) || [];
+                lista.push(producto);
+                productosPorVenta.set(ventaIdNum, lista);
+            }
+
+            sesionPdf = await pdfGenerator.abrirSesionPdf();
+
+            for (const ventaId of ventasIds) {
+                const ventaIdNum = Number(ventaId);
+                try {
+                    const venta = ventasPorId.get(ventaIdNum);
+                    if (!venta) {
                         console.warn(`Venta con ID ${ventaId} no encontrada, continuando`);
                         continue;
                     }
 
-                    const venta = ventaRows[0];
-                    const productos = await new Promise((resolve, reject) => {
-                        db.query('SELECT *, descuento_porcentaje FROM ventas_cont WHERE venta_id = ?', [ventaId], (err, results) => {
-                            if (err) return reject(err);
-                            resolve(results);
-                        });
-                    });
-
+                    const productos = productosPorVenta.get(ventaIdNum) || [];
                     if (productos.length === 0) {
                         console.warn(`No se encontraron productos para la venta ${ventaId}, continuando`);
                         continue;
@@ -413,8 +437,8 @@ const generarPdfRankingVentas = async (req, res) => {
 
                     const esNota = venta.tipo_doc === 'NOTA_DEBITO' || venta.tipo_doc === 'NOTA_CREDITO';
                     const pdfBufferIndividual = esNota
-                        ? await pdfGenerator.generarNota(venta, productos)
-                        : await pdfGenerator.generarFactura(venta, productos);
+                        ? await pdfGenerator.generarNota(venta, productos, sesionPdf)
+                        : await pdfGenerator.generarFactura(venta, productos, sesionPdf);
 
                     pdfBuffers.push(pdfBufferIndividual);
                 } catch (error) {
@@ -448,6 +472,8 @@ const generarPdfRankingVentas = async (req, res) => {
                 error: "Error al generar los PDFs múltiples",
                 details: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
+        } finally {
+            await pdfGenerator.cerrarSesionPdf(sesionPdf);
         }
     };
 

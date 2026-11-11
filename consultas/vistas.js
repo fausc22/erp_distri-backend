@@ -122,6 +122,75 @@ function enriquecerMedidaFiscal(row) {
   };
 }
 
+/** Fecha del libro: YYYY-MM-DD (misma que se imprime cuando viene comercial). */
+function normalizarFechaLibro(value) {
+  if (!value) return '';
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(value.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(value).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const dmy = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (dmy) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+  return s;
+}
+
+/** Desglosa "A 0004-00001991" o "0004-00096" para orden numérico estable. */
+function parseNumeroComprobanteLibro(numero) {
+  const s = String(numero || '').trim();
+  let match = s.match(/^[A-Z]+\s+(\d{4})-(\d+)$/i);
+  if (match) {
+    return { ptoVta: parseInt(match[1], 10), nro: parseInt(match[2], 10) };
+  }
+  match = s.match(/^(\d{4})-(\d+)$/);
+  if (match) {
+    return { ptoVta: parseInt(match[1], 10), nro: parseInt(match[2], 10) };
+  }
+  match = s.match(/(\d+)\s*$/);
+  return { ptoVta: 0, nro: match ? parseInt(match[1], 10) : 0 };
+}
+
+function ordenTipoDocLibro(tipoDoc) {
+  const t = norm(tipoDoc);
+  if (t === 'FACTURA' || t === '') return 0;
+  if (t === 'NOTA_DEBITO' || t === 'NOTA DEBITO') return 1;
+  if (t === 'NOTA_CREDITO' || t === 'NOTA CREDITO') return 2;
+  return 3;
+}
+
+/**
+ * Orden de presentación del Libro IVA:
+ * 1) fecha comercial ASC (misma que imprime el PDF)
+ * 2) tipo de comprobante (Factura → ND → NC)
+ * 3) letra A/B, punto de venta y número ASC
+ */
+function compararFilasLibroIva(a, b) {
+  const fechaA = normalizarFechaLibro(
+    a.fecha_comercial || a.fecha_revision || a.fecha || a.fecha_fiscal_acreditada
+  );
+  const fechaB = normalizarFechaLibro(
+    b.fecha_comercial || b.fecha_revision || b.fecha || b.fecha_fiscal_acreditada
+  );
+  if (fechaA !== fechaB) return fechaA.localeCompare(fechaB);
+
+  const tipoCmp = ordenTipoDocLibro(a.tipo_doc) - ordenTipoDocLibro(b.tipo_doc);
+  if (tipoCmp !== 0) return tipoCmp;
+
+  const letraCmp = String(a.tipo_f || '').localeCompare(String(b.tipo_f || ''));
+  if (letraCmp !== 0) return letraCmp;
+
+  const numA = parseNumeroComprobanteLibro(a.numero_factura || a.numero);
+  const numB = parseNumeroComprobanteLibro(b.numero_factura || b.numero);
+  if (numA.ptoVta !== numB.ptoVta) return numA.ptoVta - numB.ptoVta;
+  if (numA.nro !== numB.nro) return numA.nro - numB.nro;
+
+  return Number(a.venta_id || a.id || 0) - Number(b.venta_id || b.id || 0);
+}
+
 function libroIvaRevision(rows = []) {
   const acreditados = [];
   const discrepantes = [];
@@ -159,13 +228,11 @@ function libroIvaRevision(rows = []) {
     }
   }
 
-  const byFecha = (a, b) => String(a.fecha_revision || '').localeCompare(String(b.fecha_revision || ''));
-
   return {
-    acreditados: acreditados.sort(byFecha),
-    discrepantes: discrepantes.sort(byFecha),
-    evidenciaIncompleta: evidenciaIncompleta.sort(byFecha),
-    seccionPendientes: seccionPendientes.sort(byFecha),
+    acreditados: acreditados.sort(compararFilasLibroIva),
+    discrepantes: discrepantes.sort(compararFilasLibroIva),
+    evidenciaIncompleta: evidenciaIncompleta.sort(compararFilasLibroIva),
+    seccionPendientes: seccionPendientes.sort(compararFilasLibroIva),
     totalesAcreditados: {
       ...sumMoneyField(acreditados.filter((r) => r.total_presentacion != null), 'total_presentacion'),
       neto: sumMoneyField(acreditados.filter((r) => r.neto_presentacion != null), 'neto_presentacion'),
@@ -193,6 +260,9 @@ module.exports = {
   totalGerencial,
   porVendedor,
   libroIvaRevision,
+  compararFilasLibroIva,
+  parseNumeroComprobanteLibro,
+  normalizarFechaLibro,
   pendientesFiscales,
   xInterno,
   segmentos,

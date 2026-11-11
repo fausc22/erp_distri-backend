@@ -1,8 +1,12 @@
 const db = require('../db/legacyAdapter');
+const dbPool = require('../db');
+const { withTransaction } = require('../db/transaction');
 const { parsePagination, toPositiveInt } = require('../utils/pagination');
 const { auditarOperacion, obtenerDatosAnteriores } = require('../middlewares/auditoriaMiddleware');
 const { invalidate } = require('../utils/cache');
 const { validarDatosCliente, normalizarCuit } = require('../utils/validadoresCliente');
+const { SQL_VENTA_RECIBE_DATOS_CLIENTE } = require('../utils/propagacionCliente');
+const { recalcularYActualizarTotalesPedido } = require('./pedidosService');
 
 const nuevoCliente = async (req, res) => {
     const { nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, provincia, telefono, email, ciudad_id, validado_afip } = req.body;
@@ -189,26 +193,15 @@ const buscarCliente = (req, res) => {
 const actualizarCliente = async (req, res) => {
     const clienteId = req.params.id;
     const { nombre, nombre_alternativo, condicion_iva, cuit, dni, direccion, ciudad, ciudad_id, provincia, telefono, email, validado_afip } = req.body;
-                                                           
-
-    // Obtener datos anteriores para auditoría
-    const obtenerDatosAnterioresPromise = () => {
-        return new Promise((resolve, reject) => {
-            db.query('SELECT * FROM clientes WHERE id = ?', [clienteId], (err, results) => {
-                if (err) return reject(err);
-                resolve(results.length > 0 ? results[0] : null);
-            });
-        });
-    };
 
     try {
-        const datosAnteriores = await obtenerDatosAnterioresPromise();
+        const [clienteRows] = await dbPool.query('SELECT * FROM clientes WHERE id = ?', [clienteId]);
+        const datosAnteriores = clienteRows && clienteRows[0] ? clienteRows[0] : null;
 
         if (!datosAnteriores) {
             return res.status(404).json({ success: false, message: "Cliente no encontrado" });
         }
 
-        // Fase 2: validaciones antes de actualizar
         const { valido, errores } = validarDatosCliente(req.body);
         if (!valido) {
             return res.status(400).json({
@@ -218,95 +211,174 @@ const actualizarCliente = async (req, res) => {
             });
         }
 
-        // Fase 3: normalizar CUIT/DNI al guardar
         const cuitGuardar = normalizarCuit(cuit);
         const dniGuardar = dni != null && String(dni).trim() !== '' ? String(dni).replace(/\D/g, '') : (dni || '');
+        const ciudadIdUpdate = (ciudad_id !== '' && ciudad_id !== undefined && ciudad_id !== null && !isNaN(Number(ciudad_id)))
+            ? Number(ciudad_id)
+            : null;
+        const actualizarValidadoAfip = (validado_afip === true || validado_afip === 'true') ? 1 : 0;
+        const nombreAlternativoGuardar = nombre_alternativo != null ? String(nombre_alternativo).trim() : '';
+        const condicionNueva = condicion_iva != null ? String(condicion_iva).trim() : '';
+        const telefonoGuardar = telefono || '';
+        const direccionGuardar = direccion || '';
+        const ciudadGuardar = ciudad || '';
+        const provinciaGuardar = provincia || '';
+        const cuitSnapshot = cuitGuardar || '';
 
-        // Verificar si el cliente existe antes de actualizar
-        const checkQuery = `SELECT id FROM clientes WHERE id = ?`;
-        db.query(checkQuery, [clienteId], (err, results) => {
-            if (err) {
-                console.error('Error al verificar el cliente:', err);
-                return res.status(500).json({ success: false, message: "Error al verificar el cliente" });
-            }
+        let propagacion = { pedidos: 0, ventas: 0 };
+        let clienteActualizado = null;
 
-            if (results.length === 0) {
-                return res.status(404).json({ success: false, message: "Cliente no encontrado" });
-            }
+        try {
+            await withTransaction(async (conn) => {
+                const [updateResults] = await conn.query(
+                    `UPDATE clientes
+                     SET nombre = ?, nombre_alternativo = ?, condicion_iva = ?, cuit = ?, dni = ?,
+                         direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ?,
+                         validado_afip_at = IF(? = 1, NOW(), validado_afip_at)
+                     WHERE id = ?`,
+                    [
+                        nombre,
+                        nombreAlternativoGuardar,
+                        condicion_iva,
+                        cuitGuardar,
+                        dniGuardar,
+                        direccion,
+                        ciudad,
+                        ciudadIdUpdate,
+                        provincia,
+                        telefono,
+                        email,
+                        actualizarValidadoAfip,
+                        clienteId
+                    ]
+                );
 
-            // ciudad_id: entero o null (el front puede enviar '')
-            const ciudadIdUpdate = (ciudad_id !== '' && ciudad_id !== undefined && ciudad_id !== null && !isNaN(Number(ciudad_id)))
-                ? Number(ciudad_id)
-                : null;
-
-            // Fase 4: si el front envía validado_afip = true, actualizar validado_afip_at
-            const actualizarValidadoAfip = (validado_afip === true || validado_afip === 'true') ? 1 : 0;
-            const nombreAlternativoGuardar = nombre_alternativo != null ? String(nombre_alternativo).trim() : '';
-
-            const updateQuery = `
-                UPDATE clientes 
-                SET nombre = ?, nombre_alternativo = ?, condicion_iva = ?, cuit = ?, dni = ?, direccion = ?, ciudad = ?, ciudad_id = ?, provincia = ?, telefono = ?, email = ?, validado_afip_at = IF(? = 1, NOW(), validado_afip_at)
-                WHERE id = ?
-            `;
-
-            db.query(updateQuery, [nombre, nombreAlternativoGuardar, condicion_iva, cuitGuardar, dniGuardar, direccion, ciudad, ciudadIdUpdate, provincia, telefono, email, actualizarValidadoAfip, clienteId], async (error, updateResults) => {
-                if (error) {
-                    console.error('Error al actualizar el cliente:', error);
-                    
-                    // Auditar error en actualización
-                    await auditarOperacion(req, {
-                        accion: 'UPDATE',
-                        tabla: 'clientes',
-                        registroId: clienteId,
-                        detallesAdicionales: `Error al actualizar cliente: ${error.message}`,
-                        datosAnteriores,
-                        datosNuevos: req.body
-                    });
-                    
-                    return res.status(500).json({ success: false, message: "Error al actualizar el cliente" });
+                if (!updateResults || updateResults.affectedRows === 0) {
+                    const err = new Error('NO_CHANGES');
+                    err.code = 'NO_CHANGES';
+                    throw err;
                 }
 
-                if (updateResults.affectedRows === 0) {
-                    return res.status(400).json({ success: false, message: "No se realizaron cambios" });
+                const [pedidosAbiertos] = await conn.query(
+                    `SELECT id, estado, cliente_condicion
+                     FROM pedidos
+                     WHERE cliente_id = ? AND estado <> 'Facturado'`,
+                    [clienteId]
+                );
+
+                const [pedidosUpdate] = await conn.query(
+                    `UPDATE pedidos
+                     SET cliente_nombre = ?,
+                         cliente_telefono = ?,
+                         cliente_direccion = ?,
+                         cliente_ciudad = ?,
+                         cliente_provincia = ?,
+                         cliente_condicion = ?,
+                         cliente_cuit = ?
+                     WHERE cliente_id = ? AND estado <> 'Facturado'`,
+                    [
+                        nombre,
+                        telefonoGuardar,
+                        direccionGuardar,
+                        ciudadGuardar,
+                        provinciaGuardar,
+                        condicionNueva,
+                        cuitSnapshot,
+                        clienteId
+                    ]
+                );
+                propagacion.pedidos = pedidosUpdate?.affectedRows || 0;
+
+                const pedidosARecalcular = (pedidosAbiertos || []).filter((pedido) => {
+                    if (String(pedido.estado || '').trim() !== 'Exportado') return false;
+                    const condicionAnterior = String(pedido.cliente_condicion || '').trim();
+                    return condicionAnterior !== condicionNueva;
+                });
+
+                for (const pedido of pedidosARecalcular) {
+                    await recalcularYActualizarTotalesPedido(pedido.id, condicionNueva, conn);
                 }
 
-                // Auditar actualización exitosa
-                await auditarOperacion(req, {
-                    accion: 'UPDATE',
-                    tabla: 'clientes',
-                    registroId: clienteId,
-                    datosAnteriores,
-                    datosNuevos: {
-                        id: clienteId,
-                        ...req.body
-                    },
-                    detallesAdicionales: `Cliente actualizado: ${nombre}`
-                });
+                const [ventasUpdate] = await conn.query(
+                    `UPDATE ventas
+                     SET cliente_nombre = ?,
+                         cliente_telefono = ?,
+                         cliente_direccion = ?,
+                         cliente_ciudad = ?,
+                         cliente_provincia = ?,
+                         cliente_condicion = ?,
+                         cliente_cuit = ?
+                     WHERE cliente_id = ?
+                       AND ${SQL_VENTA_RECIBE_DATOS_CLIENTE}`,
+                    [
+                        nombre,
+                        telefonoGuardar,
+                        direccionGuardar,
+                        ciudadGuardar,
+                        provinciaGuardar,
+                        condicionNueva,
+                        cuitSnapshot,
+                        clienteId
+                    ]
+                );
+                propagacion.ventas = ventasUpdate?.affectedRows || 0;
 
-                invalidate('clientes:*');
-
-                // Fase 1: devolver siempre data con el cliente actualizado (cuit/dni ya normalizados en DB)
-                db.query('SELECT * FROM clientes WHERE id = ?', [clienteId], (errSel, selResults) => {
-                    if (errSel) {
-                        console.error('Error al obtener cliente actualizado:', errSel);
-                        return res.json({
-                            success: true,
-                            message: "Cliente actualizado correctamente",
-                            data: { id: clienteId, nombre, condicion_iva, cuit: cuitGuardar, dni: dniGuardar, direccion, ciudad, provincia, telefono, email, ciudad_id: ciudadIdUpdate }
-                        });
-                    }
-                    const clienteActualizado = selResults && selResults[0];
-                    res.json({
-                        success: true,
-                        message: "Cliente actualizado correctamente",
-                        data: clienteActualizado || { id: clienteId, nombre, condicion_iva, cuit: cuitGuardar, dni: dniGuardar, direccion, ciudad, provincia, telefono, email, ciudad_id: ciudadIdUpdate }
-                    });
-                });
+                const [selResults] = await conn.query('SELECT * FROM clientes WHERE id = ?', [clienteId]);
+                clienteActualizado = selResults && selResults[0] ? selResults[0] : null;
             });
+        } catch (txError) {
+            if (txError.code === 'NO_CHANGES') {
+                return res.status(400).json({ success: false, message: "No se realizaron cambios" });
+            }
+            throw txError;
+        }
+
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'clientes',
+            registroId: clienteId,
+            datosAnteriores,
+            datosNuevos: {
+                id: clienteId,
+                ...req.body
+            },
+            detallesAdicionales: `Cliente actualizado: ${nombre} — propagación pedidos=${propagacion.pedidos}, ventas=${propagacion.ventas}`
+        });
+
+        invalidate('clientes:*');
+
+        const dataFallback = {
+            id: clienteId,
+            nombre,
+            condicion_iva,
+            cuit: cuitGuardar,
+            dni: dniGuardar,
+            direccion,
+            ciudad,
+            provincia,
+            telefono,
+            email,
+            ciudad_id: ciudadIdUpdate
+        };
+
+        return res.json({
+            success: true,
+            message: "Cliente actualizado correctamente",
+            data: clienteActualizado || dataFallback,
+            propagacion
         });
     } catch (error) {
-        console.error('Error al obtener datos anteriores:', error);
-        res.status(500).json({ success: false, message: "Error interno del servidor" });
+        console.error('Error al actualizar el cliente:', error);
+
+        await auditarOperacion(req, {
+            accion: 'UPDATE',
+            tabla: 'clientes',
+            registroId: clienteId,
+            detallesAdicionales: `Error al actualizar cliente: ${error.message}`,
+            datosNuevos: req.body
+        });
+
+        return res.status(500).json({ success: false, message: "Error al actualizar el cliente" });
     }
 };
 
