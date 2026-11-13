@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - test
+      - main
   workflow_dispatch:
     inputs:
       target:
@@ -19,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: backend-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'test' }}
+  group: backend-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target == 'produccion' && 'produccion' || github.event_name != 'workflow_dispatch' && github.ref_name == 'main' && 'produccion' || 'test' }}
   cancel-in-progress: false
 
 jobs:
@@ -33,7 +34,16 @@ jobs:
         id: dest
         run: |
           set -euo pipefail
-          TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'test' }}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TARGET="${{ inputs.target }}"
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            TARGET="produccion"
+          elif [[ "${{ github.ref_name }}" == "test" ]]; then
+            TARGET="test"
+          else
+            echo "Rama sin deploy: ${{ github.ref_name }}"
+            exit 1
+          fi
           if [[ "$TARGET" == "produccion" ]]; then
             echo "app_dir=/opt/distri-api-v2" >> "$GITHUB_OUTPUT"
             echo "pm2_name=api-vertimar-v2" >> "$GITHUB_OUTPUT"
