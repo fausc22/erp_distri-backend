@@ -60,6 +60,8 @@ const allowedOrigins = [
     
     'https://api.vertimar.online',
     'http://api.vertimar.online',
+    'https://api-v2.vertimar.online',
+    'https://api-v2-test.vertimar.online',
     
     // Otros servicios
     'https://excel-ima.vercel.app',
