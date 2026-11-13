@@ -2,13 +2,14 @@
 # Actualiza una carpeta ya clonada y reinicia un solo proceso PM2.
 # Si /ping no vuelve, deja el commit anterior y reinicia de nuevo.
 # No abre MySQL ni corre migraciones: el esquema ya está aplicado en producción.
-# Combinaciones permitidas: ensayo (3003) y produccion (3002).
+# Combinaciones permitidas: test en el 3003 y produccion en el 3002.
+# DEPLOY_BRANCH: test para el 3003, main para el 3002.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:?Falta APP_DIR}"
 PM2_NAME="${PM2_NAME:?Falta PM2_NAME}"
 PORT="${PORT:?Falta PORT}"
-BRANCH="${DEPLOY_BRANCH:-refactor/backend-v2}"
+BRANCH="${DEPLOY_BRANCH:?Falta DEPLOY_BRANCH}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-2}"
 ACTOR="${DEPLOY_ACTOR:-manual}"

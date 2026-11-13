@@ -3,23 +3,23 @@ name: Deploy backend
 on:
   push:
     branches:
-      - refactor/backend-v2
+      - test
   workflow_dispatch:
     inputs:
       target:
         description: Destino del deploy
         required: true
         type: choice
-        default: ensayo
+        default: test
         options:
-          - ensayo
+          - test
           - produccion
 
 permissions:
   contents: read
 
 concurrency:
-  group: backend-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'ensayo' }}
+  group: backend-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'test' }}
   cancel-in-progress: false
 
 jobs:
@@ -33,15 +33,17 @@ jobs:
         id: dest
         run: |
           set -euo pipefail
-          TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'ensayo' }}"
+          TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'test' }}"
           if [[ "$TARGET" == "produccion" ]]; then
             echo "app_dir=/opt/distri-api-v2" >> "$GITHUB_OUTPUT"
             echo "pm2_name=api-vertimar-v2" >> "$GITHUB_OUTPUT"
             echo "port=3002" >> "$GITHUB_OUTPUT"
+            echo "branch=main" >> "$GITHUB_OUTPUT"
           else
             echo "app_dir=/opt/distri-api-v2-ensayo" >> "$GITHUB_OUTPUT"
             echo "pm2_name=api-vertimar-v2-ensayo" >> "$GITHUB_OUTPUT"
             echo "port=3003" >> "$GITHUB_OUTPUT"
+            echo "branch=test" >> "$GITHUB_OUTPUT"
           fi
           echo "Destino elegido: $TARGET"
 
@@ -55,6 +57,7 @@ jobs:
           APP_DIR: ${{ steps.dest.outputs.app_dir }}
           PM2_NAME: ${{ steps.dest.outputs.pm2_name }}
           PORT: ${{ steps.dest.outputs.port }}
+          BRANCH: ${{ steps.dest.outputs.branch }}
           ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
@@ -69,7 +72,7 @@ jobs:
           ssh-keyscan -p "$PORT_OPT" -H "$HOST" >> ~/.ssh/known_hosts
           DISCORD_B64="$(printf '%s' "$DISCORD" | base64 -w 0)"
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$PORT_OPT" "${USER}@${HOST}" \
-            "APP_DIR='${APP_DIR}' PM2_NAME='${PM2_NAME}' PORT='${PORT}' DEPLOY_BRANCH='refactor/backend-v2' DEPLOY_ACTOR='${ACTOR}' DISCORD_WEBHOOK_DEPLOY=\"\$(printf '%s' '${DISCORD_B64}' | base64 -d)\" bash -s" \
+            "APP_DIR='${APP_DIR}' PM2_NAME='${PM2_NAME}' PORT='${PORT}' DEPLOY_BRANCH='${BRANCH}' DEPLOY_ACTOR='${ACTOR}' DISCORD_WEBHOOK_DEPLOY=\"\$(printf '%s' '${DISCORD_B64}' | base64 -d)\" bash -s" \
             < scripts/deploy.sh
 
       - name: Avisar si el job falló
