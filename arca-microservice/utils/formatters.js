@@ -1,5 +1,5 @@
 import documento from '../../dominio/calculo/documento.js';
-import { PORCENTAJES_IVA, ALICUOTAS_IVA, esExento, esNotaCredito, esNotaDebito } from '../types/billing.types.js';
+import { PORCENTAJES_IVA, ALICUOTAS_IVA, esNotaCredito, esNotaDebito } from '../types/billing.types.js';
 
 /**
  * FORMATEADORES DE DATOS PARA ARCA/AFIP
@@ -60,26 +60,13 @@ export function calcularPrecioTotal(precioNeto, alicuotaId) {
 }
 
 /**
- * Agrupar items por alícuota de IVA
- * ✅ ACTUALIZADO: Maneja casos de EXENTO (sin IVA)
+ * Agrupar items por alícuota de IVA.
+ * La condición del receptor no cambia la tasa: un sujeto exento sigue
+ * gravado al 21 % (id 5), 10,5 % (id 4) o 0 % (id 3) según el producto.
  */
-export function agruparIVAPorAlicuota(items, condicionIVAReceptor) {
+export function agruparIVAPorAlicuota(items, _condicionIVAReceptor) {
   const agrupado = {};
-  
-  // ✅ CAMBIO CRÍTICO: Si es exento, usar alícuota 3 (0%) en lugar de array vacío
-  if (esExento(condicionIVAReceptor)) {
-    const baseTotal = items.reduce((acc, item) => {
-      return acc + (item.cantidad * item.precioUnitario);
-    }, 0);
-    
-    return [{
-      Id: 3,              // Alícuota 3 = 0% (Exento)
-      BaseImp: redondear(baseTotal),
-      Importe: 0          // IVA = 0 para exentos
-    }];
-  }
 
-  // Para NO exentos, agrupar normalmente
   items.forEach(item => {
     const alicuotaId = item.alicuotaIVA;
     const precioNeto = item.cantidad * item.precioUnitario;
@@ -105,22 +92,17 @@ export function agruparIVAPorAlicuota(items, condicionIVAReceptor) {
 }
 
 /**
- * Calcular totales de un array de items
- * ✅ ACTUALIZADO: Maneja casos de EXENTO
+ * Calcular totales de un array de items.
+ * El IVA sale de la alícuota de cada ítem, también si el receptor es exento.
  */
-export function calcularTotales(items, condicionIVAReceptor) {
+export function calcularTotales(items, _condicionIVAReceptor) {
   let totalNeto = 0;
   let totalIVA = 0;
   
   items.forEach(item => {
     const precioNeto = item.cantidad * item.precioUnitario;
     totalNeto += precioNeto;
-    
-    // ✅ Si está EXENTO, no calcular IVA
-    if (!esExento(condicionIVAReceptor)) {
-      const iva = calcularIVA(precioNeto, item.alicuotaIVA);
-      totalIVA += iva;
-    }
+    totalIVA += calcularIVA(precioNeto, item.alicuotaIVA);
   });
   
   return {
@@ -145,7 +127,6 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
   // Operaciones v1: trasladar el cálculo persistido, sin reconstruir ni corregir precios.
   if (datosUsuario.reglaCalculo === 'v1') {
     const { centavos } = documento;
-    if (esExento(datosUsuario.cliente.condicionIVA)) throw new Error('EXENTO no habilitado para v1');
     const tasas = { 3: 0n, 4: 1050n, 5: 2100n, 6: 2700n };
     const alicuotas = datosUsuario.ivaCalculado;
     if (!Array.isArray(alicuotas) || !alicuotas.length) throw new Error('Falta desglose IVA del cálculo');
@@ -182,7 +163,6 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     return data;
   }
   const condicionIVAReceptor = datosUsuario.cliente.condicionIVA;
-  const receptorEsExento = esExento(condicionIVAReceptor);
   const toNumber = (value, fallback = 0) => {
     const n = parseFloat(value);
     return Number.isFinite(n) ? n : fallback;
@@ -212,14 +192,8 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     ? redondear(parseFloat(datosUsuario.impTotal))
     : null;
 
-  // Reglas actuales de esta integración: receptor exento viaja con ImpIVA=0 y diferencial en ImpOpEx
-  if (receptorEsExento) {
-    impIVA = 0;
-  }
-
-  // Para no exentos, priorizar consistencia fiscal entre cabecera e Iva.
   // Si la cabecera redondeada no coincide con el detalle por alícuota, usar detalle.
-  if (!receptorEsExento && ivaAgrupado.length > 0) {
+  if (ivaAgrupado.length > 0) {
     const sumaBaseAlic = redondear(ivaAgrupado.reduce((acc, al) => acc + (parseFloat(al.BaseImp) || 0), 0));
     const sumaIvaAlic = redondear(ivaAgrupado.reduce((acc, al) => acc + (parseFloat(al.Importe) || 0), 0));
     if (Math.abs(sumaBaseAlic - impNeto) > 0.01 || Math.abs(sumaIvaAlic - impIVA) > 0.01) {
@@ -235,35 +209,20 @@ export function transformarAFormatoARCA(datosUsuario, numeroComprobante, puntoVe
     }
   }
 
-  // Si llega ImpTotal explícito y no cierra la suma:
-  // - Exentos: ajustar ImpOpEx (regla actual de integración)
-  // - No exentos: usar total consistente con cabecera fiscal calculada
   if (impTotalInput !== null) {
     const sumaActual = redondear(impNeto + impIVA + impTotConc + impOpEx + impTrib);
     const diferencia = redondear(impTotalInput - sumaActual);
-    if (receptorEsExento && Math.abs(diferencia) > 0.01) {
-      impOpEx = redondear(Math.max(0, impOpEx + diferencia));
+    if (Math.abs(diferencia) > 0.01) {
+      console.warn(
+        `[ARCA formatter] ImpTotal explícito ${impTotalInput} no cierra con la suma ${sumaActual}. Se usa la suma.`
+      );
     }
   }
 
   const sumaComponentes = redondear(impNeto + impIVA + impTotConc + impOpEx + impTrib);
-  const impTotal = (impTotalInput !== null && receptorEsExento)
-    ? impTotalInput
-    : sumaComponentes;
-  
-  // 4.2 Construir bloque Iva alineado a la cabecera fiscal.
-  // Si existe diferencia entre detalle y cabecera, ARCA debe seguir cabecera.
+  const impTotal = sumaComponentes;
+
   let ivaFinal = ivaAgrupado;
-  if (receptorEsExento) {
-    ivaFinal = [{
-      Id: 3,
-      BaseImp: impNeto,
-      Importe: 0
-    }];
-  } else if (ivaAgrupado.length > 0) {
-    // Para no exentos, conservar el detalle por alícuotas proveniente de items.
-    ivaFinal = ivaAgrupado;
-  }
 
   // 5. Construir objeto en formato ARCA
   const datosARCA = {

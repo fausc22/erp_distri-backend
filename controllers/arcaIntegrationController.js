@@ -588,9 +588,10 @@ const solicitarCAE = async (req, res) => {
       // Neto unitario ya descontado. `precio` es el de lista; ARCA debe recibir
       // el mismo neto que quedó en el subtotal de la venta.
       const precioUnitario = cantidad > 0 ? subtotalLinea / cantidad : 0;
-      // Cliente exento: toda la factura a alícuota 0%. Si no, alícuota por línea.
+      // La condición del receptor no cambia la alícuota. Exento, consumidor final
+      // y responsable inscripto informan el IVA de la línea (21 % = id 5).
       const porcentajeLinea = resolvePorcentajeIvaLinea(prod);
-      const alicuotaIVA = clienteEsExento ? 3 : mapAlicuotaArca(porcentajeLinea);
+      const alicuotaIVA = mapAlicuotaArca(porcentajeLinea);
       
       return {
         descripcion: prod.producto_nombre,
@@ -601,15 +602,11 @@ const solicitarCAE = async (req, res) => {
     });
     
     console.log(`✅ Items preparados: ${items.length} productos`);
-    if (clienteEsExento) {
-      console.log('  - Alícuota IVA aplicada: 0% (cliente EXENTO)');
-    } else {
-      const resumenAlic = items.reduce((acc, it) => {
-        acc[it.alicuotaIVA] = (acc[it.alicuotaIVA] || 0) + 1;
-        return acc;
-      }, {});
-      console.log(`  - Alícuotas por ítem (Id AFIP): ${JSON.stringify(resumenAlic)}`);
-    }
+    const resumenAlic = items.reduce((acc, it) => {
+      acc[it.alicuotaIVA] = (acc[it.alicuotaIVA] || 0) + 1;
+      return acc;
+    }, {});
+    console.log(`  - Alícuotas por ítem (Id AFIP): ${JSON.stringify(resumenAlic)}`);
     
     // ✅ Si es una NOTA, obtener la factura original asociada
     let comprobantesAsociados = [];
@@ -676,9 +673,6 @@ const solicitarCAE = async (req, res) => {
     const ivaFinal = Number.isFinite(parseFloat(venta.iva_total))
       ? roundFacturacion(parseFloat(venta.iva_total))
       : ivaDetalle;
-    const exentoVentaCabecera = Number.isFinite(parseFloat(venta.exento))
-      ? roundFacturacion(parseFloat(venta.exento))
-      : 0;
 
     if (
       Math.abs(subtotalDetalle - subtotalFinal) > 0.005 ||
@@ -691,13 +685,11 @@ const solicitarCAE = async (req, res) => {
       );
     }
 
-    const impOpExExento = clienteEsExento
-      ? (exentoVentaCabecera > 0 ? exentoVentaCabecera : ivaFinal)
-      : 0;
-    // Total = ventas.total guardado. Si falta, reconstruir desde cabecera (no desde líneas).
+    // Total = ventas.total guardado. Si falta, neto gravado + débito fiscal.
+    // ImpOpEx queda en 0: la condición "Exento" del cliente no es una operación exenta.
     let totalVenta = Number.isFinite(parseFloat(venta.total))
       ? roundFacturacion(parseFloat(venta.total))
-      : roundFacturacion(subtotalFinal + (clienteEsExento ? impOpExExento : ivaFinal));
+      : roundFacturacion(subtotalFinal + ivaFinal);
 
     const datosFactura = {
       tipoComprobante: tipoComprobante,
@@ -711,9 +703,8 @@ const solicitarCAE = async (req, res) => {
       fecha: fechaFormateada,
       moneda: 'PES',
       cotizacionMoneda: 1,
-      // Exento: total en impNeto (alícuota 0%), impOpEx=0 — compatible con SDK @arcasdk/core
-      impNeto: clienteEsExento ? totalVenta : subtotalFinal,
-      impIVA: clienteEsExento ? 0 : ivaFinal,
+      impNeto: subtotalFinal,
+      impIVA: ivaFinal,
       impOpEx: 0,
       impTotal: totalVenta,
       puntoVenta: parseInt(puntoVentaARCA) || 1,
@@ -908,7 +899,7 @@ const solicitarCAE = async (req, res) => {
     console.log(`🎉 CAE: ${cae}`);
     console.log(`📅 Vencimiento: ${caeVencimiento}`);
     console.log(`📄 Venta: ${ventaId}`);
-    console.log(`${clienteEsExento ? '🔖 Cliente EXENTO (sin IVA)' : '💰 Cliente con IVA'}\n`);
+    console.log(`💰 IVA informado a ARCA: condición receptor ${condicionIVA}${clienteEsExento ? ' (sujeto exento, débito fiscal igual)' : ''}\n`);
     
     // ============================================
     // 7️⃣ ACTUALIZAR NÚMERO EN BD Y SINCRONIZAR
