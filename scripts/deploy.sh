@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Actualiza una carpeta ya clonada y reinicia un solo proceso PM2.
 # Si /ping no vuelve, deja el commit anterior y reinicia de nuevo.
+# No abre MySQL ni corre migraciones: el esquema ya está aplicado en producción.
 # Combinaciones permitidas: ensayo (3003) y produccion (3002).
 set -euo pipefail
 
@@ -119,22 +120,6 @@ if ! git pull --ff-only origin "$BRANCH"; then
 fi
 
 NEW="$(git rev-parse HEAD)"
-
-set +e
-MIG_OUT="$(node migraciones.js 2>&1)"
-MIG_STATUS=$?
-set -e
-printf '%s\n' "$MIG_OUT"
-
-if [[ "$MIG_STATUS" -ne 0 ]]; then
-  git reset --hard "$PREV"
-  fail "Deploy cancelado: no se pudieron leer las migraciones. ${PM2_NAME} no se reinició. Código vuelto a ${PREV:0:7}."
-fi
-
-if printf '%s\n' "$MIG_OUT" | grep -q '^WOULD '; then
-  git reset --hard "$PREV"
-  fail "Deploy detenido: hay migraciones pendientes. ${PM2_NAME} no se reinició y el código volvió a ${PREV:0:7}. Aplicarlas es un paso aparte, con backup."
-fi
 
 NEW_LOCK=""
 if [[ -f package-lock.json ]]; then
