@@ -4,7 +4,6 @@ import {
   CONDICIONES_IVA,
   CONCEPTOS,
   validarCombinaciónComprobanteIVA,
-  esExento,
   esNotaCredito,
   esNotaDebito
 } from '../types/billing.types.js';
@@ -197,12 +196,9 @@ if (!validNC.valido) {
     );
   }
   
-  // ✅ 7. Validar IVA (TODOS deben tener array Iva)
-const esReceptorExento = esExento(datos.CondicionIVAReceptorId);
-
-// SIEMPRE debe tener array Iva si ImpNeto > 0
+  // 7. Validar IVA. Si hay neto gravado, el detalle de alícuotas es obligatorio.
 if (datos.ImpNeto > 0 && (!datos.Iva || datos.Iva.length === 0)) {
-  errores.push('Si ImpNeto > 0, debe incluir el array Iva (usar alícuota 3 con Importe 0 para exentos)');
+  errores.push('Si ImpNeto > 0, debe incluir el array Iva');
 }
 
 if (datos.Iva && datos.Iva.length > 0) {
@@ -229,15 +225,12 @@ if (datos.Iva && datos.Iva.length > 0) {
       `La suma de Importe en Iva (${sumaIVA.toFixed(2)}) debe coincidir con ImpIVA (${impIVAParsed})`
     );
   }
-  
-  // ✅ Para exentos, validar que use alícuota 3 con Importe 0
-  if (esReceptorExento) {
-    const tieneAlicuotaExento = datos.Iva.some(alicuota => alicuota.Id === 3);
-    if (!tieneAlicuotaExento) {
-      errores.push('Para receptores EXENTOS debe usar alícuota ID 3 (0%)');
-    }
-    if (impIVAParsed !== 0) {
-      errores.push('Para receptores EXENTOS, ImpIVA debe ser 0');
+
+  // RG 4291: ImpIVA 0 solo admite la alícuota 3 (tasa 0 %). La id 2 es operación exenta.
+  if (impIVAParsed === 0) {
+    const alicuotaDistintaDeCero = datos.Iva.some((alicuota) => Number(alicuota.Id) !== 3 || parseFloat(alicuota.Importe) !== 0);
+    if (alicuotaDistintaDeCero) {
+      errores.push('Si ImpIVA es 0, el detalle de IVA solo puede usar la alícuota 3 (0%) con importe 0');
     }
   }
 }

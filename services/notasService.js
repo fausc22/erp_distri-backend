@@ -345,14 +345,10 @@ const crearNota = async (req, res) => {
 
             console.log(`📄 Número de nota asignado: ${numeroCompleto}`);
 
-            // ✅ 3. Política fiscal unificada:
-            // EXENTO => exento = iva_total
-            // NO EXENTO => exento = 0
-            const esClienteExento = clienteFinal.condicion?.toUpperCase() === 'EXENTO';
-
+            // La condición Exento del cliente no convierte la nota en operación exenta.
             const subtotalR = roundFacturacion(subtotalSinIva);
             const ivaTotalR = roundFacturacion(ivaTotal);
-            const exentoR = esClienteExento ? ivaTotalR : 0;
+            const exentoR = 0;
             const totalR = roundFacturacion(totalConIva);
 
             if (saldoDisponibleNota !== null && totalR > saldoDisponibleNota + 0.0001) {

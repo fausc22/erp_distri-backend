@@ -986,17 +986,12 @@ const facturarPedido = async (req, res) => {
             console.log(`📄 Número de factura asignado: ${numeroCompleto}`);
 
             // 4. Crear la venta CON NÚMERO DE FACTURA
-            // ✅ Política fiscal: EXENTO => exento=iva_total (desde líneas), no EXENTO => exento=0
-            const esClienteExento = pedido.cliente_condicion?.toUpperCase() === 'EXENTO';
-            const montoExento = esClienteExento ? ivaTotalFinal : 0;
-
-            // Cálculo único: cabecera con roundFacturacion (incluye dto global vía totalConIvaFinal)
+            // La condición Exento del cliente no convierte la venta en operación exenta.
+            // exento queda en 0; el débito fiscal va en iva_total y se informa a ARCA.
             const subtotalR = roundFacturacion(subtotalSinIvaFinal);
             const ivaTotalR = roundFacturacion(ivaTotalFinal);
-            const exentoR = roundFacturacion(montoExento);
+            const exentoR = 0;
             const totalR = roundFacturacion(totalConIvaFinal);
-            
-            console.log(`💰 [Facturar Pedido] Monto exento a guardar en venta: $${Number(exentoR).toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
             
             const ventaId = await ventasRepository.insertarVentaCabecera(connection, {
                 numero_factura: numeroCompleto,
@@ -1758,16 +1753,11 @@ const ventaDirecta = async (req, res) => {
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Facturado', ?, ?, ?)
             `;
 
-            // ✅ Política fiscal: EXENTO => exento=iva_total (desde líneas), no EXENTO => exento=0
-            const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
-            const montoExento = esClienteExento ? ivaTotalFinal : 0;
-
+            // La condición Exento del cliente no convierte la venta en operación exenta.
             const subtotalR = roundFacturacion(subtotalSinIvaFinal);
             const ivaTotalR = roundFacturacion(ivaTotalFinal);
-            const exentoR = roundFacturacion(montoExento);
+            const exentoR = 0;
             const totalR = roundFacturacion(totalConIvaFinal);
-            
-            console.log(`💰 [Venta Directa] Monto exento final a guardar: $${Number(exentoR).toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
 
             const pedidoValues = [
                 cliente_id, cliente_nombre, cliente_telefono, cliente_direccion, 
@@ -2218,7 +2208,7 @@ const duplicarVentaBorrador = async (req, res) => {
                 tipo_f: tipoFiscal,
                 subtotal: parseFloat(ventaOrigen.subtotal) || 0,
                 iva_total: parseFloat(ventaOrigen.iva_total) || 0,
-                exento: parseFloat(ventaOrigen.exento) || 0,
+                exento: 0,
                 total: parseFloat(ventaOrigen.total) || 0,
                 estado: 'Facturada',
                 observaciones: observacionesDuplicada,

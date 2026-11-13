@@ -1058,9 +1058,7 @@ class PdfGenerator {
     
     // ✅ Determinar si el cliente está EXENTO (insensible a mayúsculas)
     const condicionIVA = (venta.cliente_condicion || '').toString().trim();
-    const esExento = this.esCondicionExento(condicionIVA);
-    
-    console.log(`🔖 Cliente ${condicionIVA} ${esExento ? '(SIN IVA)' : '(CON IVA)'}`);
+    console.log(`🔖 Cliente ${condicionIVA}. IVA contenido: ${Number.isFinite(parseFloat(venta.iva_total)) ? venta.iva_total : 0}`);
     
     // ✅ MANEJO CONDICIONAL DE OBSERVACIONES + transparencia fiscal (solo Factura B Exento)
     let observacionesHTML = '';
@@ -1069,9 +1067,9 @@ class PdfGenerator {
     const ocultarIvaDiscriminado = (tipoComprobante || '').toString().trim().toUpperCase() === 'B'
       || this.debeOcultarIvaDiscriminadoEnComprobanteB(tipoComprobante, condicionIVA);
     const mostrarTransparenciaFiscal = ocultarIvaDiscriminado;
-    const ivaContenidoRaw = Number.isFinite(parseFloat(venta.exento)) && parseFloat(venta.exento) > 0
-      ? parseFloat(venta.exento)
-      : (Number.isFinite(parseFloat(venta.iva_total)) ? parseFloat(venta.iva_total) : 0);
+    const ivaContenidoRaw = Number.isFinite(parseFloat(venta.iva_total))
+      ? parseFloat(venta.iva_total)
+      : 0;
     const ivaContenidoTexto = this.formatearMonedaRedondeadaCeroCentavos(ivaContenidoRaw);
 
     if (observaciones && observaciones.toLowerCase() !== 'sin observaciones') {

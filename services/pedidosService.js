@@ -445,22 +445,8 @@ const nuevoPedido = async (req, res) => {
         });
     }
 
-    // ✅ Política fiscal: EXENTO informa IVA contenido; no EXENTO informa 0.
-    // No afecta precio final (total), solo el campo fiscal exento.
-    const esClienteExento = cliente_condicion?.toUpperCase() === 'EXENTO';
-    const ivaTotalNumerico = Number(iva_total);
-    const montoExentoFinal = esClienteExento && Number.isFinite(ivaTotalNumerico)
-        ? parseFloat(ivaTotalNumerico.toFixed(2))
-        : 0;
-    
-    console.log(`🔍 Cliente es exento: ${esClienteExento}`);
-    console.log(`💰 IVA total recibido: ${iva_total}`);
-    console.log(`💾 Preparando para guardar pedido:`);
-    console.log(`   - Cliente: ${cliente_nombre}`);
-    console.log(`   - Condición: ${cliente_condicion}`);
-    console.log(`   - Es exento: ${esClienteExento}`);
-    console.log(`   - Monto exento a guardar: $${montoExentoFinal.toFixed(2)} (regla: EXENTO => iva_total; no EXENTO => 0)`);
-    console.log(`   - Tipo de montoExentoFinal: ${typeof montoExentoFinal}`);
+    // La condición Exento del cliente no es una operación exenta. El IVA queda en iva_total.
+    const montoExentoFinal = 0;
 
     const pedidoPayload = {
         cliente_id,
@@ -1707,15 +1693,6 @@ const recalcularYActualizarTotalesPedido = async (
         return rows;
     };
 
-    let condicionParaExento = condicionIvaCliente;
-    if (!condicionParaExento) {
-        const pedidoRows = await execSql(
-            'SELECT cliente_condicion FROM pedidos WHERE id = ?',
-            [pedidoId]
-        );
-        condicionParaExento = pedidoRows[0]?.cliente_condicion || null;
-    }
-
     const queryProductos = `
             SELECT
                 pc.id,
@@ -1761,12 +1738,9 @@ const recalcularYActualizarTotalesPedido = async (
     const ivaTotal = parseFloat(sumRows[0].iva_total) || 0;
     const total = subtotalTotal + ivaTotal;
 
-    const esClienteExento = condicionParaExento && condicionParaExento.toUpperCase() === 'EXENTO';
-    const montoExento = esClienteExento ? ivaTotal : 0;
-
     const subtotalR = roundFacturacion(subtotalTotal);
     const ivaTotalR = roundFacturacion(ivaTotal);
-    const exentoR = roundFacturacion(montoExento);
+    const exentoR = 0;
     const totalR = roundFacturacion(total);
 
     await execSql(
