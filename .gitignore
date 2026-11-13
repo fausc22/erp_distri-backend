@@ -11,7 +11,7 @@ pnpm-debug.log*
 
 certs/
 
-package-lock.json 
+# package-lock.json se versiona a propósito: el deploy usa npm ci contra ese archivo.
 yarn.lock
 
 erp_distri-structure.sql

@@ -1,0 +1,85 @@
+name: Deploy backend
+
+on:
+  push:
+    branches:
+      - refactor/backend-v2
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Destino del deploy
+        required: true
+        type: choice
+        default: ensayo
+        options:
+          - ensayo
+          - produccion
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'ensayo' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Destino
+        id: dest
+        run: |
+          set -euo pipefail
+          TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'ensayo' }}"
+          if [[ "$TARGET" == "produccion" ]]; then
+            echo "app_dir=/opt/distri-api-v2" >> "$GITHUB_OUTPUT"
+            echo "pm2_name=api-vertimar-v2" >> "$GITHUB_OUTPUT"
+            echo "port=3002" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_dir=/opt/distri-api-v2-ensayo" >> "$GITHUB_OUTPUT"
+            echo "pm2_name=api-vertimar-v2-ensayo" >> "$GITHUB_OUTPUT"
+            echo "port=3003" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Destino elegido: $TARGET"
+
+      - name: Deploy por SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          DISCORD: ${{ secrets.DISCORD_WEBHOOK_DEPLOY }}
+          APP_DIR: ${{ steps.dest.outputs.app_dir }}
+          PM2_NAME: ${{ steps.dest.outputs.pm2_name }}
+          PORT: ${{ steps.dest.outputs.port }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SSH_KEY}" || -z "${HOST}" || -z "${USER}" ]]; then
+            echo "Faltan secretos VPS_SSH_KEY, VPS_HOST o VPS_USER"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          PORT_OPT="${SSH_PORT:-22}"
+          ssh-keyscan -p "$PORT_OPT" -H "$HOST" >> ~/.ssh/known_hosts
+          DISCORD_B64="$(printf '%s' "$DISCORD" | base64 -w 0)"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$PORT_OPT" "${USER}@${HOST}" \
+            "APP_DIR='${APP_DIR}' PM2_NAME='${PM2_NAME}' PORT='${PORT}' DEPLOY_BRANCH='refactor/backend-v2' DEPLOY_ACTOR='${ACTOR}' DISCORD_WEBHOOK_DEPLOY=\"\$(printf '%s' '${DISCORD_B64}' | base64 -d)\" bash -s" \
+            < scripts/deploy.sh
+
+      - name: Avisar si el job falló
+        if: failure()
+        env:
+          DISCORD: ${{ secrets.DISCORD_WEBHOOK_DEPLOY }}
+        run: |
+          if [[ -z "${DISCORD}" ]]; then
+            exit 0
+          fi
+          curl -fsS -m 10 -H 'Content-Type: application/json' \
+            -d '{"content":"GitHub Actions: el deploy terminó en error. Si el script alcanzó a escribir en Discord, ese mensaje tiene el detalle."}' \
+            "$DISCORD" || true
