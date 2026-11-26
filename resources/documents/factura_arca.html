@@ -60,9 +60,10 @@
             font-size: 12px;
         }
         .row-details table td, .row-details table th {
-            padding: 8px;
+            padding: 4px 6px;
             border: 1px solid #666;
             font-size: 12px;
+            line-height: 1.25;
         }
         .row-details table th {
             background-color: #e0e0e0;
@@ -72,6 +73,29 @@
         }
         .row-details table tbody tr {
             page-break-inside: avoid;
+        }
+        .row-details .precio-descuento {
+            display: block;
+            font-size: 10px;
+            line-height: 1.2;
+            color: #444;
+            margin-top: 2px;
+        }
+        /* Densidad compacta: solo cuando evita una hoja extra (piso de lectura 11 px) */
+        .factura-page.densidad-compacta .row-details table {
+            font-size: 11px;
+        }
+        .factura-page.densidad-compacta .row-details table td,
+        .factura-page.densidad-compacta .row-details table th {
+            padding: 2px 6px;
+            font-size: 11px;
+            line-height: 1.15;
+        }
+        .factura-page.densidad-compacta .row-details table th {
+            font-size: 12px;
+        }
+        .factura-page.densidad-compacta .row-details .precio-descuento {
+            font-size: 9px;
         }
         
         /* Bloque totales + legal + QR: fijado al final de la hoja */
@@ -171,7 +195,7 @@
         }
         /* Contenedor observaciones y totales */
         .totales-observaciones-container {
-            padding: 10px 12px;
+            padding: 6px 12px;
             border-bottom: 1px solid #000;
             display: flex;
             justify-content: space-between;
@@ -220,7 +244,7 @@
         }
         
         .totales-box table tr {
-            height: 22px;
+            height: 18px;
         }
         
         .totales-box table td {
@@ -228,7 +252,7 @@
         }
         
         .totales-box table .total-row {
-            height: 26px;
+            height: 22px;
             border-top: 1px solid #000;
             background-color: #cfe2f3;
         }
@@ -250,7 +274,7 @@
             vertical-align: middle;
         }
         .qr-section img {
-            max-width: 130px;
+            max-width: 100px;
             height: auto;
             float: left;
             margin-right: 10px;
@@ -276,7 +300,7 @@
         }
         .legal-footer {
             background-color: #f5f5f5;
-            padding: 10px;
+            padding: 4px 8px;
             font-size: 11px;
             border-top: 1px solid #000;
             flex-shrink: 0;
@@ -357,10 +381,11 @@
                 <thead>
                     <tr>
                         <th style="width: 8%;">Cantidad</th>
-                        <th style="width: 40%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 10%;">% IVA</th>
-                        <th style="width: 15%;">Precio</th>
-                        <th style="width: 15%;">Total</th>
+                        <th style="width: 47%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 8%;">UM</th>
+                        <th style="width: 9%;">% IVA</th>
+                        <th style="width: 14%;">Precio</th>
+                        <th style="width: 14%;">Total</th>
                     </tr>
                 </thead>
                 <tbody>

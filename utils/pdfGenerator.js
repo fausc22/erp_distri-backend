@@ -9,8 +9,8 @@ const { resolvePorcentajeIvaLinea } = require('./rounding');
 class PdfGenerator {
     constructor() {
         this.templatesPath = path.join(__dirname, '../resources/documents');
-        this.maxRowsIntermediaARCA = this.parsePositiveInt(process.env.ARCA_MAX_ROWS_INTERMEDIA, 10);
-        this.maxRowsFinalARCA = this.parsePositiveInt(process.env.ARCA_MAX_ROWS_FINAL, 10);
+        this.maxRowsIntermediaARCA = this.parsePositiveInt(process.env.ARCA_MAX_ROWS_INTERMEDIA, 22);
+        this.maxRowsFinalARCA = this.parsePositiveInt(process.env.ARCA_MAX_ROWS_FINAL, 16);
         /* Nota de Pedido A4 — Etapa 4: máx. 16 ítems primera página, 24 en siguientes (configurable por NOTA_PEDIDO_MAX_ROWS_FIRST / NEXT). */
         this.notaPedidoMaxRowsFirst = this.parsePositiveInt(process.env.NOTA_PEDIDO_MAX_ROWS_FIRST, 16);
         this.notaPedidoMaxRowsNext = this.parsePositiveInt(process.env.NOTA_PEDIDO_MAX_ROWS_NEXT, 24);
@@ -649,8 +649,97 @@ class PdfGenerator {
      * Medición: solo se considera "footer" el bloque visible (.factura-footer-wrapper:not(.is-empty))
      * para que availableFinal se mida correctamente cuando el HTML tiene footer completo.
      */
+    /**
+     * Thead unificado para comprobantes ARCA.
+     * Con IVA: Cantidad | Producto | UM | % IVA | Precio | Total
+     * Sin IVA discriminado: Cantidad | Producto | UM | Precio | Total
+     */
+    construirTableHeaderARCA({ ocultarIvaDiscriminado = false } = {}) {
+        if (ocultarIvaDiscriminado) {
+            return `
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cantidad</th>
+                        <th style="width: 52%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 8%;">UM</th>
+                        <th style="width: 16%;">Precio</th>
+                        <th style="width: 16%;">Total</th>
+                    </tr>
+                </thead>
+            `;
+        }
+        return `
+                <thead>
+                    <tr>
+                        <th style="width: 8%;">Cantidad</th>
+                        <th style="width: 47%;">Producto/Servicio/Detalle</th>
+                        <th style="width: 8%;">UM</th>
+                        <th style="width: 9%;">% IVA</th>
+                        <th style="width: 14%;">Precio</th>
+                        <th style="width: 14%;">Total</th>
+                    </tr>
+                </thead>
+            `;
+    }
+
+    /**
+     * Fila de ítem ARCA. UM en columna propia; descuento bajo el precio (sin columnas extra).
+     * fmtMonto: formateador de importes (centavos o redondeo según documento).
+     */
+    construirFilaItemARCA({
+        cantidadFormateada,
+        nombre,
+        um,
+        precioFinal,
+        precioOriginal = null,
+        descuentoPorcentaje = 0,
+        totalLinea,
+        ocultarIvaDiscriminado = false,
+        porcentajeIvaTexto = null,
+        fmtMonto
+    }) {
+        const format = typeof fmtMonto === 'function' ? fmtMonto : (v) => this.formatearMoneda(v);
+        const nombreSafe = (nombre || 'Item').toString();
+        const umSafe = (um || '').toString().trim() || 'unidad';
+        const desc = parseFloat(descuentoPorcentaje) || 0;
+        let celdaPrecio = `<td style="text-align: right; white-space: nowrap;">${format(precioFinal)}</td>`;
+        if (desc > 0 && precioOriginal != null) {
+            celdaPrecio = `
+          <td style="text-align: right;">
+            <span style="white-space: nowrap;">${format(precioFinal)}</span>
+            <span class="precio-descuento">Desc. ${desc.toFixed(0)}% · ${format(precioOriginal)}</span>
+          </td>`;
+        }
+
+        if (ocultarIvaDiscriminado) {
+            return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${nombreSafe}</td>
+          <td style="text-align: center;">${umSafe}</td>
+          ${celdaPrecio}
+          <td style="text-align: right; white-space: nowrap;">${format(totalLinea)}</td>
+        </tr>
+      `;
+        }
+
+        const ivaTexto = porcentajeIvaTexto != null
+            ? porcentajeIvaTexto
+            : '21.00';
+        return `
+        <tr>
+          <td style="text-align: center;">${cantidadFormateada}</td>
+          <td>${nombreSafe}</td>
+          <td style="text-align: center;">${umSafe}</td>
+          <td style="text-align: center;">${ivaTexto}</td>
+          ${celdaPrecio}
+          <td style="text-align: right; white-space: nowrap;">${format(totalLinea)}</td>
+        </tr>
+      `;
+    }
+
     async evaluarMetricasLayoutFacturaARCA(page) {
-        const safePadding = 8;
+        const safePadding = 10;
         return page.evaluate((padding) => {
             const facturaPage = document.querySelector('.factura-page');
             if (!facturaPage) return null;
@@ -735,12 +824,9 @@ class PdfGenerator {
     }
 
     /**
-     * Paginación por llenado progresivo: llena cada página intermedia hasta
-     * availableIntermedia; la última página lleva el remanente (y debe caber en availableFinal).
-     *
-     * Importante: si el remanente cabe en altura de hoja "sin pie" pero no en availableFinal
-     * (hoja con totales/QR), no se puede cerrar esa tanda en una sola página con pie: se dejan
-     * filas para la siguiente página o para una última más corta, evitando solapamiento tabla/footer.
+     * Paginación ARCA: la última hoja lleva el MÁXIMO de filas que entran con el pie
+     * (availableFinal); el prefijo se pagina con availableIntermedia.
+     * Evita la hoja final con 1 ítem cuando el pie admite varias filas.
      */
     paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, limits = {}) {
         if (!Array.isArray(rowHeights) || rowHeights.length === 0) {
@@ -755,21 +841,36 @@ class PdfGenerator {
         }
 
         const sumRange = (start, end) => prefix[end] - prefix[start];
-        const pages = [];
         const totalRows = rowHeights.length;
-        let start = 0;
 
-        while (start < totalRows) {
-            const remainingRows = totalRows - start;
-            if (remainingRows <= maxRowsFinal && sumRange(start, totalRows) <= availableFinal) {
-                pages.push({ start, end: totalRows, isLast: true });
+        // Todo cabe en una sola hoja con pie.
+        if (totalRows <= maxRowsFinal && sumRange(0, totalRows) <= availableFinal) {
+            return [{ start: 0, end: totalRows, isLast: true }];
+        }
+
+        // Capacidad real de la última hoja: máximo de filas finales que entran con el pie.
+        let lastStart = totalRows - 1;
+        for (let candidate = Math.max(0, totalRows - maxRowsFinal); candidate < totalRows; candidate++) {
+            const rowsInLast = totalRows - candidate;
+            if (rowsInLast > maxRowsFinal) continue;
+            const heightLast = sumRange(candidate, totalRows);
+            if (heightLast <= availableFinal || rowsInLast === 1) {
+                lastStart = candidate;
                 break;
             }
+        }
 
+        if (lastStart <= 0) {
+            return [{ start: 0, end: totalRows, isLast: true }];
+        }
+
+        const pages = [];
+        let start = 0;
+        while (start < lastStart) {
             let end = start;
             let used = 0;
 
-            while (end < totalRows) {
+            while (end < lastStart) {
                 const nextRowHeight = parseFloat(rowHeights[end]) || 0;
 
                 if (end === start && nextRowHeight > availableIntermedia) {
@@ -784,16 +885,6 @@ class PdfGenerator {
                     break;
                 }
 
-                // Al añadir la siguiente fila se completaría todo el remanente: esa hoja sería
-                // la última (con pie). Si la suma de alturas del remanente supera availableFinal,
-                // no cerrar aquí (salvo una sola fila inevitable); dejar filas para otra página.
-                if (end + 1 === totalRows) {
-                    const heightAllRemaining = sumRange(start, totalRows);
-                    if (heightAllRemaining > availableFinal && end > start) {
-                        break;
-                    }
-                }
-
                 used += nextRowHeight;
                 end += 1;
             }
@@ -806,16 +897,58 @@ class PdfGenerator {
             start = end;
         }
 
-        if (pages.length === 0) {
-            pages.push({ start: 0, end: totalRows, isLast: true });
-        } else {
-            pages.forEach((page) => {
-                page.isLast = false;
-            });
-            pages[pages.length - 1].isLast = true;
-        }
-
+        pages.push({ start: lastStart, end: totalRows, isLast: true });
         return pages;
+    }
+
+    /**
+     * Mide y pagina un layout ARCA con una clase de densidad ('' o 'densidad-compacta').
+     */
+    async medirYPaginarLayoutARCA({
+        pageTemplate,
+        htmlSkeleton,
+        rowsByItem,
+        footerContent,
+        densidadClass = '',
+        sesion = null
+    }) {
+        const rowsHtml = rowsByItem.join('');
+        const emptyFooter = '<div class="factura-footer-wrapper is-empty"></div>';
+        const baseClass = densidadClass ? `${densidadClass} ` : '';
+
+        const medicionIntermediaHtml = pageTemplate
+            .replace(/{{items}}/g, rowsHtml)
+            .replace(/{{footer_content}}/g, emptyFooter)
+            .replace(/{{page_class}}/g, baseClass.trim())
+            .replace(/\{\{page_number\}\}/g, '1')
+            .replace(/\{\{page_total\}\}/g, '1');
+        const htmlMedicionIntermedia = htmlSkeleton.replace('{{pages_html}}', medicionIntermediaHtml);
+        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia, sesion);
+        const { rowHeights, availableIntermedia } = metricsIntermedia;
+
+        const unaFilaHtml = rowsByItem.length > 0 ? rowsByItem.slice(0, 1).join('') : '';
+        const medicionFinalHtml = pageTemplate
+            .replace(/{{items}}/g, unaFilaHtml)
+            .replace(/{{footer_content}}/g, footerContent)
+            .replace(/{{page_class}}/g, `${baseClass}last-page`.trim())
+            .replace(/\{\{page_number\}\}/g, '1')
+            .replace(/\{\{page_total\}\}/g, '1');
+        const htmlMedicionFinal = htmlSkeleton.replace('{{pages_html}}', medicionFinalHtml);
+        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal, sesion);
+        const availableFinal = metricsFinal.availableFinal;
+
+        const pages = this.paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, {
+            maxRowsIntermedia: this.maxRowsIntermediaARCA,
+            maxRowsFinal: this.maxRowsFinalARCA
+        });
+
+        return {
+            pages,
+            rowHeights,
+            availableIntermedia,
+            availableFinal,
+            densidadClass
+        };
     }
 
     /**
@@ -823,6 +956,9 @@ class PdfGenerator {
      * Única implementación compartida: garantiza Reglas 1-4 (encabezado fijo, footer solo
      * en última, numeración Página X/Y). En plantillas de notas, la sección "comprobante
      * asociado" está dentro del bloque de página y se repite en todas las hojas (encabezado).
+     *
+     * Densidad: normal (12 px) si cabe en una hoja; compacta (11 px) solo si evita una hoja
+     * extra; si ni compacta entra en una, varias hojas en normal con última llena al máximo.
      */
     async construirHtmlMultipaginaARCA({
         templatePath,
@@ -854,40 +990,40 @@ class PdfGenerator {
             logo_empresa: this.obtenerLogoEmpresaBase64()
         });
 
-        const rowsHtml = rowsByItem.join('');
-        const emptyFooter = '<div class="factura-footer-wrapper is-empty"></div>';
-
-        // Medición 1: todos los ítems + footer vacío → rowHeights y availableIntermedia (hoja sin totales)
-        const medicionIntermediaHtml = pageTemplate
-            .replace(/{{items}}/g, rowsHtml)
-            .replace(/{{footer_content}}/g, emptyFooter)
-            .replace(/{{page_class}}/g, '')
-            .replace(/\{\{page_number\}\}/g, '1')
-            .replace(/\{\{page_total\}\}/g, '1');
-        const htmlMedicionIntermedia = htmlSkeleton.replace('{{pages_html}}', medicionIntermediaHtml);
-        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia, sesion);
-        const { rowHeights, availableIntermedia } = metricsIntermedia;
-
-        // Medición 2: una fila + footer completo → availableFinal (espacio para ítems en la hoja que lleva total/QR)
-        const unaFilaHtml = rowsByItem.length > 0 ? rowsByItem.slice(0, 1).join('') : '';
-        const medicionFinalHtml = pageTemplate
-            .replace(/{{items}}/g, unaFilaHtml)
-            .replace(/{{footer_content}}/g, footerContent)
-            .replace(/{{page_class}}/g, 'last-page')
-            .replace(/\{\{page_number\}\}/g, '1')
-            .replace(/\{\{page_total\}\}/g, '1');
-        const htmlMedicionFinal = htmlSkeleton.replace('{{pages_html}}', medicionFinalHtml);
-        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal, sesion);
-        const availableFinal = metricsFinal.availableFinal;
-
-        const pages = this.paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, {
-            maxRowsIntermedia: this.maxRowsIntermediaARCA,
-            maxRowsFinal: this.maxRowsFinalARCA
+        const layoutNormal = await this.medirYPaginarLayoutARCA({
+            pageTemplate,
+            htmlSkeleton,
+            rowsByItem,
+            footerContent,
+            densidadClass: '',
+            sesion
         });
+
+        let layoutElegido = layoutNormal;
+        let densidadElegida = 'normal';
+
+        // Si normal abre más de una hoja, probar compacta: usarla solo si reduce a una hoja.
+        if (layoutNormal.pages.length > 1 && rowsByItem.length > 0) {
+            const layoutCompacta = await this.medirYPaginarLayoutARCA({
+                pageTemplate,
+                htmlSkeleton,
+                rowsByItem,
+                footerContent,
+                densidadClass: 'densidad-compacta',
+                sesion
+            });
+            if (layoutCompacta.pages.length === 1) {
+                layoutElegido = layoutCompacta;
+                densidadElegida = 'compacta';
+            }
+        }
+
+        const { pages, rowHeights, availableIntermedia, availableFinal, densidadClass } = layoutElegido;
         const totalRowsHeight = rowHeights.reduce((acc, height) => acc + (parseFloat(height) || 0), 0);
         console.log(
-            `📐 ARCA layout: filas=${rowHeights.length}, altoFilas=${totalRowsHeight.toFixed(2)}, ` +
-            `intermedia=${availableIntermedia.toFixed(2)}, final=${availableFinal.toFixed(2)}, ` +
+            `📐 ARCA layout: densidad=${densidadElegida}, filas=${rowHeights.length}, ` +
+            `altoFilas=${totalRowsHeight.toFixed(2)}, intermedia=${availableIntermedia.toFixed(2)}, ` +
+            `final=${availableFinal.toFixed(2)}, paginas=${pages.length}, ` +
             `maxIntermedia=${this.maxRowsIntermediaARCA}, maxFinal=${this.maxRowsFinalARCA}`
         );
 
@@ -897,18 +1033,23 @@ class PdfGenerator {
             const pageFooter = isLastPage
                 ? footerContent
                 : '<div class="factura-footer-wrapper is-empty"></div>';
+            const pageClasses = [
+                densidadClass,
+                isLastPage ? 'last-page' : ''
+            ].filter(Boolean).join(' ');
 
             return pageTemplate
                 .replace(/{{items}}/g, pageItems)
                 .replace(/{{footer_content}}/g, pageFooter)
-                .replace(/{{page_class}}/g, isLastPage ? 'last-page' : '')
+                .replace(/{{page_class}}/g, pageClasses)
                 .replace(/\{\{page_number\}\}/g, String(index + 1))
                 .replace(/\{\{page_total\}\}/g, String(pages.length));
         }).join('\n');
 
         return {
             html: htmlSkeleton.replace('{{pages_html}}', pagesHtml),
-            pageCount: pages.length
+            pageCount: pages.length,
+            densidad: densidadElegida
         };
     }
 
@@ -1092,8 +1233,6 @@ class PdfGenerator {
       console.log(`🧾 Transparencia fiscal agregada (Factura B Exento): IVA contenido $${ivaContenidoTexto}`);
     }
     
-    // ✅ DETECTAR SI HAY DESCUENTOS EN ALGÚN PRODUCTO
-    const hayDescuentos = productos.some(p => parseFloat(p.descuento_porcentaje || 0) > 0);
     const totalFacturaCabecera = Number.isFinite(parseFloat(venta.total)) ? parseFloat(venta.total) : null;
     const totalesVisualesFacturaB = esFacturaB && !calculoGuardado
       ? this.construirTotalesVisualesRedondeados(
@@ -1111,6 +1250,7 @@ class PdfGenerator {
       : (v) => this.formatearMoneda(v);
     
     // ✅ FILAS HTML de ítems (array para poder paginar)
+    // UM en columna propia; descuento bajo el precio (sin columnas extra).
     const rowsByItem = productos.map((producto, index) => {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotalItem = parseFloat(producto.subtotal) || 0;
@@ -1118,10 +1258,7 @@ class PdfGenerator {
       const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const cantidadFormateada = this.formatearCantidad(cantidad);
 
-      // Para toda Factura B (consumidor final, monotributo, exento): mostrar precios CON IVA
-      // incluido, para que el cliente vea el valor real que paga (números redondos).
-      // La diferencia entre exento y no exento es solo la columna de IVA en el encabezado.
-      // Para Factura A (Responsable Inscripto): mantener base imponible SIN IVA (correcto legalmente).
+      // Factura B: precios CON IVA. Factura A: base imponible SIN IVA.
       const totalItemRaw = esFacturaB ? (subtotalItem + ivaItem) : subtotalItem;
       const totalItemBase = esFacturaB
         ? (calculoGuardado ? totalItemRaw : (totalesVisualesFacturaB[index] ?? Math.round(totalItemRaw)))
@@ -1131,107 +1268,21 @@ class PdfGenerator {
         ? precioConDescuento / (1 - descuento / 100)
         : precioConDescuento;
 
-      // Si hay descuentos en la factura, agregar columnas de precio original y descuento
-      if (hayDescuentos) {
-        if (ocultarIvaDiscriminado) {
-          return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioOriginal)}</td>
-          <td style="text-align: center;">${descuento.toFixed(0)}%</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
-        </tr>
-      `;
-        }
-        return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioOriginal)}</td>
-          <td style="text-align: center;">${descuento.toFixed(0)}%</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
-        </tr>
-      `;
-      }
-      // Layout sin descuentos
-      if (ocultarIvaDiscriminado) {
-        return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
-        </tr>
-      `;
-      }
-      return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre} - ${producto.producto_um}</td>
-          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(precioConDescuento)}</td>
-          <td style="text-align: right; white-space: nowrap;">${fmtMontoFactura(totalItemBase)}</td>
-        </tr>
-      `;
+      return this.construirFilaItemARCA({
+        cantidadFormateada,
+        nombre: producto.producto_nombre,
+        um: producto.producto_um,
+        precioFinal: precioConDescuento,
+        precioOriginal: descuento > 0 ? precioOriginal : null,
+        descuentoPorcentaje: descuento,
+        totalLinea: totalItemBase,
+        ocultarIvaDiscriminado,
+        porcentajeIvaTexto: this.formatearPorcentajeIvaLinea(producto),
+        fmtMonto: fmtMontoFactura
+      });
     });
 
-    // ✅ REEMPLAZAR HEADER DE LA TABLA: según descuentos y si es exento (exento → sin columna % IVA)
-    let tableHeader;
-    if (ocultarIvaDiscriminado && hayDescuentos) {
-        tableHeader = `
-                <thead>
-                    <tr>
-                        <th style="width: 8%;">Cant.</th>
-                        <th style="width: 32%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 14%;">P. Original</th>
-                        <th style="width: 8%;">Desc.</th>
-                        <th style="width: 14%;">P. Final</th>
-                        <th style="width: 14%;">Total</th>
-                    </tr>
-                </thead>
-    `;
-    } else if (ocultarIvaDiscriminado) {
-        tableHeader = `
-                <thead>
-                    <tr>
-                        <th style="width: 10%;">Cantidad</th>
-                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 20%;">Precio</th>
-                        <th style="width: 20%;">Total</th>
-                    </tr>
-                </thead>
-    `;
-    } else if (hayDescuentos) {
-        tableHeader = `
-                <thead>
-                    <tr>
-                        <th style="width: 7%;">Cant.</th>
-                        <th style="width: 24%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 7%;">IVA</th>
-                        <th style="width: 14%;">P. Original</th>
-                        <th style="width: 7%;">Desc.</th>
-                        <th style="width: 14%;">P. Final</th>
-                        <th style="width: 14%;">Total</th>
-                    </tr>
-                </thead>
-    `;
-    } else {
-        tableHeader = `
-                <thead>
-                    <tr>
-                        <th style="width: 8%;">Cantidad</th>
-                        <th style="width: 40%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 10%;">% IVA</th>
-                        <th style="width: 15%;">Precio</th>
-                        <th style="width: 15%;">Total</th>
-                    </tr>
-                </thead>
-    `;
-    }
+    const tableHeader = this.construirTableHeaderARCA({ ocultarIvaDiscriminado });
 
     // ✅ TOTALES: priorizar importes persistidos en la venta para evitar divergencias
     const subtotalCalculado = productos.reduce((acc, item) => acc + (parseFloat(item.subtotal) || 0), 0);
@@ -1367,32 +1418,27 @@ class PdfGenerator {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
       const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
+      const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const cantidadFormateada = this.formatearCantidad(cantidad);
       const subtotalMostrado = ocultarIvaDiscriminado
         ? (calculoGuardado ? subtotal + ivaItem : (totalesVisualesNota[index] ?? Math.round(subtotal + ivaItem)))
         : subtotal;
       const precioUnitario = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
-      
-      if (ocultarIvaDiscriminado) {
-        return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
-        </tr>
-      `;
-      }
+      const precioOriginal = descuento > 0
+        ? precioUnitario / (1 - descuento / 100)
+        : precioUnitario;
 
-      return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
-        </tr>
-      `;
+      return this.construirFilaItemARCA({
+        cantidadFormateada,
+        nombre: producto.producto_nombre || producto.descripcion || 'Item',
+        um: producto.producto_um,
+        precioFinal: precioUnitario,
+        precioOriginal: descuento > 0 ? precioOriginal : null,
+        descuentoPorcentaje: descuento,
+        totalLinea: subtotalMostrado,
+        ocultarIvaDiscriminado,
+        porcentajeIvaTexto: this.formatearPorcentajeIvaLinea(producto)
+      });
     });
 
     // ✅ TOTALES
@@ -1407,18 +1453,7 @@ class PdfGenerator {
       ? parseFloat(nota.total)
       : (subtotal + ivaTotal);
 
-    const tableHeader = ocultarIvaDiscriminado
-      ? `
-                <thead>
-                    <tr>
-                        <th style="width: 10%;">Cantidad</th>
-                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 20%;">Precio</th>
-                        <th style="width: 20%;">Total</th>
-                    </tr>
-                </thead>
-    `
-      : undefined;
+    const tableHeader = this.construirTableHeaderARCA({ ocultarIvaDiscriminado });
 
     const footerContent = this.construirFooterFacturaARCA({
       observacionesHTML,
@@ -1534,30 +1569,25 @@ class PdfGenerator {
       const cantidad = parseFloat(producto.cantidad) || 0;
       const subtotal = parseFloat(producto.subtotal) || 0;
       const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
+      const descuento = parseFloat(producto.descuento_porcentaje || 0);
       const cantidadFormateada = this.formatearCantidad(cantidad);
       const subtotalMostrado = ocultarIvaDiscriminado ? (subtotal + ivaItem) : subtotal;
       const precioUnitario = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
-      
-      if (ocultarIvaDiscriminado) {
-        return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
-        </tr>
-      `;
-      }
+      const precioOriginal = descuento > 0
+        ? precioUnitario / (1 - descuento / 100)
+        : precioUnitario;
 
-      return `
-        <tr>
-          <td style="text-align: center;">${cantidadFormateada}</td>
-          <td>${producto.producto_nombre || producto.descripcion || 'Item'} - ${producto.producto_um || ''}</td>
-          <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitario)}</td>
-          <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
-        </tr>
-      `;
+      return this.construirFilaItemARCA({
+        cantidadFormateada,
+        nombre: producto.producto_nombre || producto.descripcion || 'Item',
+        um: producto.producto_um,
+        precioFinal: precioUnitario,
+        precioOriginal: descuento > 0 ? precioOriginal : null,
+        descuentoPorcentaje: descuento,
+        totalLinea: subtotalMostrado,
+        ocultarIvaDiscriminado,
+        porcentajeIvaTexto: this.formatearPorcentajeIvaLinea(producto)
+      });
     });
 
     // ✅ TOTALES
@@ -1572,18 +1602,7 @@ class PdfGenerator {
       ? parseFloat(nota.total)
       : (subtotal + ivaTotal);
 
-    const tableHeader = ocultarIvaDiscriminado
-      ? `
-                <thead>
-                    <tr>
-                        <th style="width: 10%;">Cantidad</th>
-                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 20%;">Precio</th>
-                        <th style="width: 20%;">Total</th>
-                    </tr>
-                </thead>
-    `
-      : undefined;
+    const tableHeader = this.construirTableHeaderARCA({ ocultarIvaDiscriminado });
 
     const footerContent = this.construirFooterFacturaARCA({
       observacionesHTML,
@@ -2729,32 +2748,28 @@ class PdfGenerator {
             const cantidad = parseFloat(producto.cantidad) || 0;
             const subtotal = parseFloat(producto.subtotal) || 0;
             const ivaItem = parseFloat(producto.iva || producto.iva_calculado) || 0;
+            const descuento = parseFloat(producto.descuento_porcentaje || 0);
             const cantidadFormateada = this.formatearCantidad(cantidad);
             
             const subtotalMostrado = ocultarIvaDiscriminado
                 ? (totalesVisualesComprobante[index] ?? Math.round(subtotal + ivaItem))
                 : subtotal;
             const precioUnitarioSinIva = cantidad > 0 ? (subtotalMostrado / cantidad) : 0;
-            if (ocultarIvaDiscriminado) {
-                return `
-                    <tr>
-                        <td style="text-align: center;">${cantidadFormateada}</td>
-                        <td>${producto.producto_nombre} - ${producto.producto_um || 'unidad'}</td>
-                        <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitarioSinIva)}</td>
-                        <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
-                    </tr>
-                `;
-            }
+            const precioOriginal = descuento > 0
+                ? precioUnitarioSinIva / (1 - descuento / 100)
+                : precioUnitarioSinIva;
 
-            return `
-                <tr>
-                    <td style="text-align: center;">${cantidadFormateada}</td>
-                    <td>${producto.producto_nombre} - ${producto.producto_um || 'unidad'}</td>
-                    <td style="text-align: center;">${this.formatearPorcentajeIvaLinea(producto)}</td>
-                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(precioUnitarioSinIva)}</td>
-                    <td style="text-align: right; white-space: nowrap;">${this.formatearMoneda(subtotalMostrado)}</td>
-                </tr>
-            `;
+            return this.construirFilaItemARCA({
+                cantidadFormateada,
+                nombre: producto.producto_nombre,
+                um: producto.producto_um || 'unidad',
+                precioFinal: precioUnitarioSinIva,
+                precioOriginal: descuento > 0 ? precioOriginal : null,
+                descuentoPorcentaje: descuento,
+                totalLinea: subtotalMostrado,
+                ocultarIvaDiscriminado,
+                porcentajeIvaTexto: this.formatearPorcentajeIvaLinea(producto)
+            });
         });
 
         // ✅ TOTALES: priorizar importes persistidos en cabecera de venta
@@ -2769,18 +2784,7 @@ class PdfGenerator {
             ? parseFloat(venta.total)
             : (subtotal + ivaTotal);
 
-        const tableHeader = ocultarIvaDiscriminado
-            ? `
-                <thead>
-                    <tr>
-                        <th style="width: 10%;">Cantidad</th>
-                        <th style="width: 50%;">Producto/Servicio/Detalle</th>
-                        <th style="width: 20%;">Precio</th>
-                        <th style="width: 20%;">Total</th>
-                    </tr>
-                </thead>
-            `
-            : undefined;
+        const tableHeader = this.construirTableHeaderARCA({ ocultarIvaDiscriminado });
 
         const footerContent = this.construirFooterFacturaARCA({
             observacionesHTML,
