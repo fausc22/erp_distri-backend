@@ -81,6 +81,22 @@
             color: #444;
             margin-top: 2px;
         }
+        /* Densidad compacta: solo cuando evita una hoja extra (piso de lectura 11 px) */
+        .factura-page.densidad-compacta .row-details table {
+            font-size: 11px;
+        }
+        .factura-page.densidad-compacta .row-details table td,
+        .factura-page.densidad-compacta .row-details table th {
+            padding: 2px 6px;
+            font-size: 11px;
+            line-height: 1.15;
+        }
+        .factura-page.densidad-compacta .row-details table th {
+            font-size: 12px;
+        }
+        .factura-page.densidad-compacta .row-details .precio-descuento {
+            font-size: 9px;
+        }
         
         /* Bloque totales + legal + QR: fijado al final de la hoja */
         .factura-footer-wrapper {

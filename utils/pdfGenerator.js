@@ -824,10 +824,9 @@ class PdfGenerator {
     }
 
     /**
-     * Paginación ARCA: llena hojas intermedias al máximo y deja en la última
-     * el mínimo de filas que aún caben con el pie (availableFinal).
-     * Evita la última hoja con 1 ítem cuando el remanente no entraba con el pie,
-     * y evita dejar la primera a medio llenar por reservar de más al final.
+     * Paginación ARCA: la última hoja lleva el MÁXIMO de filas que entran con el pie
+     * (availableFinal); el prefijo se pagina con availableIntermedia.
+     * Evita la hoja final con 1 ítem cuando el pie admite varias filas.
      */
     paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, limits = {}) {
         if (!Array.isArray(rowHeights) || rowHeights.length === 0) {
@@ -843,31 +842,35 @@ class PdfGenerator {
 
         const sumRange = (start, end) => prefix[end] - prefix[start];
         const totalRows = rowHeights.length;
-        const pages = [];
-        let start = 0;
 
-        while (start < totalRows) {
-            const remaining = totalRows - start;
-            if (remaining <= maxRowsFinal && sumRange(start, totalRows) <= availableFinal) {
-                pages.push({ start, end: totalRows, isLast: true });
+        // Todo cabe en una sola hoja con pie.
+        if (totalRows <= maxRowsFinal && sumRange(0, totalRows) <= availableFinal) {
+            return [{ start: 0, end: totalRows, isLast: true }];
+        }
+
+        // Capacidad real de la última hoja: máximo de filas finales que entran con el pie.
+        let lastStart = totalRows - 1;
+        for (let candidate = Math.max(0, totalRows - maxRowsFinal); candidate < totalRows; candidate++) {
+            const rowsInLast = totalRows - candidate;
+            if (rowsInLast > maxRowsFinal) continue;
+            const heightLast = sumRange(candidate, totalRows);
+            if (heightLast <= availableFinal || rowsInLast === 1) {
+                lastStart = candidate;
                 break;
             }
+        }
 
-            // Mínimo a dejar para una última hoja válida (al menos 1).
-            let minLeave = 1;
-            const maxLeave = Math.min(maxRowsFinal, remaining - 1);
-            for (let leave = 1; leave <= maxLeave; leave++) {
-                if (sumRange(totalRows - leave, totalRows) <= availableFinal) {
-                    minLeave = leave;
-                    break;
-                }
-            }
+        if (lastStart <= 0) {
+            return [{ start: 0, end: totalRows, isLast: true }];
+        }
 
-            const hardLimit = totalRows - minLeave;
+        const pages = [];
+        let start = 0;
+        while (start < lastStart) {
             let end = start;
             let used = 0;
 
-            while (end < hardLimit) {
+            while (end < lastStart) {
                 const nextRowHeight = parseFloat(rowHeights[end]) || 0;
 
                 if (end === start && nextRowHeight > availableIntermedia) {
@@ -887,29 +890,65 @@ class PdfGenerator {
             }
 
             if (end === start) {
-                end = Math.min(start + 1, totalRows);
-            }
-
-            // Si al forzar avance ya no queda remanente, esta es la última.
-            if (end >= totalRows) {
-                pages.push({ start, end: totalRows, isLast: true });
-                break;
+                end = start + 1;
             }
 
             pages.push({ start, end, isLast: false });
             start = end;
         }
 
-        if (pages.length === 0) {
-            pages.push({ start: 0, end: totalRows, isLast: true });
-        } else {
-            pages.forEach((page) => {
-                page.isLast = false;
-            });
-            pages[pages.length - 1].isLast = true;
-        }
-
+        pages.push({ start: lastStart, end: totalRows, isLast: true });
         return pages;
+    }
+
+    /**
+     * Mide y pagina un layout ARCA con una clase de densidad ('' o 'densidad-compacta').
+     */
+    async medirYPaginarLayoutARCA({
+        pageTemplate,
+        htmlSkeleton,
+        rowsByItem,
+        footerContent,
+        densidadClass = '',
+        sesion = null
+    }) {
+        const rowsHtml = rowsByItem.join('');
+        const emptyFooter = '<div class="factura-footer-wrapper is-empty"></div>';
+        const baseClass = densidadClass ? `${densidadClass} ` : '';
+
+        const medicionIntermediaHtml = pageTemplate
+            .replace(/{{items}}/g, rowsHtml)
+            .replace(/{{footer_content}}/g, emptyFooter)
+            .replace(/{{page_class}}/g, baseClass.trim())
+            .replace(/\{\{page_number\}\}/g, '1')
+            .replace(/\{\{page_total\}\}/g, '1');
+        const htmlMedicionIntermedia = htmlSkeleton.replace('{{pages_html}}', medicionIntermediaHtml);
+        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia, sesion);
+        const { rowHeights, availableIntermedia } = metricsIntermedia;
+
+        const unaFilaHtml = rowsByItem.length > 0 ? rowsByItem.slice(0, 1).join('') : '';
+        const medicionFinalHtml = pageTemplate
+            .replace(/{{items}}/g, unaFilaHtml)
+            .replace(/{{footer_content}}/g, footerContent)
+            .replace(/{{page_class}}/g, `${baseClass}last-page`.trim())
+            .replace(/\{\{page_number\}\}/g, '1')
+            .replace(/\{\{page_total\}\}/g, '1');
+        const htmlMedicionFinal = htmlSkeleton.replace('{{pages_html}}', medicionFinalHtml);
+        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal, sesion);
+        const availableFinal = metricsFinal.availableFinal;
+
+        const pages = this.paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, {
+            maxRowsIntermedia: this.maxRowsIntermediaARCA,
+            maxRowsFinal: this.maxRowsFinalARCA
+        });
+
+        return {
+            pages,
+            rowHeights,
+            availableIntermedia,
+            availableFinal,
+            densidadClass
+        };
     }
 
     /**
@@ -917,6 +956,9 @@ class PdfGenerator {
      * Única implementación compartida: garantiza Reglas 1-4 (encabezado fijo, footer solo
      * en última, numeración Página X/Y). En plantillas de notas, la sección "comprobante
      * asociado" está dentro del bloque de página y se repite en todas las hojas (encabezado).
+     *
+     * Densidad: normal (12 px) si cabe en una hoja; compacta (11 px) solo si evita una hoja
+     * extra; si ni compacta entra en una, varias hojas en normal con última llena al máximo.
      */
     async construirHtmlMultipaginaARCA({
         templatePath,
@@ -948,40 +990,40 @@ class PdfGenerator {
             logo_empresa: this.obtenerLogoEmpresaBase64()
         });
 
-        const rowsHtml = rowsByItem.join('');
-        const emptyFooter = '<div class="factura-footer-wrapper is-empty"></div>';
-
-        // Medición 1: todos los ítems + footer vacío → rowHeights y availableIntermedia (hoja sin totales)
-        const medicionIntermediaHtml = pageTemplate
-            .replace(/{{items}}/g, rowsHtml)
-            .replace(/{{footer_content}}/g, emptyFooter)
-            .replace(/{{page_class}}/g, '')
-            .replace(/\{\{page_number\}\}/g, '1')
-            .replace(/\{\{page_total\}\}/g, '1');
-        const htmlMedicionIntermedia = htmlSkeleton.replace('{{pages_html}}', medicionIntermediaHtml);
-        const metricsIntermedia = await this.medirLayoutFacturaARCA(htmlMedicionIntermedia, sesion);
-        const { rowHeights, availableIntermedia } = metricsIntermedia;
-
-        // Medición 2: una fila + footer completo → availableFinal (espacio para ítems en la hoja que lleva total/QR)
-        const unaFilaHtml = rowsByItem.length > 0 ? rowsByItem.slice(0, 1).join('') : '';
-        const medicionFinalHtml = pageTemplate
-            .replace(/{{items}}/g, unaFilaHtml)
-            .replace(/{{footer_content}}/g, footerContent)
-            .replace(/{{page_class}}/g, 'last-page')
-            .replace(/\{\{page_number\}\}/g, '1')
-            .replace(/\{\{page_total\}\}/g, '1');
-        const htmlMedicionFinal = htmlSkeleton.replace('{{pages_html}}', medicionFinalHtml);
-        const metricsFinal = await this.medirLayoutFacturaARCA(htmlMedicionFinal, sesion);
-        const availableFinal = metricsFinal.availableFinal;
-
-        const pages = this.paginarFilasFacturaARCA(rowHeights, availableIntermedia, availableFinal, {
-            maxRowsIntermedia: this.maxRowsIntermediaARCA,
-            maxRowsFinal: this.maxRowsFinalARCA
+        const layoutNormal = await this.medirYPaginarLayoutARCA({
+            pageTemplate,
+            htmlSkeleton,
+            rowsByItem,
+            footerContent,
+            densidadClass: '',
+            sesion
         });
+
+        let layoutElegido = layoutNormal;
+        let densidadElegida = 'normal';
+
+        // Si normal abre más de una hoja, probar compacta: usarla solo si reduce a una hoja.
+        if (layoutNormal.pages.length > 1 && rowsByItem.length > 0) {
+            const layoutCompacta = await this.medirYPaginarLayoutARCA({
+                pageTemplate,
+                htmlSkeleton,
+                rowsByItem,
+                footerContent,
+                densidadClass: 'densidad-compacta',
+                sesion
+            });
+            if (layoutCompacta.pages.length === 1) {
+                layoutElegido = layoutCompacta;
+                densidadElegida = 'compacta';
+            }
+        }
+
+        const { pages, rowHeights, availableIntermedia, availableFinal, densidadClass } = layoutElegido;
         const totalRowsHeight = rowHeights.reduce((acc, height) => acc + (parseFloat(height) || 0), 0);
         console.log(
-            `📐 ARCA layout: filas=${rowHeights.length}, altoFilas=${totalRowsHeight.toFixed(2)}, ` +
-            `intermedia=${availableIntermedia.toFixed(2)}, final=${availableFinal.toFixed(2)}, ` +
+            `📐 ARCA layout: densidad=${densidadElegida}, filas=${rowHeights.length}, ` +
+            `altoFilas=${totalRowsHeight.toFixed(2)}, intermedia=${availableIntermedia.toFixed(2)}, ` +
+            `final=${availableFinal.toFixed(2)}, paginas=${pages.length}, ` +
             `maxIntermedia=${this.maxRowsIntermediaARCA}, maxFinal=${this.maxRowsFinalARCA}`
         );
 
@@ -991,18 +1033,23 @@ class PdfGenerator {
             const pageFooter = isLastPage
                 ? footerContent
                 : '<div class="factura-footer-wrapper is-empty"></div>';
+            const pageClasses = [
+                densidadClass,
+                isLastPage ? 'last-page' : ''
+            ].filter(Boolean).join(' ');
 
             return pageTemplate
                 .replace(/{{items}}/g, pageItems)
                 .replace(/{{footer_content}}/g, pageFooter)
-                .replace(/{{page_class}}/g, isLastPage ? 'last-page' : '')
+                .replace(/{{page_class}}/g, pageClasses)
                 .replace(/\{\{page_number\}\}/g, String(index + 1))
                 .replace(/\{\{page_total\}\}/g, String(pages.length));
         }).join('\n');
 
         return {
             html: htmlSkeleton.replace('{{pages_html}}', pagesHtml),
-            pageCount: pages.length
+            pageCount: pages.length,
+            densidad: densidadElegida
         };
     }
 

@@ -120,7 +120,35 @@ test('alturas mixtas: cobertura exacta 0..n', () => {
   }
 });
 
-test('remanente que no entra con pie: llena intermedias y deja remanente válido (no 1 sola fila si hay más espacio)', () => {
+test('12 filas / final cabe 11: última NO queda en 1 (máximo al pie)', () => {
+  // Caso real: ~12 ítems a 24 px, availableFinal ~266 → caben 11 con pie.
+  const heights = Array(12).fill(24);
+  const pages = pdfGenerator.paginarFilasFacturaARCA(heights, 588, 266, {
+    maxRowsIntermedia: 22,
+    maxRowsFinal: 16
+  });
+  assertCoverage(pages, 12);
+  const last = pages[pages.length - 1];
+  const lastCount = last.end - last.start;
+  assert.ok(lastCount >= 10, `última debe llevar ~11, got ${lastCount}`);
+  assert.notStrictEqual(lastCount, 1, 'última no puede ser hoja huérfana de 1 ítem');
+  assert.ok(sumRange(heights, last.start, last.end) <= 266 + 0.01);
+});
+
+test('18 filas: última llena al máximo del pie (~11), no 17+1', () => {
+  const heights = Array(18).fill(24);
+  const pages = pdfGenerator.paginarFilasFacturaARCA(heights, 588, 266, {
+    maxRowsIntermedia: 22,
+    maxRowsFinal: 16
+  });
+  assertCoverage(pages, 18);
+  const last = pages[pages.length - 1];
+  const lastCount = last.end - last.start;
+  assert.ok(lastCount >= 10, `última ~11 ítems, got ${lastCount}`);
+  assert.ok(pages[0].end - pages[0].start >= 5, 'prefijo con el resto');
+});
+
+test('remanente que no entra con pie: última al máximo que cabe', () => {
   // 12 filas de 30 = 360. intermedia=200 (~6), final=100 (~3).
   const heights = Array(12).fill(30);
   const pages = pdfGenerator.paginarFilasFacturaARCA(heights, 200, 100, {
@@ -128,22 +156,21 @@ test('remanente que no entra con pie: llena intermedias y deja remanente válido
     maxRowsFinal: 16
   });
   assertCoverage(pages, 12);
-  // Con fill-forward: 6 + 6, o 6+3+3… la última debe caber y no ser 1 si el remanente permite más.
   const last = pages[pages.length - 1];
-  assert.ok(last.end - last.start >= 1);
+  assert.ok(last.end - last.start >= 3, `última al máximo (~3), got ${last.end - last.start}`);
   assert.ok(sumRange(heights, last.start, last.end) <= 100 + 0.01);
-  // Primera intermedia debe aprovechar el hueco (~6 filas), no quedar en 1.
-  assert.ok(pages[0].end - pages[0].start >= 5, 'primera intermedia bien aprovechada');
 });
 
-test('30 filas: primera intermedia cerca del tope (no subllena por reservar de más al final)', () => {
+test('30 filas: última al máximo del pie y cobertura completa', () => {
   const heights = Array(30).fill(20);
   const pages = pdfGenerator.paginarFilasFacturaARCA(heights, 440, 200, {
     maxRowsIntermedia: 22,
     maxRowsFinal: 16
   });
   assertCoverage(pages, 30);
-  assert.ok(pages[0].end - pages[0].start >= 20, `primera debe llenarse: got ${pages[0].end - pages[0].start}`);
+  const last = pages[pages.length - 1];
+  assert.ok(last.end - last.start >= 8, `última aprovechada: got ${last.end - last.start}`);
+  assert.notStrictEqual(last.end - last.start, 1);
 });
 
 test('defaults de techo: intermedia 22, final 16', () => {

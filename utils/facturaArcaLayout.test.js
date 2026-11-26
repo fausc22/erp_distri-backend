@@ -89,14 +89,18 @@ async function assertLayoutHtml(html, pageCount, itemNames) {
       const names = [];
       const overlaps = [];
       const footerFlags = [];
+      const rowCounts = [];
+      let hasCompacta = false;
 
       pages.forEach((pageEl, pageIndex) => {
+        if (pageEl.classList.contains('densidad-compacta')) hasCompacta = true;
         const pageRect = pageEl.getBoundingClientRect();
         const footer = pageEl.querySelector('.factura-footer-wrapper');
         const footerVisible = footer && !footer.classList.contains('is-empty');
         footerFlags.push(!!footerVisible);
 
         const rows = Array.from(pageEl.querySelectorAll('.row-details tbody tr'));
+        rowCounts.push(rows.length);
         rows.forEach((row) => {
           const nameCell = row.querySelectorAll('td')[1];
           if (nameCell) names.push(nameCell.textContent.trim());
@@ -131,6 +135,8 @@ async function assertLayoutHtml(html, pageCount, itemNames) {
         names,
         overlaps,
         footerFlags,
+        rowCounts,
+        hasCompacta,
         expectedOk: expectedNames.every((n, i) => names[i] === n) && names.length === expectedNames.length
       };
     }, itemNames);
@@ -158,37 +164,59 @@ async function run() {
   const facturaPath = path.join(__dirname, '../resources/documents/factura_arca.html');
   const ncPath = path.join(__dirname, '../resources/documents/nota_credito_arca.html');
 
-  await testAsync('factura: 11 ítems — cobertura y sin solape', async () => {
-    const names = Array.from({ length: 11 }, (_, i) => `ITEM-${String(i + 1).padStart(3, '0')} Producto corto`);
-    const rowsByItem = buildFakeRows(11);
-    const { html, pageCount } = await pdfGenerator.construirHtmlMultipaginaARCA({
+  await testAsync('factura: 8 ítems — 1 hoja normal (sin compacta)', async () => {
+    const names = Array.from({ length: 8 }, (_, i) => `ITEM-${String(i + 1).padStart(3, '0')} Producto corto`);
+    const rowsByItem = buildFakeRows(8);
+    const { html, pageCount, densidad } = await pdfGenerator.construirHtmlMultipaginaARCA({
       templatePath: facturaPath,
       commonReplacements,
       rowsByItem,
       footerContent,
       tableHeader
     });
-    assert.ok(pageCount >= 1);
-    await assertLayoutHtml(html, pageCount, names);
+    assert.strictEqual(pageCount, 1);
+    assert.strictEqual(densidad, 'normal');
+    const report = await assertLayoutHtml(html, pageCount, names);
+    assert.strictEqual(report.hasCompacta, false);
   });
 
-  await testAsync('factura: 40 ítems — alturas > 0 y cobertura', async () => {
-    const names = Array.from({ length: 40 }, (_, i) => `ITEM-${String(i + 1).padStart(3, '0')} Producto corto`);
-    const rowsByItem = buildFakeRows(40);
-    const { html, pageCount } = await pdfGenerator.construirHtmlMultipaginaARCA({
+  await testAsync('factura: 12 ítems — 1 hoja compacta (evita huérfana)', async () => {
+    const names = Array.from({ length: 12 }, (_, i) => `ITEM-${String(i + 1).padStart(3, '0')} Producto corto`);
+    const rowsByItem = buildFakeRows(12);
+    const { html, pageCount, densidad } = await pdfGenerator.construirHtmlMultipaginaARCA({
       templatePath: facturaPath,
       commonReplacements,
       rowsByItem,
       footerContent,
       tableHeader
     });
-    assert.ok(pageCount >= 2, '40 ítems deben abrir más de 1 página');
-    // Con densidad nueva, 40 no deberían necesitar 5+ páginas (tope viejo 10 → 4+)
-    assert.ok(pageCount <= 4, `40 ítems en ≤4 páginas, got ${pageCount}`);
-    await assertLayoutHtml(html, pageCount, names);
+    assert.strictEqual(pageCount, 1, '12 ítems deben caber en 1 hoja compacta');
+    assert.strictEqual(densidad, 'compacta');
+    const report = await assertLayoutHtml(html, pageCount, names);
+    assert.strictEqual(report.hasCompacta, true);
   });
 
-  await testAsync('nota crédito: 20 ítems — footer solo última', async () => {
+  await testAsync('factura: 30 ítems — varias hojas, ninguna con 1 solo ítem', async () => {
+    const names = Array.from({ length: 30 }, (_, i) => `ITEM-${String(i + 1).padStart(3, '0')} Producto corto`);
+    const rowsByItem = buildFakeRows(30);
+    const { html, pageCount, densidad } = await pdfGenerator.construirHtmlMultipaginaARCA({
+      templatePath: facturaPath,
+      commonReplacements,
+      rowsByItem,
+      footerContent,
+      tableHeader
+    });
+    assert.ok(pageCount >= 2, '30 ítems abren más de 1 página');
+    assert.ok(pageCount <= 3, `30 ítems en ≤3 páginas, got ${pageCount}`);
+    assert.strictEqual(densidad, 'normal', 'varias hojas quedan en normal (más legible)');
+    const report = await assertLayoutHtml(html, pageCount, names);
+    report.rowCounts.forEach((count, i) => {
+      assert.ok(count !== 1, `página ${i} no debe tener un solo ítem (got ${count})`);
+      assert.ok(count > 0, `página ${i} no vacía`);
+    });
+  });
+
+  await testAsync('nota crédito: 20 ítems — footer solo última, sin hoja de 1', async () => {
     const names = Array.from({ length: 20 }, (_, i) => `NC-${String(i + 1).padStart(3, '0')} Producto corto`);
     const rowsByItem = buildFakeRows(20, { prefix: 'NC' });
     const { html, pageCount } = await pdfGenerator.construirHtmlMultipaginaARCA({
@@ -198,7 +226,12 @@ async function run() {
       footerContent,
       tableHeader
     });
-    await assertLayoutHtml(html, pageCount, names);
+    const report = await assertLayoutHtml(html, pageCount, names);
+    if (pageCount > 1) {
+      report.rowCounts.forEach((count, i) => {
+        assert.ok(count !== 1, `NC página ${i} no huérfana (got ${count})`);
+      });
+    }
   });
 
   if (process.env.SKIP_PDF_GENERATE === '1') {

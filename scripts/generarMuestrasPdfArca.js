@@ -75,7 +75,7 @@ function rows(n, { longName = false, withDiscount = false, prefix = 'PROD' } = {
 }
 
 async function generar(nombreArchivo, templatePath, rowsByItem) {
-  const { html, pageCount } = await pdfGenerator.construirHtmlMultipaginaARCA({
+  const { html, pageCount, densidad } = await pdfGenerator.construirHtmlMultipaginaARCA({
     templatePath,
     commonReplacements: common,
     rowsByItem,
@@ -85,7 +85,10 @@ async function generar(nombreArchivo, templatePath, rowsByItem) {
   const buffer = await pdfGenerator.generatePdfFromHtml(html);
   const out = path.join(outDir, nombreArchivo);
   fs.writeFileSync(out, buffer);
-  console.log(`✅ ${nombreArchivo} — ${rowsByItem.length} ítems, ${pageCount} página(s), ${buffer.length} bytes`);
+  console.log(
+    `✅ ${nombreArchivo} — ${rowsByItem.length} ítems, ${pageCount} página(s), ` +
+    `densidad=${densidad || 'normal'}, ${buffer.length} bytes`
+  );
 }
 
 async function main() {
@@ -94,7 +97,8 @@ async function main() {
 
   await generar('muestra-factura-1.pdf', factura, rows(1));
   await generar('muestra-factura-8.pdf', factura, rows(8));
-  await generar('muestra-factura-11.pdf', factura, rows(11));
+  await generar('muestra-factura-12.pdf', factura, rows(12));
+  await generar('muestra-factura-18.pdf', factura, rows(18));
   await generar('muestra-factura-30.pdf', factura, rows(30));
   await generar('muestra-factura-nombres-largos.pdf', factura, rows(15, { longName: true }));
   await generar('muestra-factura-descuento.pdf', factura, rows(12, { withDiscount: true }));
